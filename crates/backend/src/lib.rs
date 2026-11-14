@@ -112,6 +112,15 @@ pub trait Backend: Sized {
         false
     }
 
+    /// The driver protection value to map memory with when it lands in a range the guest set aside,
+    /// given what is known of the range: the kind of the surface it is for, if the guest described
+    /// one, and the driver's own word on the range. Some drivers back a surface from a plain heap
+    /// whose maps say nothing of the surface. A backend whose mappings depend on the kind adds its
+    /// word for it; the rest leave the value be.
+    fn protection_for_view(&self, _view: RangeView, driver_protection: u64) -> u64 {
+        driver_protection
+    }
+
     fn unmap(&mut self, unmap: &UnmapRequest) -> Result<(), BackendError>;
 
     /// Reads a vendor driver's private data for a new allocation.

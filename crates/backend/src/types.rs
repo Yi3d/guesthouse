@@ -208,6 +208,20 @@ impl MemoryKind {
     pub const PLAIN: Self = Self(0);
 }
 
+/// What the guest said of a range of addresses when it set the range aside.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RangeView {
+    /// The kind of the surface the range is for, or plain if the guest described none.
+    pub surface: MemoryKind,
+    /// The driver's own word on the range, as the vendor defines it, or zero if it gave none.
+    pub driver_protection: u64,
+}
+
+impl RangeView {
+    /// A range nothing was said of.
+    pub const NONE: Self = Self { surface: MemoryKind::PLAIN, driver_protection: 0 };
+}
+
 /// What an allocation's private data asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocationShape {

@@ -3,6 +3,7 @@
 //! for depth memory and told the packing, so a depth surface passes on the packing its driver chose.
 //! Blackwell's RM gives such memory the plain kind anyway, so nothing changes there.
 
+use crate::page_kind::{CLASS_S8, CLASS_S8Z24, CLASS_Z16, CLASS_Z24S8, CLASS_ZF32_X24S8};
 use guesthouse_backend::MemoryKind;
 
 /// Bit 1 of the usage byte marks a surface the guest's driver will use for depth or stencil.
@@ -15,6 +16,7 @@ const Z_FLOAT_SHIFT: u32 = 18;
 const PACKING_SHIFT: u32 = 19;
 const PACKING_MASK: u32 = 7;
 const DEPTH_UNKNOWN: u32 = 0;
+const DEPTH_8: u32 = 1;
 const DEPTH_16: u32 = 2;
 const DEPTH_32: u32 = 4;
 const DEPTH_64: u32 = 5;
@@ -120,10 +122,40 @@ pub fn memory_kind(rule: DepthKinds, usage: u8, format: u8, attributes: u32) -> 
     }
 }
 
+/// The depth class a map names for pages laid out as this kind of memory, in the numbering of
+/// [`crate::page_kind`]. `None` for plain memory, and for 32 bit float depth with no stencil, whose
+/// pages are of the plain kind.
+pub fn view_class(kind: MemoryKind) -> Option<u8> {
+    let bits = stated(kind.0)?;
+    let depth = bits >> DEPTH_SHIFT & DEPTH_MASK;
+    let packing = bits >> PACKING_SHIFT & PACKING_MASK;
+    let float = bits & Z_FLOAT != 0;
+    match (packing, float) {
+        (PACKING_Z24S8, false) if depth == DEPTH_8 => Some(CLASS_S8),
+        (PACKING_Z24S8 | PACKING_Z24X8, false) => Some(CLASS_Z24S8),
+        (PACKING_S8Z24 | PACKING_X8Z24, false) => Some(CLASS_S8Z24),
+        (PACKING_Z16, false) => Some(CLASS_Z16),
+        (PACKING_Z32_X24S8, true) => Some(CLASS_ZF32_X24S8),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use DepthKinds::{Always, AsStated};
+
+    #[test]
+    fn each_kind_of_depth_memory_names_its_class() {
+        let class_of = |format: u8| view_class(memory_kind(Always, NO_USAGE, format, 0));
+        assert_eq!(class_of(FORMAT_Z16), Some(CLASS_Z16));
+        assert_eq!(class_of(FORMAT_S8Z24), Some(CLASS_S8Z24));
+        assert_eq!(class_of(FORMAT_Z32_FLOAT_X24S8), Some(CLASS_ZF32_X24S8));
+        assert_eq!(class_of(FORMAT_Z32_FLOAT), None, "its pages are plain");
+        assert_eq!(view_class(MemoryKind::PLAIN), None);
+        assert_eq!(view_class(MemoryKind(packed(PACKING_Z24S8) | DEPTH_32)), Some(CLASS_Z24S8));
+        assert_eq!(view_class(MemoryKind(packed(PACKING_Z24S8) | DEPTH_8)), Some(CLASS_S8));
+    }
 
     const RENDER_TARGET: u8 = 0x11;
     const DEPTH_STENCIL: u8 = 0x12;
