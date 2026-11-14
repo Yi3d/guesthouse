@@ -80,6 +80,14 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if request.address != 0 {
             // A guest-chosen address, usually in a reserved range: map only the pages it asked for.
             log::debug!("map {handle:#x} at {:#x}: {first:#x} for {length:#x}", request.address);
+            if let Some((protection, driver_protection)) =
+                GuestMap::protections(message).filter(|said| said.1 != 0)
+            {
+                log::debug!(
+                    "the map at {:#x} came with protection {protection:#x}, driver protection {driver_protection:#x}",
+                    request.address
+                );
+            }
             let chosen = self.map_chosen(request.address, memory, first, length, space, handle);
             if let Err(error) = chosen {
                 log::warn!("mapping {handle:#x} at {:#x}: {error}", request.address);
@@ -152,6 +160,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// Notes a mapping. Which allocation was mapped first decides the order they are closed in.
     fn add_mapping(&mut self, handle: u32, mapping: Mapping) {
         let allocation = self.allocations.get_mut(&handle).expect("the caller has just used it");
+        if self.described_surfaces.get(&allocation.owner).is_some_and(|described| described.0 == handle) {
+            // It has an address of its own, so it describes no range to come.
+            self.described_surfaces.remove(&allocation.owner);
+        }
         if allocation.first_mapped.is_none() {
             allocation.first_mapped = Some(self.mapped_so_far);
             self.mapped_so_far += 1;
@@ -361,7 +373,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     fn apply_update(&mut self, operation: UpdateOperation, space: SpaceId) -> Result<(), BackendError> {
         match operation {
             UpdateOperation::Map { address, size, allocation, offset, driver_protection } => {
-                let driver_protection = driver_protection.unwrap_or(0);
+                let driver_protection =
+                    self.protection_in_range(address, space, driver_protection.unwrap_or(0));
                 let end = range_end(address, size)?;
                 range_end(offset, size)?;
                 if let Some((handle, current)) = self.mapping_at(address, space)

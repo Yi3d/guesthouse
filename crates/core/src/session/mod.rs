@@ -29,8 +29,8 @@ use crate::tables::{Allocation, Mapping, Queue, ReservedRange};
 use crate::timing::Timings;
 use copies::{CopyJob, Parked};
 use guesthouse_backend::{
-    AllocationShape, Backend, BackendError, GuestMemory, GuestSpan, HostServices, MemoryError, PagesView,
-    SharedSpan, SpaceId,
+    AllocationShape, Backend, BackendError, GuestMemory, GuestSpan, HostServices, MemoryError, MemoryKind,
+    PagesView, SharedSpan, SpaceId,
 };
 use guesthouse_messages::notice::Notice;
 use guesthouse_messages::wire::{Malformed, put_u32};
@@ -187,6 +187,12 @@ pub struct Session<B, M> {
     pub(crate) mapped_so_far: u64,
     /// In the order the guest asked, which decides who gets a freed range next.
     pub(crate) reserved_addresses: Vec<ReservedRange>,
+    /// The last allocation each process made, if its memory has a kind of its own and nothing has
+    /// mapped it yet: the process, then the handle and the kind. See `described_surface`.
+    pub(crate) described_surfaces: HashMap<u32, (u32, MemoryKind)>,
+    /// The sizes of the ranges a process set aside for a described surface, and the surface's kind.
+    /// A probe, see `described_surface`.
+    pub(crate) surface_range_sizes: HashMap<(u32, u64), MemoryKind>,
 
     pub(crate) copies: VecDeque<CopyJob>,
     pub(crate) next_copy: u64,
@@ -253,6 +259,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             placed_mappings: HashMap::new(),
             mapped_so_far: 0,
             reserved_addresses: Vec::new(),
+            described_surfaces: HashMap::new(),
+            surface_range_sizes: HashMap::new(),
             copies: VecDeque::new(),
             next_copy: 0,
             parked: VecDeque::new(),

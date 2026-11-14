@@ -198,6 +198,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             }
             self.allocations.insert(handle, allocation);
             self.resources.get_mut(&resource).expect("made above").push(handle);
+            // Only the newest allocation can be the description of the range asked for next.
+            match shape.kind {
+                MemoryKind::PLAIN => self.described_surfaces.remove(&owner),
+                kind => self.described_surfaces.insert(owner, (handle, kind)),
+            };
         }
         CreateAllocationAnswer::finish(out);
         Ok(())

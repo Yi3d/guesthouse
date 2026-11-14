@@ -1,6 +1,6 @@
 //! Allocations, queues and the other per-guest records.
 
-use guesthouse_backend::{MemoryId, MemoryKind, PagesView, SpaceId, SurfaceShape};
+use guesthouse_backend::{MemoryId, MemoryKind, PagesView, RangeView, SpaceId, SurfaceShape};
 use std::collections::VecDeque;
 
 /// Where an allocation is mapped in one address space.
@@ -104,4 +104,7 @@ pub struct ReservedRange {
     pub space: SpaceId,
     /// At an address the guest asked for and not one handed out, so it goes back differently.
     pub placed: bool,
+    /// What the guest said the range is for. Plain memory mapped here is used that way, whatever
+    /// the heap it comes from was made as.
+    pub view: RangeView,
 }

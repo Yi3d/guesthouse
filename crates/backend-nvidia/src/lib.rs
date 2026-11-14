@@ -42,8 +42,8 @@ use channel::{ListChannel, VideoEngine};
 use encode_sessions::EncodeSessions;
 use guesthouse_backend::{
     AdapterFacts, AllocationShape, Backend, BackendError, Doorbell, DriverSurvey, GpuRange, GuestBooks,
-    HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName, RegistryValue, Setup,
-    SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status, SurfaceShape, UnmapRequest,
+    HostServices, MapRequest, MemoryId, MemoryKind, PciCard, RangeView, Refusal, RegistryName, RegistryValue,
+    Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status, SurfaceShape, UnmapRequest,
     VendorQuery, Work, WorkStart,
 };
 use inf::{INF_NAME, Inf, read_infs};
@@ -456,6 +456,18 @@ impl<R: Rm + OpenRm> Backend for NvidiaBackend<R> {
 
     fn maps_differently(&self, first: u64, second: u64) -> bool {
         page_kind::kinds_differ(self.generation.page_kinds, first, second)
+    }
+
+    fn protection_for_view(&self, view: RangeView, driver_protection: u64) -> u64 {
+        if self.generation.page_kinds != page_kind::PageKinds::InEntries {
+            return driver_protection;
+        }
+        // The driver's own word on the range comes first, then the surface it described.
+        let named = page_kind::known_class(view.driver_protection);
+        match named.or_else(|| depth::view_class(view.surface)) {
+            Some(class) => page_kind::with_depth_class(driver_protection, class),
+            None => driver_protection,
+        }
     }
 
     fn unmap(&mut self, unmap: &UnmapRequest) -> Result<(), BackendError> {

@@ -1159,6 +1159,98 @@ mod mappings {
         assert_eq!(held.map(|m| m.driver_protection), Some(0x0400));
     }
 
+    /// Private data for an allocation whose memory has a kind of its own, as a depth surface's has.
+    fn of_kind(size: u64, kind: u32) -> Vec<u8> {
+        let mut data = private(size);
+        data.resize(36, 0);
+        set_u32(&mut data, 32, kind);
+        data
+    }
+
+    fn reserve(session: &mut TestSession, size: u64) -> u64 {
+        let mut request = message(Command::ReserveGpuAddresses, 0x40);
+        set_u64(&mut request, 0x38, size);
+        u64_at(&send(session, &request), 0).unwrap()
+    }
+
+    /// The driver protection the backend was given for the last map at an address.
+    fn mapped_with(session: &mut TestSession, address: u64) -> Option<u64> {
+        let mapped = &session.backend_mut().mapped_protections;
+        mapped.iter().rev().find(|map| map.0 == address).map(|map| map.1)
+    }
+
+    #[test]
+    fn a_heap_mapped_into_a_described_surfaces_range_is_mapped_as_that_surface() {
+        let mut session = session();
+        let (_, heap) = allocate(&mut session, private(0x20_0000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        // The driver says what the image is, sets a range aside for it, then maps the heap there.
+        allocate(&mut session, of_kind(0x1_0000, 5));
+        let image = reserve(&mut session, 0x3_0000);
+        let other = reserve(&mut session, 0x2_0000);
+        update(&mut session, sync, 0, &[protected(image, 0x1_0000, heap, 0, 1)]);
+        update(&mut session, sync, 1, &[protected(image + 0x1_0000, 0x1_0000, heap, 0x1_0000, 1)]);
+        update(&mut session, sync, 2, &[protected(other, 0x1_0000, heap, 0x2_0000, 1)]);
+        assert_eq!(mapped_with(&mut session, image), Some(0x0501));
+        assert_eq!(mapped_with(&mut session, image + 0x1_0000), Some(0x0501), "every piece of it");
+        assert_eq!(mapped_with(&mut session, other), Some(1), "the next range is not the image's");
+    }
+
+    #[test]
+    fn a_later_range_of_a_described_ones_size_is_for_the_same_kind_of_surface() {
+        let mut session = session();
+        let (_, heap) = allocate(&mut session, private(0x20_0000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        allocate(&mut session, of_kind(0x1_0000, 5));
+        reserve(&mut session, 0x13_0000);
+        allocate(&mut session, of_kind(0x1_0000, 5));
+        reserve(&mut session, 0x3_0000);
+        allocate(&mut session, private(0x1_0000));
+        let second = reserve(&mut session, 0x13_0000);
+        let small = reserve(&mut session, 0x3_0000);
+        update(&mut session, sync, 0, &[protected(second, 0x1_0000, heap, 0, 1)]);
+        update(&mut session, sync, 1, &[protected(small, 0x1_0000, heap, 0x1_0000, 1)]);
+        assert_eq!(mapped_with(&mut session, second), Some(0x0501));
+        assert_eq!(mapped_with(&mut session, small), Some(1), "too common a size to go by");
+    }
+
+    #[test]
+    fn a_ranges_own_driver_protection_reaches_the_maps_made_in_it() {
+        let mut session = session();
+        let (_, heap) = allocate(&mut session, private(0x20_0000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        let mut request = message(Command::ReserveGpuAddresses, 0x50);
+        set_u64(&mut request, 0x38, 0x2_0000);
+        set_u64(&mut request, 0x48, 0x0300);
+        let range = u64_at(&send(&mut session, &request), 0).unwrap();
+        update(&mut session, sync, 0, &[protected(range, 0x1_0000, heap, 0, 1)]);
+        assert_eq!(mapped_with(&mut session, range), Some(0x0301));
+    }
+
+    #[test]
+    fn a_surface_with_an_address_of_its_own_describes_no_range() {
+        let mut session = session();
+        let (_, heap) = allocate(&mut session, private(0x20_0000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        let (_, depth) = allocate(&mut session, of_kind(0x1_0000, 5));
+        map(&mut session, depth, 0, 0, 16);
+        let range = reserve(&mut session, 0x2_0000);
+        update(&mut session, sync, 0, &[protected(range, 0x1_0000, heap, 0, 1)]);
+        assert_eq!(mapped_with(&mut session, range), Some(1));
+    }
+
+    #[test]
+    fn only_the_newest_allocation_describes_the_range_asked_for_next() {
+        let mut session = session();
+        let (_, heap) = allocate(&mut session, private(0x20_0000));
+        let (sync, _, _) = create_fence(&mut session, 0);
+        allocate(&mut session, of_kind(0x1_0000, 5));
+        allocate(&mut session, private(0x1_0000));
+        let range = reserve(&mut session, 0x2_0000);
+        update(&mut session, sync, 0, &[protected(range, 0x1_0000, heap, 0, 1)]);
+        assert_eq!(mapped_with(&mut session, range), Some(1));
+    }
+
     #[test]
     fn repeating_a_protected_map_is_skipped_but_another_value_maps_again() {
         let mut session = session();

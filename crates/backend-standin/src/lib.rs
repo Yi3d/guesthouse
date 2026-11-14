@@ -15,9 +15,9 @@ mod random_messages;
 
 use guesthouse_backend::{
     AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
-    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
-    RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface, Status,
-    SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
+    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, RangeView, Refusal,
+    RegistryName, RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, StandardSurface,
+    Status, SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
 pub use memory::SparseMemory;
 pub use random_messages::RandomMessages;
@@ -264,6 +264,10 @@ const PITCH_FIELD: usize = 20;
 const TILING_FIELD: usize = 24;
 /// Where private data can state a colour word. Zero means the usual one.
 const COLOUR_FIELD: usize = 28;
+/// Where private data can ask for memory of a kind of its own. Zero means plain.
+const KIND_FIELD: usize = 32;
+/// Where a view's kind goes in the driver protection value this pretend vendor maps with.
+pub const VIEW_KIND_SHIFT: u32 = 8;
 /// The narrowest and shortest block of a pretend tiled surface, and the tallest log2 there is.
 const TILE_WIDTH: u64 = 64;
 const TILE_ROWS: u64 = 8;
@@ -367,6 +371,10 @@ impl Backend for StandIn {
         Ok(())
     }
 
+    fn protection_for_view(&self, view: RangeView, driver_protection: u64) -> u64 {
+        driver_protection | u64::from(view.surface.0) << VIEW_KIND_SHIFT | view.driver_protection
+    }
+
     fn unmap(&mut self, unmap: &UnmapRequest) -> Result<(), BackendError> {
         let Some(space) = self.spaces.get_mut(&unmap.space) else {
             return Err(BackendError::new("this address space is closed"));
@@ -405,7 +413,7 @@ impl Backend for StandIn {
             exact_size: size,
             surface,
             gpu_cached: private.get(16).is_some_and(|&byte| byte != 0),
-            kind: MemoryKind::PLAIN,
+            kind: MemoryKind(field(private, KIND_FIELD)),
         }
     }
 
