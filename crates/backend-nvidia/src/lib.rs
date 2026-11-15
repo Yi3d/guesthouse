@@ -177,6 +177,14 @@ impl<R: Rm> NvidiaBackend<R> {
         self.device.graphics_timeslice_micros = micros;
     }
 
+    /// Where the guest's own bus has the GPU. NVIDIA's driver in the guest asks the RM where the card
+    /// is, and hears the host's bus and slot, which is not where Windows there finds its adapter. A
+    /// library that pairs the two by their place then finds no device. With this set, the answer is
+    /// the guest's place. A lab switch for now: nothing tells the daemon the place by itself.
+    pub fn set_guest_pci_place(&mut self, bus: u16, slot: u16) {
+        self.device.guest_pci_place = Some((bus, slot));
+    }
+
     /// Reads the card and works out everything the guest will be told. Nothing here changes the card.
     pub fn start(
         mut device: Device<R>,

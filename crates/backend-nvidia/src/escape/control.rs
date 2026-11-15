@@ -4,7 +4,8 @@
 
 use super::{EscapeFacts, get, processes, pstate, put, time_pairs};
 use crate::rm::classes::{
-    BUS_ENTRIES_THAT_CLEAR, CONTROL_GET_CLASS_ENGINE, CONTROL_GET_PROBED_IDS, ENGINE_GRAPHICS,
+    BUS_ENTRIES_THAT_CLEAR, CONTROL_GET_CLASS_ENGINE, CONTROL_GET_GPU_PCI_INFO, CONTROL_GET_PROBED_IDS,
+    ENGINE_GRAPHICS,
 };
 use crate::rm::device::Device;
 use crate::rm::{Rm, RmError, STATUS_INVALID_PARAM_STRUCT, STATUS_NOT_SUPPORTED};
@@ -33,6 +34,21 @@ const SENSOR_CONTROL_CATEGORIES: [u32; 12] =
     [0x05, 0x85, 0xC5, 0x10, 0x90, 0xD0, 0x20, 0xA0, 0xE0, 0x32, 0xB2, 0xF2];
 
 const CONTROL_BUS_INFO: u32 = crate::record::card::BUS_INFO.0;
+
+/// `NV0000_CTRL_GPU_GET_PCI_INFO_PARAMS` after the GPU's ID: the domain, then 16-bit bus and slot.
+const PCI_PLACE_DOMAIN: usize = 4;
+const PCI_PLACE_BUS: usize = 8;
+const PCI_PLACE_SLOT: usize = 10;
+
+/// Says the card is where the guest's own bus has it, in domain 0.
+fn guest_pci_place((bus, slot): (u16, u16), params: &mut [u8]) {
+    put(params, PCI_PLACE_DOMAIN, 0);
+    for (at, value) in [(PCI_PLACE_BUS, bus), (PCI_PLACE_SLOT, slot)] {
+        if let Some(field) = params.get_mut(at..at + 2) {
+            field.copy_from_slice(&value.to_le_bytes());
+        }
+    }
+}
 const BUS_LIST_SIZE: usize = 0;
 const BUS_LIST: usize = 4;
 const BUS_ENTRY_SIZE: usize = 8;
@@ -176,6 +192,13 @@ pub(super) fn run<R: Rm>(
         }
         None => device.rm.control(target, command, params)?,
     };
+    if command == CONTROL_GET_GPU_PCI_INFO
+        && status == 0
+        && let Some(place) = device.guest_pci_place
+    {
+        guest_pci_place(place, params);
+    }
+    log::debug!("control {command:#x} ran for the guest, status {status:#x}");
     put(data, CONTROL_STATUS, status);
     Ok(())
 }
@@ -186,7 +209,7 @@ mod tests {
     use super::super::tests::{NO_FACTS, device, escape};
     use super::*;
     use crate::profile::{BLACKWELL, GUEST_617, HOST_615, guest_channel_classes};
-    use crate::rm::fake::{Call, FakeRm};
+    use crate::rm::fake::{Call, FakeGpu, FakeRm};
     use crate::sensors::Snapshot;
     use guesthouse_backend::{GuestBooks, ProcessMemory};
 
@@ -219,6 +242,45 @@ mod tests {
         });
         assert_eq!(ran, Some((device.subdevice, GET_NAME_STRING)));
         assert_eq!(get(&data, CONTROL_STATUS), Some(crate::rm::STATUS_NOT_SUPPORTED));
+    }
+
+    /// The test device, with the RM knowing its card at 0000:03:00.0.
+    fn with_card_at_bus_3() -> Device<FakeRm> {
+        let mut device = device();
+        let address = guesthouse_backend::PciAddress { domain: 0, bus: 3, device: 0, function: 0 };
+        let id = device.gpu_id().unwrap();
+        device.rm.gpus = vec![FakeGpu { id, address, minor: 0, device_instance: 0, attached: true }];
+        device
+    }
+
+    #[test]
+    fn the_card_is_where_the_host_has_it_unless_the_guests_place_is_known() {
+        const PCI_INFO_SIZE: usize = 12;
+        let mut device = with_card_at_bus_3();
+        let mut data = control(CONTROL_GET_GPU_PCI_INFO, PCI_INFO_SIZE);
+        put(&mut data, CONTROL_PARAMS, device.gpu_id().unwrap());
+        run(&mut device, &NO_FACTS, &mut data).unwrap();
+        assert_eq!(get(&data, CONTROL_STATUS), Some(0));
+        assert_eq!(get(&data, CONTROL_PARAMS + PCI_PLACE_BUS), Some(3), "bus 3, slot 0: the host's");
+
+        device.guest_pci_place = Some((0, 0x10));
+        let mut data = control(CONTROL_GET_GPU_PCI_INFO, PCI_INFO_SIZE);
+        put(&mut data, CONTROL_PARAMS, device.gpu_id().unwrap());
+        run(&mut device, &NO_FACTS, &mut data).unwrap();
+        assert_eq!(get(&data, CONTROL_STATUS), Some(0));
+        assert_eq!(get(&data, CONTROL_PARAMS + PCI_PLACE_DOMAIN), Some(0));
+        assert_eq!(get(&data, CONTROL_PARAMS + PCI_PLACE_BUS), Some(0x0010_0000), "bus 0, slot 0x10");
+    }
+
+    #[test]
+    fn another_gpus_place_is_still_refused_when_the_guests_place_is_known() {
+        let mut device = with_card_at_bus_3();
+        device.guest_pci_place = Some((0, 0x10));
+        let mut data = control(CONTROL_GET_GPU_PCI_INFO, 12);
+        put(&mut data, CONTROL_PARAMS, device.gpu_id().unwrap() + 1);
+        run(&mut device, &NO_FACTS, &mut data).unwrap();
+        assert_eq!(get(&data, CONTROL_STATUS), Some(crate::rm::STATUS_NOT_SUPPORTED));
+        assert_eq!(get(&data, CONTROL_PARAMS + PCI_PLACE_BUS), Some(0));
     }
 
     #[test]

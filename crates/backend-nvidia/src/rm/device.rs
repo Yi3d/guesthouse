@@ -84,6 +84,9 @@ pub struct Device<R> {
     pub rm: R,
     /// How long a graphics channel group may hold the GPU. 0 leaves the RM's own choice.
     pub graphics_timeslice_micros: u64,
+    /// The bus and slot the guest's own Windows has the GPU at, if the daemon was told. The guest's
+    /// driver then hears that place and not the host's, so both name one device.
+    pub guest_pci_place: Option<(u16, u16)>,
     pub client: Handle,
     pub device: Handle,
     pub subdevice: Handle,
@@ -135,6 +138,7 @@ impl<R: Rm> Device<R> {
         RmError::check(|| format!("class {SUBDEVICE:#x}"), status)?;
         Ok(Self {
             graphics_timeslice_micros: 0,
+            guest_pci_place: None,
             rm,
             client,
             device: DEVICE_HANDLE,

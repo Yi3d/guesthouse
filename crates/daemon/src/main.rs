@@ -133,6 +133,10 @@ fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::
     if let Some(micros) = timeslice(env::var("GUESTHOUSE_TIMESLICE_US").ok().as_deref()) {
         backend.set_graphics_timeslice(micros);
     }
+    if let Some((bus, slot)) = guest_pci_place(env::var(GUEST_PCI_VARIABLE).ok().as_deref()) {
+        log::info!("the guest's driver is told its GPU is at bus {bus:#x}, slot {slot:#x}");
+        backend.set_guest_pci_place(bus, slot);
+    }
     let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
     let config = Config::new(limits);
     let mut session = Session::new(backend, memory, config);
@@ -144,6 +148,29 @@ fn serve_nvidia(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::
     lock_calls(locked)?;
     server.run()?;
     Ok(())
+}
+
+/// A lab switch: where the guest's own bus has the GPU, as `BUS:SLOT` in hexadecimal, like `0:10`.
+/// Windows shows it in the device's properties as its location.
+#[cfg(feature = "nvidia")]
+const GUEST_PCI_VARIABLE: &str = "GUESTHOUSE_GUEST_PCI";
+/// A PCI bus has 32 slots.
+#[cfg(feature = "nvidia")]
+const PCI_SLOTS: u16 = 32;
+
+/// The bus and slot, if the setting is there and makes sense.
+#[cfg(feature = "nvidia")]
+fn guest_pci_place(text: Option<&str>) -> Option<(u16, u16)> {
+    let text = text?;
+    let place = text.split_once(':').and_then(|(bus, slot)| {
+        let bus = u16::from_str_radix(bus.trim(), 16).ok().filter(|&bus| bus <= 0xFF)?;
+        let slot = u16::from_str_radix(slot.trim(), 16).ok().filter(|&slot| slot < PCI_SLOTS)?;
+        Some((bus, slot))
+    });
+    if place.is_none() {
+        log::warn!("{GUEST_PCI_VARIABLE} is {text}, which isn't a bus and a slot like 0:10");
+    }
+    place
 }
 
 /// A timeslice in microseconds, if the setting is there and makes sense.
@@ -199,4 +226,23 @@ fn serve(slot: Slot, project: PathBuf) -> Result<(), Box<dyn std::error::Error>>
     lock_calls(locked)?;
     server.run()?;
     Ok(())
+}
+
+#[cfg(all(test, feature = "nvidia"))]
+mod tests {
+    use super::guest_pci_place;
+
+    #[test]
+    fn the_guests_place_is_a_bus_and_a_slot_in_hexadecimal() {
+        assert_eq!(guest_pci_place(Some("0:10")), Some((0, 0x10)));
+        assert_eq!(guest_pci_place(Some("01:1f")), Some((1, 0x1F)));
+        assert_eq!(guest_pci_place(None), None);
+    }
+
+    #[test]
+    fn a_place_no_bus_has_is_left_out() {
+        for text in ["", "10", "0:20", "100:0", "0:1:2", "bus:slot"] {
+            assert_eq!(guest_pci_place(Some(text)), None, "{text}");
+        }
+    }
 }
