@@ -46,11 +46,15 @@ const fn packed(packing: u32) -> u32 {
 // out in. A typeless surface a program may bind for depth gets one of these too.
 const FORMAT_Z16: u8 = 0x16;
 const FORMAT_S8Z24: u8 = 0x17;
+/// A second 24 bit depth format. NVIDIA's Vulkan driver describes a depth image with it on a Turing
+/// card, and asks for the packing of the one above.
+const FORMAT_DEPTH_24: u8 = 0x19;
 const FORMAT_Z32_FLOAT: u8 = 0x38;
 const FORMAT_Z32_FLOAT_X24S8: u8 = 0x39;
-const FORMAT_PACKINGS: [(u8, u32); 4] = [
+const FORMAT_PACKINGS: [(u8, u32); 5] = [
     (FORMAT_Z16, packed(PACKING_Z16) | DEPTH_16),
     (FORMAT_S8Z24, packed(PACKING_S8Z24) | DEPTH_32),
+    (FORMAT_DEPTH_24, packed(PACKING_S8Z24) | DEPTH_32),
     (FORMAT_Z32_FLOAT, Z_FLOAT | packed(PACKING_Z32) | DEPTH_32),
     (FORMAT_Z32_FLOAT_X24S8, Z_FLOAT | packed(PACKING_Z32_X24S8) | DEPTH_64),
 ];
@@ -190,6 +194,17 @@ mod tests {
             let multisampled = asked | FOUR_SAMPLES | COMPRESS_ANY;
             assert_eq!(memory_kind(Always, DEPTH_STENCIL, format, multisampled), MemoryKind(kind));
         }
+    }
+
+    #[test]
+    fn a_vulkan_depth_image_on_turing_is_known_by_its_format() {
+        // As an RTX 2080's log has it: the image's description, with a usage that marks nothing.
+        const DESCRIPTION: u8 = 0x01;
+        let kind = memory_kind(Always, DESCRIPTION, FORMAT_DEPTH_24, ADA_D24S8);
+        assert_eq!(kind, MemoryKind(0x08_0004));
+        assert_eq!(view_class(kind), Some(crate::page_kind::CLASS_S8Z24));
+        assert_eq!(memory_kind(Always, DESCRIPTION, FORMAT_DEPTH_24, 0), MemoryKind(0x08_0004));
+        assert_eq!(memory_kind(AsStated, DESCRIPTION, FORMAT_DEPTH_24, ADA_D24S8), MemoryKind::PLAIN);
     }
 
     #[test]
