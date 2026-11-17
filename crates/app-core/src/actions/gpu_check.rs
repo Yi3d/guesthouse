@@ -2,10 +2,12 @@
 //! basic display, so nothing else in a start would notice.
 
 use super::Task;
+use super::identity::after_failed_gpu;
 use crate::daemon;
 use crate::failure::{Failure, Result};
 use crate::gpu_identity::{MICROSOFT_RENDER, identity_of};
 use crate::gpu_maker::GpuMaker;
+use crate::log::write_log;
 use std::fs;
 use std::time::Duration;
 
@@ -15,6 +17,8 @@ const CHECK_ATTEMPTS: u32 = 10;
 const CHECK_POLL: Duration = Duration::from_secs(3);
 const CHECK_ANSWER_SECONDS: u64 = 15;
 const NO_GPU: &str = "Windows started without its GPU, so the VM was turned off.";
+const KEPT_WITHOUT_GPU: &str = "Windows started without its GPU. The VM was left running on Windows' basic display, as \
+                                Intel's support is at a test stage, so dxdiag can run and a bug report can be sent from it.";
 const DAEMON_ERROR_MARK: &str = "ERROR ";
 
 /// The virtual render device, under any identity the QEMU patch can give it.
@@ -59,20 +63,56 @@ fn without_time(message: &str) -> &str {
     }
 }
 
-pub(super) fn check_gpu(task: &Task) -> Result<()> {
+/// `said`, with the daemon's reason after it if it gave one.
+fn with_daemons_reason(task: &Task, said: &str) -> String {
+    match daemons_reason(task) {
+        Some(reason) => format!("{said} The daemon said: {reason}"),
+        None => said.to_owned(),
+    }
+}
+
+pub(super) fn gpu_found(task: &Task) -> bool {
     task.step("Checking the GPU");
-    for attempt in 0..CHECK_ATTEMPTS {
+    (0..CHECK_ATTEMPTS).any(|attempt| {
         if attempt > 0 {
             task.sleep(CHECK_POLL);
         }
-        if working_devices(task).is_some_and(|count| count > 0) {
-            return Ok(());
-        }
+        working_devices(task).is_some_and(|count| count > 0)
+    })
+}
+
+/// Whether Windows got its GPU, for a start that goes on either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gpu {
+    Working,
+    /// Windows is up without it, and the machine stays running: see [`runs_without_gpu`].
+    Missing,
+}
+
+/// Whether a machine whose Windows started without its GPU is left running, by its card's maker.
+/// Without the GPU, a start on NVIDIA or AMD has failed, so the VM is turned off. Intel is at a test
+/// stage where nothing runs on the card yet, and what a run is for is the reports: Windows on its
+/// basic display can still run dxdiag and answer a bug report, so the VM stays up for them.
+pub(super) fn runs_without_gpu(maker: Option<GpuMaker>) -> bool {
+    match maker {
+        Some(GpuMaker::Intel) => true,
+        Some(GpuMaker::Nvidia | GpuMaker::Amd) | None => false,
     }
-    Err(Failure(match daemons_reason(task) {
-        Some(reason) => format!("{NO_GPU} The daemon said: {reason}"),
-        None => NO_GPU.to_owned(),
-    }))
+}
+
+/// Checks the GPU after a boot. Without it, the next start falls back to Microsoft's vendor ID as
+/// always, and then the start fails, or for a maker that runs without its GPU, goes on and says why.
+pub(super) fn confirm_gpu(task: &mut Task) -> Result<Gpu> {
+    if gpu_found(task) {
+        return Ok(Gpu::Working);
+    }
+    if !runs_without_gpu(task.machine.windows_maker()) {
+        return Err(after_failed_gpu(task, Failure(with_daemons_reason(task, NO_GPU))));
+    }
+    let said = after_failed_gpu(task, Failure(with_daemons_reason(task, KEPT_WITHOUT_GPU))).0;
+    write_log(task.context, &said)?;
+    task.error = said;
+    Ok(Gpu::Missing)
 }
 
 #[cfg(test)]

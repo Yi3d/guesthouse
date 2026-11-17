@@ -5,8 +5,7 @@
 
 use super::Task;
 use super::desktop::{boots, wait_for_desktop};
-use super::gpu_check::check_gpu;
-use super::identity::after_failed_gpu;
+use super::gpu_check::{Gpu, confirm_gpu};
 use crate::failure::{Failure, Result};
 use crate::gpu_identity::{maker_name, read_state, write_state};
 use crate::log::write_log;
@@ -38,10 +37,10 @@ fn wait_for_new_boot(task: &Task, before: usize) -> bool {
 }
 
 /// Restarts Windows if this is its first start on its maker's number, and waits for the desktop again.
-pub(super) fn restart_after_switch(task: &mut Task) -> Result<()> {
+pub(super) fn restart_after_switch(task: &mut Task) -> Result<Gpu> {
     let mut state = read_state(task.context, &task.machine);
     if !state.restarts_windows() {
-        return Ok(());
+        return Ok(Gpu::Working);
     }
     task.step(&restarting(&task.machine));
     let before = boots(task.context, None);
@@ -53,13 +52,14 @@ pub(super) fn restart_after_switch(task: &mut Task) -> Result<()> {
     if !restarted {
         write_log(task.context, "gpu identity: Windows did not restart when asked")?;
         task.error = DID_NOT_RESTART.to_owned();
-        return Ok(());
+        // The GPU was there before the restart was asked for.
+        return Ok(Gpu::Working);
     }
     task.step("Waiting for the desktop");
     if !wait_for_desktop(task) {
         return Err(Failure::new(DESKTOP_GONE));
     }
-    check_gpu(task).map_err(|failure| after_failed_gpu(task, failure))
+    confirm_gpu(task)
 }
 
 #[cfg(test)]

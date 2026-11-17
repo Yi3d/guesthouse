@@ -20,9 +20,9 @@ mod window_speed;
 use amd_files::{bring_amd_driver_up_to_date, complete_host_driver};
 pub use desktop::{apply_share, boots, rebooted};
 use desktop::{note_boot, set_up_desktop, wait_for_desktop};
-use gpu_check::check_gpu;
+use gpu_check::{Gpu, confirm_gpu};
 use guest_files::{place_driver_files, place_profile_store, place_system_files};
-use identity::{after_failed_gpu, set_up_identity};
+use identity::set_up_identity;
 use identity_restart::restart_after_switch;
 use identity_switch::{new_vm_needed, stop_for_new_identity};
 pub use install::{
@@ -196,10 +196,15 @@ fn start_gpu_vm(task: &mut Task) -> Result<PciIdentity> {
 
 /// The guest has answered, so this takes it from there to a desktop someone can use.
 fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
-    get_gpu_ready(task)?;
+    // A guest left running without its GPU stays as it came up, for the reports it's kept for.
+    if get_gpu_ready(task)? == Gpu::Missing {
+        return Ok(());
+    }
     if new_vm_needed(shown, &read_state(task.context, &task.machine), &task.machine) {
         start_again_for_new_identity(task)?;
-        get_gpu_ready(task)?;
+        if get_gpu_ready(task)? == Gpu::Missing {
+            return Ok(());
+        }
     }
     set_up_desktop(task)?;
     apply_window_speed(task)?;
@@ -225,15 +230,16 @@ fn place_files_for_maker(task: &mut Task) -> Result<()> {
 
 /// Up to the point where it's known which identity the VM should show, before any work on a desktop
 /// that might be about to go.
-fn get_gpu_ready(task: &mut Task) -> Result<()> {
+fn get_gpu_ready(task: &mut Task) -> Result<Gpu> {
     task.step("Waiting for the desktop");
     if !wait_for_desktop(task) {
         return Err(Failure::new("Windows started, but its desktop never came up."));
     }
-    check_gpu(task).map_err(|failure| after_failed_gpu(task, failure))?;
-    restart_after_switch(task)?;
+    if confirm_gpu(task)? == Gpu::Missing || restart_after_switch(task)? == Gpu::Missing {
+        return Ok(Gpu::Missing);
+    }
     set_up_identity(task);
-    Ok(())
+    Ok(Gpu::Working)
 }
 
 /// The same start goes on in a new VM, which shows the card maker's number. What the first one said is about a

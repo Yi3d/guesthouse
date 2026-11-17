@@ -1,9 +1,11 @@
 use super::desktop::{BOOTS_FILE, SERIAL_FILE};
+use super::gpu_check::gpu_found;
 use super::guest_files::{place_driver_files, place_profile_store};
 use super::window_speed::apply_window_speed;
 use super::*;
 use crate::agent::stand_in::ScriptedAgent;
 use crate::clock::Clock;
+use crate::gpu_identity::{IdentityState, Shown, read_state, write_state};
 use crate::machine::Kind;
 use crate::processes::stand_in::fake_process;
 use crate::slots;
@@ -240,6 +242,48 @@ fn a_guest_with_no_gpu_fails_the_start_says_so_and_turns_off() {
     assert_eq!(host.said(), ["start gpu", "stop 30"]);
 }
 
+#[test]
+fn an_intel_guest_with_no_gpu_is_left_running_and_says_why() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let mut vm = guest_saying(&mut context, "gpu working 0\n");
+    vm.use_windows_card(GpuMaker::Intel, "0000:03:00.0");
+    fs::write(context.run_folder(None).join(crate::daemon::OUTPUT_FILE), "ERROR no xe engine\n").unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", vm);
+    assert_eq!(boot(&mut task), Ok(()));
+    assert_eq!(host.said(), ["start gpu"], "nothing turned it off");
+    for said in [&task.error, &fs::read_to_string(context.paths.log_file()).unwrap()] {
+        assert!(said.contains("without its GPU") && said.contains("left running"), "{said}");
+        assert!(said.contains("no xe engine"), "{said}");
+    }
+}
+
+#[test]
+fn an_intel_guest_shown_intels_number_still_falls_back_to_microsofts() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let mut vm = guest_saying(&mut context, "gpu working 0\n");
+    vm.use_windows_card(GpuMaker::Intel, "0000:03:00.0");
+    let package_vendor = crate::gpu_identity::INTEL_RENDER.vendor;
+    let state = IdentityState { shown: Shown::Maker, package_vendor, ..IdentityState::default() };
+    write_state(&context, &vm, &state).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", vm.clone());
+    assert_eq!(boot(&mut task), Ok(()));
+    assert!(task.error.contains("Microsoft's vendor ID again"), "{}", task.error);
+    assert_eq!(read_state(&context, &vm).shown, Shown::Microsoft);
+    assert_eq!(host.said(), ["start gpu"]);
+}
+
+#[test]
+fn only_intel_runs_without_its_gpu() {
+    use super::gpu_check::runs_without_gpu;
+    assert!(runs_without_gpu(Some(GpuMaker::Intel)));
+    assert!(!runs_without_gpu(Some(GpuMaker::Nvidia)) && !runs_without_gpu(Some(GpuMaker::Amd)));
+    assert!(!runs_without_gpu(None));
+}
+
 /// What a start says when the daemon's output file holds `log` and the guest has no GPU.
 fn failure_with_daemon_saying(log: &str) -> String {
     let scratch = Scratch::new();
@@ -286,7 +330,7 @@ fn a_gpu_that_is_a_moment_late_is_waited_for() {
     context.agent = Arc::new(ScriptedAgent::answering(&["gpu working 0\n", "", "gpu working 1\n"]));
     let host = RecordingHost::default();
     let task = Task::new(&context, &host, "start", vm);
-    assert_eq!(check_gpu(&task), Ok(()));
+    assert!(gpu_found(&task));
 }
 
 #[test]
