@@ -980,4 +980,93 @@ mod tests {
         assert!(ubuntu.problems(0).iter().any(|text| text.contains("Windows and plain machines")));
         assert!(Machine { kind: Kind::Plain, drives: vec![drive("a")], ..sample() }.problems(0).is_empty());
     }
+
+    /// A machine.json as the Intel test build 0.4.1-intel.2 wrote it: it has `gpu_maker`, and none of
+    /// the fields that came to main after that build was cut.
+    const FROM_INTEL_TEST_BUILD: &str = r#"{
+  "name": "Arc",
+  "disk": "/home/tester/.local/share/guesthouse/machines/arc/disk.qcow2",
+  "vars": "/home/tester/.local/share/guesthouse/machines/arc/OVMF_VARS.fd",
+  "cores": 8,
+  "ram_gib": 16,
+  "screen": "1920x1080",
+  "refresh_hz": 144,
+  "hdr": false,
+  "vcache_pin": false,
+  "kind": "windows",
+  "iso": "/home/tester/Downloads/Win11.iso",
+  "installing": false,
+  "clipboard": true,
+  "share": "",
+  "vram_gib": 0,
+  "tpm": true,
+  "overlay": false,
+  "network_mode": "nat",
+  "passt": true,
+  "mac": "52:54:00:12:34:56",
+  "bridge": "br0",
+  "forwards": [],
+  "gpu_preview": true,
+  "amd_gpu": "0000:03:00.0",
+  "gpu_maker": "intel"
+}"#;
+
+    /// A machine.json as release 0.6.1 wrote it, on an AMD card with the window speed setting off and
+    /// a drive of the host's.
+    const FROM_RELEASE_0_6_1: &str = r#"{
+  "name": "Radeon",
+  "disk": "/home/tester/.local/share/guesthouse/machines/radeon/disk.qcow2",
+  "vars": "/home/tester/.local/share/guesthouse/machines/radeon/OVMF_VARS.fd",
+  "cores": 6,
+  "ram_gib": 12,
+  "screen": "2560x1440",
+  "refresh_hz": 60,
+  "hdr": false,
+  "vcache_pin": false,
+  "kind": "windows",
+  "iso": "/home/tester/Downloads/Win11.iso",
+  "installing": false,
+  "clipboard": false,
+  "share": "",
+  "vram_gib": 0,
+  "tpm": true,
+  "overlay": false,
+  "network_mode": "nat",
+  "passt": false,
+  "mac": "52:54:00:65:43:21",
+  "bridge": "br0",
+  "forwards": [{"protocol": "tcp", "host": 2222, "guest": 22}],
+  "gpu_preview": true,
+  "amd_gpu": "0000:7c:00.0",
+  "user": "ana",
+  "drives": [{"id": "ata-SOME_DISK_SERIAL"}],
+  "window_speed_off": true
+}"#;
+
+    fn load_text(text: &str, id: &str) -> Result<Machine> {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let folder = context.paths.machines.join(id);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join(MACHINE_FILE), text).unwrap();
+        load(&context, id)
+    }
+
+    #[test]
+    fn a_machine_from_the_intel_test_build_loads_on_its_intel_card() {
+        let machine = load_text(FROM_INTEL_TEST_BUILD, "arc").unwrap();
+        assert_eq!(machine.windows_maker(), Some(GpuMaker::Intel));
+        assert_eq!(machine.windows_card_address(), Some("0000:03:00.0"));
+        assert!(machine.window_speed() && machine.disk_folder.is_empty() && machine.drives.is_empty());
+    }
+
+    #[test]
+    fn a_machine_from_release_0_6_1_loads_as_it_was() {
+        let machine = load_text(FROM_RELEASE_0_6_1, "radeon").unwrap();
+        assert_eq!(machine.windows_maker(), Some(GpuMaker::Amd));
+        assert_eq!(machine.gpu_maker, None);
+        assert!(!machine.window_speed());
+        assert_eq!(machine.drives, [Drive { id: "ata-SOME_DISK_SERIAL".into() }]);
+        assert_eq!(machine.forwards.len(), 1);
+    }
 }
