@@ -99,6 +99,21 @@ fn a_windows_disc_says_what_it_is_and_what_stops_it() {
     assert!(refusal.contains("driver"), "{refusal}");
 }
 
+/// The card is named by its address alone, as an AMD card is, so its maker has to come from the
+/// choice: an Intel card taken for AMD's would ask for AMD's driver.
+#[test]
+fn a_windows_machine_on_an_intel_card_is_made_for_intels_driver() {
+    let scratch = Scratch::new();
+    let mut context = with_cards(&scratch, &[]);
+    context.drm_class = scratch.path("drm");
+    context.install_room = Some(0);
+    crate::linux::amd::stand_in::fake_render_node(&scratch, 128, "0000:00:02.0", "0x8086", 0x64a0);
+    let data = wim(&["Windows 11 Pro"], 26300, 9);
+    let disc = make_iso(&scratch, "win", &[("sources/install.wim", &data)]);
+    let (out, result) = said(&context, &format!("new Arc --iso {disc} --amd-card 0000:00:02.0"));
+    assert!(failure_of(result).contains(crate::setup::intel::NO_INTEL_SETUP), "{out}");
+}
+
 #[test]
 fn a_machine_with_nothing_to_install_has_no_install_to_run() {
     let scratch = Scratch::new();
