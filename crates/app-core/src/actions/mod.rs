@@ -6,6 +6,7 @@ mod amd_start;
 mod desktop;
 mod diagnose;
 mod display;
+mod driver_store;
 mod gpu_check;
 mod guest_files;
 mod guest_upload;
