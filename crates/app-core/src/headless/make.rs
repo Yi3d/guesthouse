@@ -7,6 +7,7 @@ use crate::card_choice::{default_choice, windows_card_choices};
 use crate::context::Context;
 use crate::defaults::{NO_GPU, account_name, sizes_for_disc};
 use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::gpu_support::{kind_offered, plain_reason, read_disc, ubuntu_note};
 use crate::host::{RamField, physical_cores};
 use crate::iso::Iso;
@@ -64,18 +65,17 @@ fn disc_offered(context: &Context, path: &str, wanted: Option<&str>, out: &mut d
     Ok(Iso { kind, ..found })
 }
 
-/// The card a Windows machine runs on, as the dialog would choose it unless one was named. Empty is
-/// the NVIDIA card.
-fn card_for(context: &Context, named: Option<&str>) -> Result<String> {
+/// The card a Windows machine runs on, as the dialog would choose it unless one was named, with its
+/// maker. No choice at all is the NVIDIA card.
+fn card_for(context: &Context, named: Option<&str>) -> Result<(String, GpuMaker)> {
     let choices = windows_card_choices(context);
     let Some(pci) = named else {
         return Ok(choices
             .get(default_choice(context, &choices))
-            .map(|choice| choice.pci.clone())
-            .unwrap_or_default());
+            .map_or_else(|| (String::new(), GpuMaker::Nvidia), |choice| (choice.pci.clone(), choice.maker)));
     };
-    if choices.iter().any(|choice| !choice.pci.is_empty() && choice.pci == pci) {
-        return Ok(pci.to_owned());
+    if let Some(choice) = choices.iter().find(|choice| !choice.pci.is_empty() && choice.pci == pci) {
+        return Ok((pci.to_owned(), choice.maker));
     }
     let cards: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
     Err(Failure(format!("There is no card at {pci} to use. The cards are {}.", cards.join(", "))))
@@ -97,6 +97,8 @@ pub(super) fn new_machine(
     if !windows && options.amd_card.is_some() {
         return Err(Failure::new("Only a Windows machine chooses its card here."));
     }
+    // An Intel card is told from an AMD one by its maker, as both are named by address.
+    let card = windows.then(|| card_for(context, options.amd_card)).transpose()?;
     let sizes = sizes_for_disc(&disc);
     let field = if windows {
         RamField::for_gpu(context, context.slot, MIN_RAM_GIB.into(), sizes.ram)
@@ -117,8 +119,9 @@ pub(super) fn new_machine(
         disk_gib: number("--disk", options.disk, sizes.disk)?,
         user: account_name(kind, options.user.unwrap_or_default().trim()),
         password: String::new(),
-        amd_gpu: windows.then(|| card_for(context, options.amd_card)).transpose()?,
+        amd_gpu: card.as_ref().map(|(pci, _)| pci.clone()),
         disk_place: options.disk_folder.unwrap_or_default().to_owned(),
+        gpu_maker: card.map(|(_, maker)| maker),
     };
     if new.name.trim().is_empty() {
         return Err(Failure::new("The machine needs a name."));

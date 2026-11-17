@@ -3,6 +3,7 @@
 
 use crate::context::{Context, SLOT_VARIABLE};
 use crate::failure::Result;
+use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::GuestMemory;
 use guesthouse_daemon::memory_files::{MemoryFiles, RAM_VARIABLE, WINDOW_VARIABLE};
 use guesthouse_daemon::slot::Slot;
@@ -17,6 +18,8 @@ pub const DAEMON_PROGRAM: &str = "guesthouse-daemon";
 /// The sockets QEMU connects to, which the daemon makes once it's ready.
 pub const SOCKETS: [&str; 2] = ["vgpu.sock", "global.sock"];
 pub const OUTPUT_FILE: &str = "daemon.out";
+/// Any value makes the daemon log everything, not only what is unusual.
+const VERBOSE_VARIABLE: &str = "GUESTHOUSE_VERBOSE";
 
 /// What it takes to start the daemon for one VM.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,9 +46,33 @@ impl DaemonStart {
         }
     }
 
+    /// For a guest on the card at `pci`, which is `maker`'s. NVIDIA's is the one setup chose, which the
+    /// daemon opens when it's told no other.
+    pub fn on_card(self, maker: GpuMaker, pci: &str) -> Result<Self> {
+        match maker {
+            GpuMaker::Nvidia => Ok(self),
+            GpuMaker::Amd => Ok(self.on_amd_card(pci)),
+            GpuMaker::Intel => Ok(self.on_intel_card(pci)),
+        }
+    }
+
     /// For a guest on an AMD card, which the daemon then opens instead of the NVIDIA card.
-    pub fn on_amd_card(mut self, pci: &str) -> Self {
+    fn on_amd_card(mut self, pci: &str) -> Self {
         self.environment.insert(card_choice::AMD_CARD_VARIABLE.to_owned(), pci.to_owned());
+        self
+    }
+
+    /// For a guest on an Intel card, which the daemon then opens instead of the NVIDIA card.
+    fn on_intel_card(mut self, pci: &str) -> Self {
+        self.environment.insert(card_choice::INTEL_CARD_VARIABLE.to_owned(), pci.to_owned());
+        self.with_intel_test_log()
+    }
+
+    /// Intel's support is at a test stage where nothing is drawn by the card, and what a run is for
+    /// is the daemon's log, so the daemon is told to write all of it. Take this out when the
+    /// backend draws, and the log is quiet again.
+    fn with_intel_test_log(mut self) -> Self {
+        self.environment.insert(VERBOSE_VARIABLE.to_owned(), "1".to_owned());
         self
     }
 
@@ -133,7 +160,7 @@ mod tests {
         let context = scratch_context(&scratch);
         let start = DaemonStart::new(&context, slots::first(), "16G", None);
         assert!(!start.environment.contains_key("GUESTHOUSE_AMD_CARD"));
-        let start = start.on_amd_card("0000:7c:00.0");
+        let start = start.on_card(GpuMaker::Amd, "0000:7c:00.0").unwrap();
         assert_eq!(start.environment["GUESTHOUSE_AMD_CARD"], "0000:7c:00.0");
     }
 
@@ -157,6 +184,21 @@ mod tests {
         let set = |name: &str, value: &str| (OsStr::new(name).to_owned(), Some(OsStr::new(value).to_owned()));
         assert!(found.contains(&set(RAM_VARIABLE, "/dev/shm/ram")));
         assert!(found.contains(&set(WINDOW_VARIABLE, "/dev/shm/window")));
+    }
+
+    #[test]
+    fn a_guest_on_nvidia_names_no_card_and_one_on_intel_names_its_card_and_asks_for_the_whole_log() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let start = DaemonStart::new(&context, slots::first(), "16G", None);
+        let on_nvidia = start.clone().on_card(GpuMaker::Nvidia, "").unwrap();
+        assert_eq!(on_nvidia, start);
+        let on_intel = start.clone().on_card(GpuMaker::Intel, "0000:00:02.0").unwrap();
+        assert_eq!(on_intel.environment["GUESTHOUSE_INTEL_CARD"], "0000:00:02.0");
+        assert_eq!(on_intel.environment["GUESTHOUSE_VERBOSE"], "1");
+        assert!(!on_intel.environment.contains_key("GUESTHOUSE_AMD_CARD"));
+        let on_amd = start.on_card(GpuMaker::Amd, "0000:7c:00.0").unwrap();
+        assert!(!on_amd.environment.contains_key("GUESTHOUSE_VERBOSE"), "only Intel's test stage is verbose");
     }
 
     #[test]

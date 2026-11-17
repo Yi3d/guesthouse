@@ -202,6 +202,14 @@ mod dispatch {
     }
 
     #[test]
+    fn a_refused_command_is_shown_whole_in_hex_and_a_long_one_is_cut() {
+        assert_eq!(Refused(&[0x00, 0xbb, 0x0f]).to_string(), "00bb0f");
+        let long = Refused(&[0xaa; 1025]).to_string();
+        assert_eq!(long.len(), 2 * 1024 + 3);
+        assert!(long.ends_with("aa..."));
+    }
+
+    #[test]
     fn something_too_short_to_read_is_not_supported() {
         assert_eq!(status_of(&send(&mut session(), &[0; 8])), Status::NOT_SUPPORTED.0);
     }

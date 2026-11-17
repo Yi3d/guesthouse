@@ -4,6 +4,7 @@
 mod amd_files;
 mod amd_start;
 mod desktop;
+mod diagnose;
 mod display;
 mod gpu_check;
 mod guest_files;
@@ -20,7 +21,7 @@ use amd_files::{bring_amd_driver_up_to_date, complete_host_driver};
 pub use desktop::{apply_share, boots, rebooted};
 use desktop::{note_boot, set_up_desktop, wait_for_desktop};
 use gpu_check::check_gpu;
-use guest_files::{place_driver_files, place_profile_store};
+use guest_files::{place_driver_files, place_profile_store, place_system_files};
 use identity::{after_failed_gpu, set_up_identity};
 use identity_restart::restart_after_switch;
 use identity_switch::{new_vm_needed, stop_for_new_identity};
@@ -33,6 +34,7 @@ use crate::context::Context;
 use crate::disk_image::disk_size_gib;
 use crate::failure::{Failure, Result};
 use crate::gpu_identity::{PciIdentity, read_state};
+use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::is_no_room;
 use crate::host::{GIB, cpu_list, fits_now, ram_limit_for, vcache_cpus};
 use crate::kept_logs;
@@ -201,12 +203,24 @@ fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
     }
     set_up_desktop(task)?;
     apply_window_speed(task)?;
-    if task.machine.windows_amd_card().is_some() {
-        // What follows places NVIDIA's files and settings store, which a guest on AMD has no use for.
-        return bring_amd_driver_up_to_date(task);
+    place_files_for_maker(task)
+}
+
+/// What the guest is given for its card, by the card's maker. Each maker's files and settings are for
+/// its own driver only.
+fn place_files_for_maker(task: &mut Task) -> Result<()> {
+    match task.machine.windows_maker() {
+        Some(GpuMaker::Nvidia) => {
+            place_driver_files(task)?;
+            place_profile_store(task)
+        }
+        Some(GpuMaker::Amd) => bring_amd_driver_up_to_date(task),
+        // Intel's support is new, so there is no earlier layout of its driver to bring up to date. The
+        // guest has the loaders from install, and this puts back any it lacks. Another maker's files
+        // would put a driver in the guest that isn't its card's.
+        Some(GpuMaker::Intel) => place_system_files(task),
+        None => Ok(()),
     }
-    place_driver_files(task)?;
-    place_profile_store(task)
 }
 
 /// Up to the point where it's known which identity the VM should show, before any work on a desktop
@@ -354,6 +368,7 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
         "force" => force(task, first),
         "grow" => grow(task, text.parse().map_err(|_| Failure::new("That is not a size."))?),
         "resume" => resume(task),
+        "dxdiag" | "api-check" => diagnose::dxdiag(task),
         "clean_up" => clean_up(task),
         "after_reboot" => after_reboot(task),
         "apply_display" => {

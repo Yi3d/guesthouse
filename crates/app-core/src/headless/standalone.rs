@@ -84,14 +84,14 @@ fn path_word(path: &Path) -> String {
 }
 
 /// The daemon, started in the background and waited for, in the order the shell needs.
-fn daemon_steps(context: &Context, plan: &VmPlan, machine: &Machine) -> (Vec<String>, Vec<String>) {
+fn daemon_steps(context: &Context, plan: &VmPlan, machine: &Machine) -> Result<(Vec<String>, Vec<String>)> {
     let mut start = DaemonStart::new(context, plan.slot, &plan.ram, plan.vram.as_deref());
     start.environment.insert("GUESTHOUSE_STORE".to_owned(), context.paths.store.display().to_string());
     if let Some(files) = &plan.memory_by_path {
         start = start.with_memory_files(files);
     }
-    if let Some(pci) = machine.windows_amd_card() {
-        start = start.on_amd_card(pci);
+    if let Some(maker) = machine.windows_maker() {
+        start = start.on_card(maker, &machine.amd_gpu)?;
     }
     let environment: Vec<_> = start.environment.into_iter().collect();
     let command = [start.program.to_string_lossy().into_owned(), start.base.to_string_lossy().into_owned()];
@@ -108,7 +108,7 @@ fn daemon_steps(context: &Context, plan: &VmPlan, machine: &Machine) -> (Vec<Str
         "until {}; do kill -0 \"${DAEMON_PID}\" 2>/dev/null || exit 1; sleep {SOCKET_WAIT}; done",
         sockets.join(" && ")
     )];
-    (starting, waiting)
+    Ok((starting, waiting))
 }
 
 fn qemu_steps(plan: &VmPlan) -> Vec<String> {
@@ -146,7 +146,7 @@ pub(super) fn command(context: &Context, machine: &Machine, out: &mut dyn Write)
         show(out, &continued(&[], &["swtpm".to_owned(), swtpm[0].clone()], &swtpm[1..]))?;
     }
     if let Some(files) = &plan.memory_by_path {
-        let (starting, waiting) = daemon_steps(context, &plan, machine);
+        let (starting, waiting) = daemon_steps(context, &plan, machine)?;
         writeln!(out, "\n# The daemon. It makes the guest's memory, in these two files:")?;
         writeln!(out, "# {}\n# {}", files.ram.display(), files.window.display())?;
         show(out, &starting)?;

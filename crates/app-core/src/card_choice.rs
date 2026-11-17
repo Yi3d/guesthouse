@@ -1,15 +1,23 @@
 //! The cards a Windows machine's GPU-PV can run on, as the user is offered them. A machine names its
-//! card in `amd_gpu`: an AMD card by PCI address, or empty for the NVIDIA card setup chose. Any card
-//! can be picked when the machine is made. After that it can move only to a card of the same maker.
-//! A card GPU-PV doesn't handle isn't offered, and a PC with only such cards makes plain VMs.
+//! card in `amd_gpu`: a card's PCI address, or empty for the NVIDIA card setup chose, and `gpu_maker`
+//! says whose it is where the address can't. Any card can be picked when the machine is made. After
+//! that it can move only to a card of the same maker.
 
 use crate::context::Context;
-use crate::linux::amd::{amd_cards, default_linux_gpu};
+use crate::gpu_maker::GpuMaker;
+use crate::linux::amd::default_linux_gpu;
 use crate::machine::Machine;
+use crate::render_cards::render_cards;
 use crate::setup::cards::{Support, amd_support, card_in_use, find_cards};
+use crate::setup::intel::supported_intel_cards;
+
+/// Whether a new machine, or a settings page, is offered Intel's cards. They are, as a test stage:
+/// Windows can be set up and started on one, but nothing is drawn by the card yet.
+const OFFER_INTEL_CARDS: bool = true;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardChoice {
+    pub maker: GpuMaker,
     /// What goes in the machine's `amd_gpu`.
     pub pci: String,
     pub label: String,
@@ -17,23 +25,57 @@ pub struct CardChoice {
     pub device: u32,
 }
 
+fn offered(maker: GpuMaker, intel_offered: bool) -> bool {
+    match maker {
+        GpuMaker::Nvidia | GpuMaker::Amd => true,
+        GpuMaker::Intel => intel_offered,
+    }
+}
+
+/// The card setup chose, if this PC has an NVIDIA card GPU-PV handles.
+fn nvidia_choice(context: &Context) -> Option<CardChoice> {
+    // The best NVIDIA card comes first, so if that one isn't handled none is.
+    if !find_cards(context).first().is_some_and(|card| card.support != Support::Unsupported) {
+        return None;
+    }
+    let card = card_in_use(context);
+    let label = card.as_ref().map_or_else(|| "NVIDIA".to_owned(), |card| card.name.clone());
+    Some(CardChoice {
+        maker: GpuMaker::Nvidia,
+        pci: String::new(),
+        label,
+        device: card.map_or(0, |card| card.device),
+    })
+}
+
+fn choices_offering(context: &Context, intel_offered: bool) -> Vec<CardChoice> {
+    let mut choices = Vec::new();
+    for maker in GpuMaker::ALL.into_iter().filter(|maker| offered(*maker, intel_offered)) {
+        match maker {
+            GpuMaker::Nvidia => choices.extend(nvidia_choice(context)),
+            GpuMaker::Amd | GpuMaker::Intel => {
+                let cards = match maker {
+                    GpuMaker::Intel => supported_intel_cards(context),
+                    _ => render_cards(context, maker)
+                        .into_iter()
+                        .filter(|card| amd_support(context, card) != Support::Unsupported)
+                        .collect(),
+                };
+                choices.extend(cards.into_iter().map(|card| CardChoice {
+                    maker,
+                    label: format!("{} at {}", card.name, card.pci),
+                    pci: card.pci,
+                    device: card.device,
+                }));
+            }
+        }
+    }
+    choices
+}
+
 /// Every card here a new Windows machine could run on, NVIDIA's first.
 pub fn windows_card_choices(context: &Context) -> Vec<CardChoice> {
-    let mut choices = Vec::new();
-    // The best NVIDIA card comes first, so if that one isn't handled none is.
-    if find_cards(context).first().is_some_and(|card| card.support != Support::Unsupported) {
-        let card = card_in_use(context);
-        let label = card.as_ref().map_or_else(|| "NVIDIA".to_owned(), |card| card.name.clone());
-        choices.push(CardChoice { pci: String::new(), label, device: card.map_or(0, |card| card.device) });
-    }
-    let amd =
-        amd_cards(context).into_iter().filter(|card| amd_support(context, card) != Support::Unsupported);
-    choices.extend(amd.map(|card| CardChoice {
-        label: format!("{} at {}", card.name, card.pci),
-        pci: card.pci,
-        device: card.device,
-    }));
-    choices
+    choices_offering(context, OFFER_INTEL_CARDS)
 }
 
 /// The cards an existing machine may move to: those of its own maker. The one it has stays listed even
@@ -41,11 +83,12 @@ pub fn windows_card_choices(context: &Context) -> Vec<CardChoice> {
 pub fn same_maker_choices(context: &Context, machine: &Machine) -> Vec<CardChoice> {
     let mut choices: Vec<CardChoice> = windows_card_choices(context)
         .into_iter()
-        .filter(|choice| machine.card_change_problem(&choice.pci).is_none())
+        .filter(|choice| machine.card_change_problem(choice.maker).is_none())
         .collect();
     if !choices.iter().any(|choice| choice.pci == machine.amd_gpu) {
         let label = format!("The card at {}, which isn't in this PC now", machine.amd_gpu);
-        choices.push(CardChoice { pci: machine.amd_gpu.clone(), label, device: 0 });
+        let maker = machine.windows_maker().unwrap_or(GpuMaker::Nvidia);
+        choices.push(CardChoice { maker, pci: machine.amd_gpu.clone(), label, device: 0 });
     }
     choices
 }
@@ -67,6 +110,8 @@ mod tests {
     const RDNA3_GRAPHICS: u32 = 11;
     const POLARIS_GRAPHICS: u32 = 8;
 
+    const INTEL_IGPU: &str = "0000:00:02.0";
+
     fn with_cards(scratch: &Scratch, nvidia: bool) -> Context {
         let mut context = scratch_context(scratch);
         context.pci_devices = scratch.path("pci");
@@ -76,6 +121,7 @@ mod tests {
         }
         fake_render_node(scratch, 128, IGPU, "0x1002", 0x13c0);
         fake_graphics(scratch, IGPU, RDNA3_GRAPHICS);
+        fake_render_node(scratch, 129, INTEL_IGPU, "0x8086", 0x64a0);
         context
     }
 
@@ -85,7 +131,7 @@ mod tests {
         let context = with_cards(&scratch, true);
         let choices = windows_card_choices(&context);
         let addresses: Vec<&str> = choices.iter().map(|choice| choice.pci.as_str()).collect();
-        assert_eq!(addresses, ["", IGPU]);
+        assert_eq!(addresses, ["", IGPU, INTEL_IGPU]);
         assert!(choices[0].label.contains("RTX 5090"), "{choices:?}");
         assert!(choices[1].label.ends_with("at 0000:7c:00.0"), "{choices:?}");
         assert_eq!((choices[0].device, choices[1].device), (0x2B85, 0x13C0));
@@ -97,7 +143,7 @@ mod tests {
         let scratch = Scratch::new();
         let context = with_cards(&scratch, false);
         let choices = windows_card_choices(&context);
-        assert_eq!(choices.len(), 1);
+        assert_eq!(choices.len(), 2);
         assert_eq!(choices[default_choice(&context, &choices)].pci, IGPU);
     }
 
@@ -119,11 +165,45 @@ mod tests {
     fn a_card_gpu_pv_does_not_handle_is_not_offered() {
         let scratch = Scratch::new();
         let context = with_cards(&scratch, false);
-        fake_render_node(&scratch, 129, "0000:03:00.0", "0x1002", 0x67df);
+        fake_render_node(&scratch, 130, "0000:03:00.0", "0x1002", 0x67df);
         fake_graphics(&scratch, "0000:03:00.0", POLARIS_GRAPHICS);
         // An NVIDIA card from before the ones the daemon knows.
         fake_pci(&scratch, "0000:01:00.0", 0x1B80, "0x10de", "0x030000");
         let choices = windows_card_choices(&context);
-        assert_eq!(choices.iter().map(|choice| choice.pci.as_str()).collect::<Vec<_>>(), [IGPU]);
+        assert_eq!(choices.iter().map(|choice| choice.pci.as_str()).collect::<Vec<_>>(), [IGPU, INTEL_IGPU]);
+    }
+
+    #[test]
+    fn intel_cards_are_offered_after_the_others_while_the_switch_is_on_and_not_when_it_is_off() {
+        let scratch = Scratch::new();
+        let context = with_cards(&scratch, true);
+        let offered_now: Vec<GpuMaker> =
+            windows_card_choices(&context).iter().map(|choice| choice.maker).collect();
+        assert_eq!(offered_now, [GpuMaker::Nvidia, GpuMaker::Amd, GpuMaker::Intel]);
+        let without: Vec<GpuMaker> =
+            choices_offering(&context, false).iter().map(|choice| choice.maker).collect();
+        assert_eq!(without, [GpuMaker::Nvidia, GpuMaker::Amd]);
+        let all = choices_offering(&context, true);
+        let intel: Vec<&str> = all
+            .iter()
+            .filter(|choice| choice.maker == GpuMaker::Intel)
+            .map(|choice| choice.pci.as_str())
+            .collect();
+        assert_eq!(intel, [INTEL_IGPU]);
+    }
+
+    #[test]
+    fn a_machine_on_intel_is_offered_only_intels_cards() {
+        let scratch = Scratch::new();
+        let context = with_cards(&scratch, true);
+        let mut machine = Machine::new("w", "W", "/d", "/v");
+        machine.use_windows_card(GpuMaker::Intel, INTEL_IGPU);
+        // Listing as the switch will, with Intel on.
+        let own: Vec<String> = choices_offering(&context, true)
+            .into_iter()
+            .filter(|choice| machine.card_change_problem(choice.maker).is_none())
+            .map(|choice| choice.pci)
+            .collect();
+        assert_eq!(own, [INTEL_IGPU]);
     }
 }

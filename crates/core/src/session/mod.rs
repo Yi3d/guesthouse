@@ -344,6 +344,16 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             put_u32(out, Status::UNSUCCESSFUL.0);
             return Answer::Now;
         }
+        // With GUESTHOUSE_VERBOSE, every message gets a line, as some only the core sees, and a
+        // status that isn't success shows in the reply's first bytes for most of them.
+        log::debug!(
+            "message {command:?} process={:#x} length={} reply_length={} held={} reply_start={}",
+            MessageHeader::process_of(message).unwrap_or(0),
+            message.len(),
+            out.len(),
+            self.held,
+            ReplyStart(out)
+        );
         if self.held { Answer::Held } else { Answer::Now }
     }
 
@@ -449,6 +459,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 if self.unknown_commands.insert(number) {
                     log::warn!("the guest sent command {number}, which isn't supported");
                 }
+                // What it carried is the only clue to what the guest wanted, or was reporting.
+                log::debug!("refused command {number} length={} bytes={}", message.len(), Refused(message));
                 answer_status(Status::NOT_SUPPORTED, out);
             }
             None => answer_status(Status::NOT_SUPPORTED, out),
@@ -656,4 +668,25 @@ pub(crate) fn answer_status(status: Status, out: &mut Vec<u8>) {
 fn answer_no_registry_keys(out: &mut Vec<u8>) {
     put_u32(out, 0);
     put_u32(out, Status::SUCCESS.0);
+}
+
+/// A message the core had no answer for, in hex for the log, up to a size that keeps a line readable.
+struct Refused<'a>(&'a [u8]);
+
+impl std::fmt::Display for Refused<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const SHOWN: usize = 1024;
+        self.0.iter().take(SHOWN).try_for_each(|byte| write!(f, "{byte:02x}"))?;
+        if self.0.len() > SHOWN { write!(f, "...") } else { Ok(()) }
+    }
+}
+
+/// The first bytes of a reply in hex, for the log, written without making a string.
+struct ReplyStart<'a>(&'a [u8]);
+
+impl std::fmt::Display for ReplyStart<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const SHOWN: usize = 16;
+        self.0.iter().take(SHOWN).try_for_each(|byte| write!(f, "{byte:02x}"))
+    }
 }

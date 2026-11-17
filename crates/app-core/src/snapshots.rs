@@ -223,6 +223,7 @@ mod tests {
             password: String::new(),
             amd_gpu: None,
             disk_place: String::new(),
+            gpu_maker: None,
         };
         create(context, &new).unwrap()
     }

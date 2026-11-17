@@ -92,13 +92,14 @@ pub fn gpu_devices(devices: &Path, render_nodes: &Path) -> Vec<PathBuf> {
     found
 }
 
-#[cfg(feature = "amd")]
+#[cfg(any(feature = "amd", feature = "intel"))]
 impl Needs {
-    /// What the AMD daemon of this slot needs. Only the one render node is granted, so the other
-    /// cards' device files are not reachable from this process. `memory_device` is the device that
-    /// makes a dma-buf of the guest's memory, on a PC that has it: a rule can't name a file that
-    /// isn't there, and the backend does without it.
-    pub fn of_amd_card(
+    /// What the daemon of this slot needs for a card it reaches through one render node, as AMD's
+    /// and Intel's are. Only that node is granted, so the other cards' device files are not
+    /// reachable from this process. `memory_device` is the device that makes a dma-buf of the
+    /// guest's memory, on a PC that has it and for a backend that uses it: a rule can't name a file
+    /// that isn't there, and the backend does without it.
+    pub fn of_render_node(
         slot: crate::slot::Slot,
         project: &Path,
         driver_folder: &Path,
@@ -234,7 +235,7 @@ mod tests {
         let devices_of = |memory_device: Option<&str>| {
             let slot = crate::slot::Slot::parse(Some("2")).unwrap();
             let node = PathBuf::from("/dev/dri/renderD129");
-            let needs = Needs::of_amd_card(
+            let needs = Needs::of_render_node(
                 slot,
                 Path::new("/project"),
                 Path::new("/store/driver"),

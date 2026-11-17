@@ -6,8 +6,6 @@
 //! frame socket from that same thread. The guest's memory comes from the app as descriptors: see
 //! [`handover`]. For a QEMU of someone else's it comes as two files instead: see [`memory_files`].
 
-#[cfg(feature = "amd")]
-pub mod amd_setup;
 pub mod card_choice;
 pub mod display_note;
 pub mod environment;
@@ -23,6 +21,8 @@ pub mod server;
 pub mod setup;
 pub mod slot;
 pub mod startup;
-#[cfg(any(feature = "nvidia", feature = "amd"))]
+#[cfg(any(feature = "nvidia", feature = "amd", feature = "intel"))]
 mod store;
+#[cfg(any(feature = "amd", feature = "intel"))]
+pub mod vendor_setup;
 pub mod viewer;

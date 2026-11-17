@@ -278,6 +278,7 @@ fn library_machines(context: &Arc<Context>, window: &Window, folder: &Path) -> V
         password: String::new(),
         amd_gpu: None,
         disk_place: String::new(),
+        gpu_maker: None,
     };
     let plain = create(context, &new).unwrap();
     let disk = folder.join("win.qcow2").display().to_string();

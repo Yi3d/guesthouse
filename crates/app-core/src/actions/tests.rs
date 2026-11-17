@@ -601,3 +601,40 @@ fn a_run_that_ends_is_kept_where_a_reboot_leaves_it() {
     let kept = crate::kept_logs::kept_folder(&context, &vm.id).join("daemon.out");
     assert_eq!(fs::read_to_string(kept).unwrap(), "the daemon's last words");
 }
+
+#[test]
+fn an_intel_machine_is_given_neither_nvidias_files_nor_amds_and_the_guest_is_not_asked() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let agent = Arc::new(ScriptedAgent::answering(&[]));
+    context.agent = agent.clone();
+    let mut intel = machine(&context);
+    intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", intel);
+    place_files_for_maker(&mut task).unwrap();
+    assert!(agent.requests.lock().unwrap().is_empty(), "nothing was sent to the guest");
+    assert_eq!(task.error, "");
+}
+
+#[test]
+fn an_intel_machine_is_given_the_loaders_from_the_drivers_list_out_of_intels_store_folder() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let folder = scratch.path("intel-driver");
+    scratch.write("intel-driver/system-files.txt", "System32\tvulkan-1-64.dll\tvulkan-1.dll\n");
+    crate::setup::intel::write_intel_setup(&context, &folder, "32.0.101.9175").unwrap();
+    scratch.write("program/guest/nv-files.ps1", "copies files");
+    let agent = Arc::new(ScriptedAgent::answering(&["", "missing 1\r\n", "", "copied vulkan-1.dll\r\n"]));
+    context.agent = agent.clone();
+    let mut intel = machine(&context);
+    intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+    crate::agent::make_token(&context, &intel).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", intel);
+    place_files_for_maker(&mut task).unwrap();
+    assert_eq!(task.error, "");
+    let asked = agent.requests.lock().unwrap();
+    assert_eq!(asked.len(), 4, "the list, the count, the script and the run");
+    assert!(asked[3].2.contains("-StoreFolder iigd_dch.inf_amd64_gpupv"), "{}", asked[3].2);
+}
