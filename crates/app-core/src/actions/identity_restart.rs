@@ -36,6 +36,13 @@ fn wait_for_new_boot(task: &Task, before: usize) -> bool {
     false
 }
 
+/// Asks Windows to restart, and says whether the firmware started another boot in time.
+pub(super) fn restart_windows(task: &Task) -> bool {
+    let before = boots(task.context, None);
+    task.ask_guest(RESTART_SCRIPT, RESTART_ANSWER_SECONDS);
+    wait_for_new_boot(task, before)
+}
+
 /// Restarts Windows if this is its first start on its maker's number, and waits for the desktop again.
 pub(super) fn restart_after_switch(task: &mut Task) -> Result<Gpu> {
     let mut state = read_state(task.context, &task.machine);
@@ -43,9 +50,7 @@ pub(super) fn restart_after_switch(task: &mut Task) -> Result<Gpu> {
         return Ok(Gpu::Working);
     }
     task.step(&restarting(&task.machine));
-    let before = boots(task.context, None);
-    task.ask_guest(RESTART_SCRIPT, RESTART_ANSWER_SECONDS);
-    let restarted = wait_for_new_boot(task, before);
+    let restarted = restart_windows(task);
     // Once is enough either way: by the next start the device's install has long finished.
     state.restart_due = false;
     write_state(task.context, &task.machine, &state)?;

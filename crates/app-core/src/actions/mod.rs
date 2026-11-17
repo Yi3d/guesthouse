@@ -14,6 +14,7 @@ mod identity;
 mod identity_restart;
 mod identity_switch;
 mod install;
+mod intel_files;
 mod own_linux;
 mod ubuntu;
 mod window_speed;
@@ -30,6 +31,7 @@ use identity_switch::{new_vm_needed, stop_for_new_identity};
 pub use install::{
     INSTALL_STEPS, answer_disc_path, answer_file, install, install_step, make_answer_disc, wait_for_setup,
 };
+use intel_files::complete_intel_driver;
 use window_speed::apply_window_speed;
 
 use crate::context::Context;
@@ -237,6 +239,8 @@ fn get_gpu_ready(task: &mut Task) -> Result<Gpu> {
     if !wait_for_desktop(task) {
         return Err(Failure::new("Windows started, but its desktop never came up."));
     }
+    // Before the check, as a guest missing a file of Intel's driver has no GPU until it has the file.
+    complete_intel_driver(task)?;
     if confirm_gpu(task)? == Gpu::Missing || restart_after_switch(task)? == Gpu::Missing {
         return Ok(Gpu::Missing);
     }
