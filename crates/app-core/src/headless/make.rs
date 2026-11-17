@@ -12,7 +12,7 @@ use crate::host::{RamField, physical_cores};
 use crate::iso::Iso;
 use crate::library::{NewMachine, create, delete, folders_text, remove_entry};
 use crate::machine::{Kind, MIN_RAM_GIB, Machine, load};
-use crate::macos_setup::{HOW_IT_INSTALLS, MACOS_SIZES, MACOS_TITLE, NewMac, create_macos};
+use crate::macos_setup::{MACOS_SIZES, MACOS_TITLE, NewMac, create_macos, how_it_installs};
 use crate::setup::checks::machine_gpu_warning;
 use crate::tasks::{State, status};
 use std::io::Write;
@@ -103,7 +103,7 @@ fn new_mac(context: &Context, name: &str, options: &NewOptions, out: &mut dyn Wr
     };
     let machine = create_macos(context, &new)?;
     writeln!(out, "Made {} for {MACOS_TITLE} in {}.", machine.name, machine.folder(context).display())?;
-    writeln!(out, "{HOW_IT_INSTALLS}")?;
+    writeln!(out, "{}", how_it_installs(context))?;
     Ok(writeln!(out, "Run: guesthouse-vm install {}", machine.id)?)
 }
 

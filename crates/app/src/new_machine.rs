@@ -19,7 +19,7 @@ use guesthouse_app_core::library::{
 };
 use guesthouse_app_core::machine::{Kind, MIN_CORES, MIN_RAM_GIB, Machine};
 use guesthouse_app_core::macos_setup::{
-    HOW_IT_INSTALLS, MACOS_SIZES, MACOS_TITLE, MIN_MACOS_DISK_GIB, NewMac, create_macos, has_macos_part,
+    MACOS_SIZES, MACOS_TITLE, MIN_MACOS_DISK_GIB, NewMac, create_macos, how_it_installs,
 };
 use guesthouse_app_core::setup::amd::NO_AMD_SETUP;
 use guesthouse_app_core::setup::checks::gpu_warning;
@@ -122,11 +122,7 @@ impl NewMachineDialog {
         let choose = row_button("Choose");
         iso_row.add_suffix(&choose);
         disc.add(&iso_row);
-        let macos_row = adw::ActionRow::builder()
-            .title(MACOS_TITLE)
-            .subtitle(MACOS_ROW_NOTE)
-            .visible(has_macos_part(&context))
-            .build();
+        let macos_row = adw::ActionRow::builder().title(MACOS_TITLE).subtitle(MACOS_ROW_NOTE).build();
         let use_macos = row_button("Use");
         macos_row.add_suffix(&use_macos);
         disc.add(&macos_row);
@@ -276,7 +272,7 @@ impl NewMachineDialog {
         parts.macos.set(true);
         *parts.iso_path.borrow_mut() = Some(String::new());
         parts.iso_row.set_subtitle("Choose the disc to install from.");
-        self.show_verdict(MACOS_TITLE, HOW_IT_INSTALLS);
+        self.show_verdict(MACOS_TITLE, &how_it_installs(&context));
         let field = RamField::for_plain(&context, 1, MACOS_SIZES.ram);
         parts.cores.adjustment().set_lower(1.0);
         parts.cores.set_value(MACOS_SIZES.cores.min(physical_cores(&context.cpus)).into());
