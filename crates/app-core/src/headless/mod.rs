@@ -41,6 +41,7 @@ pub const USAGE: &str = "usage: guesthouse-vm COMMAND [MACHINE]
 
   new NAME --iso PATH [--kind windows|ubuntu|plain] [--disk GIB] [--disk-folder PATH]
                              [--cores N] [--ram GIB] [--user NAME] [--amd-card PCI]
+                             [--intel-driver PATH]
   install MACHINE [--no-wait]
                              run the install of a Windows or Ubuntu machine
   remove MACHINE [--yes]     delete it, or forget it if its disk is elsewhere

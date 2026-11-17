@@ -57,6 +57,12 @@ cargo run --release -p guesthouse-backend-intel --bin intel-probe
 
 Give it a PCI address, like `0000:00:02.0`, if you have more than one Intel card. If you have one of these cards, or another Intel card on `xe`, and want to help, open an issue with its output.
 
+## A recorded card
+
+`intel-probe --record card.txt` also writes what it read to `card.txt`, a plain text file with one fact a line. That file can stand in for the card on a PC that doesn't have it, so a run of Intel's driver in a guest can be tried in a lab instead of on your PC. It holds the card's ids, memory sizes, engines, topology, hardware config table, firmware versions and clocks, and the PCI address and kernel version it was read on. Nothing else about your PC.
+
+It is only used when `GUESTHOUSE_INTEL_RECORDED_CARD` names the file, in the environment the app or `guesthouse-vm` and `guesthouse-task` run in. Then the app lists the recorded card beside the PC's own, named "recorded, no card", and the daemon of a machine on it opens no card and no render node: its jail lets it read the recording and nothing of any card. Its log starts with a `RECORDED CARD` warning, and a bug report's host facts say so too. Unset, everything looks for the card itself, as before. With nothing reaching a card, this is for seeing what Intel's driver in the guest asks, not for drawing anything.
+
 ## A machine from an earlier test build
 
 Test builds up to 0.6.2-intel.1 left the kernel driver file out, so Windows on a machine they made starts without its GPU. Such a machine needs no new install. The first start on this version says Intel's driver on this PC lacks the file. Give Intel's installer again in the New Machine dialog: pick a Windows ISO and the Intel card, choose `gfx_win_101.9175.exe` where it is asked for, wait for it to be unpacked, and close the dialog. Then start the machine. Once its desktop is up, the app copies the file into Windows and restarts Windows once, and the GPU check runs after that.

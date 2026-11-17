@@ -6,8 +6,17 @@ use std::fmt;
 const NO_WAIT: &str = "--no-wait";
 const YES: &str = "--yes";
 /// The options of `new` that take a value.
-const NEW_OPTIONS: [&str; 8] =
-    ["--iso", "--kind", "--disk", "--disk-folder", "--cores", "--ram", "--user", "--amd-card"];
+const NEW_OPTIONS: [&str; 9] = [
+    "--iso",
+    "--kind",
+    "--disk",
+    "--disk-folder",
+    "--cores",
+    "--ram",
+    "--user",
+    "--amd-card",
+    "--intel-driver",
+];
 const SETUP_OPTIONS: [&str; 2] = ["--driver", "--card"];
 
 /// What `new` was told. Whatever it wasn't told, the New Machine dialog's choice stands.
@@ -21,6 +30,8 @@ pub(super) struct NewOptions<'a> {
     pub ram: Option<&'a str>,
     pub user: Option<&'a str>,
     pub amd_card: Option<&'a str>,
+    /// Intel's installer, which the dialog asks for when the card is Intel's.
+    pub intel_driver: Option<&'a str>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -149,6 +160,7 @@ pub(super) fn parse(arguments: &[String]) -> std::result::Result<Command<'_>, Pr
                 ram: split.value("--ram"),
                 user: split.value("--user"),
                 amd_card: split.value("--amd-card"),
+                intel_driver: split.value("--intel-driver"),
             };
             Ok(Command::New { name, options })
         }

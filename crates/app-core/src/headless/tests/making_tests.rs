@@ -114,6 +114,27 @@ fn a_windows_machine_on_an_intel_card_is_made_for_intels_driver() {
     assert!(failure_of(result).contains(crate::setup::intel::NO_INTEL_SETUP), "{out}");
 }
 
+/// A lab run names a recording of a tester's card. Then the card is offered as it would be on the
+/// tester's PC, and its driver is asked for as for any Intel card.
+#[test]
+fn a_recorded_intel_card_is_offered_when_one_is_named_and_wants_intels_driver() {
+    let scratch = Scratch::new();
+    let mut context = with_cards(&scratch, &[]);
+    context.drm_class = scratch.path("drm");
+    context.install_room = Some(0);
+    let data = wim(&["Windows 11 Pro"], 26300, 9);
+    let disc = make_iso(&scratch, "win", &[("sources/install.wim", &data)]);
+    let words = format!("new Arc --iso {disc} --amd-card 0000:03:00.0");
+    let without = failure_of(said(&context, &words).1);
+    assert!(!without.contains(crate::setup::intel::NO_INTEL_SETUP), "no Intel card unless named: {without}");
+    context.recorded_intel_card = Some(scratch.write("b580.card", crate::render_cards::tests::ARC_B580));
+    let (out, result) = said(&context, &words);
+    assert!(failure_of(result).contains(crate::setup::intel::NO_INTEL_SETUP), "{out}");
+    let nvidia = with_cards(&scratch, &[("0000:01:00.0", 0x2B85)]);
+    let refused = failure_of(said(&nvidia, &format!("new Rtx --iso {disc} --intel-driver /x.exe")).1);
+    assert_eq!(refused, "--intel-driver is for a Windows machine on an Intel card.");
+}
+
 #[test]
 fn a_machine_with_nothing_to_install_has_no_install_to_run() {
     let scratch = Scratch::new();

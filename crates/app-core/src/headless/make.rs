@@ -13,9 +13,16 @@ use crate::host::{RamField, physical_cores};
 use crate::iso::Iso;
 use crate::library::{NewMachine, create, delete, folders_text, remove_entry};
 use crate::machine::{Kind, MIN_RAM_GIB, Machine, load};
+use crate::render_cards::render_card;
 use crate::setup::checks::machine_gpu_warning;
+use crate::setup::driver::Extraction;
+use crate::setup::intel_driver::{read_intel_installer, unpack_intel};
 use crate::tasks::{State, status};
+use std::cell::{Cell, RefCell};
 use std::io::Write;
+
+/// The copy says how far it is at each step of this many percent.
+const PERCENT_STEP: u32 = 10;
 
 fn kind_text(kind: Kind) -> &'static str {
     match kind {
@@ -81,6 +88,25 @@ fn card_for(context: &Context, named: Option<&str>) -> Result<(String, GpuMaker)
     Err(Failure(format!("There is no card at {pci} to use. The cards are {}.", cards.join(", "))))
 }
 
+/// Takes the card's drivers out of Intel's installer, as the dialog's driver row does, saying how
+/// far it is.
+fn unpack_intel_driver(context: &Context, pci: &str, installer: &str, out: &mut dyn Write) -> Result<()> {
+    let card = render_card(context, GpuMaker::Intel, pci)
+        .ok_or_else(|| Failure(format!("There is no Intel card at {pci} to unpack Intel's driver for.")))?;
+    writeln!(out, "Reading Intel's installer")?;
+    let package = read_intel_installer(installer, card.device)?;
+    writeln!(out, "Taking out the driver for {}", card.name)?;
+    let (said, out) = (Cell::new(0), RefCell::new(out));
+    let folder = unpack_intel(&Extraction::new(installer), context, &package, &|percent| {
+        let step = percent / PERCENT_STEP;
+        if step > said.get() {
+            said.set(step);
+            let _ = writeln!(out.borrow_mut(), "{percent}%");
+        }
+    })?;
+    Ok(writeln!(out.borrow_mut(), "Intel's driver {} is in {}.", package.version, folder.display())?)
+}
+
 pub(super) fn new_machine(
     context: &Context,
     name: &str,
@@ -99,6 +125,12 @@ pub(super) fn new_machine(
     }
     // An Intel card is told from an AMD one by its maker, as both are named by address.
     let card = windows.then(|| card_for(context, options.amd_card)).transpose()?;
+    if let Some(installer) = options.intel_driver {
+        match &card {
+            Some((pci, GpuMaker::Intel)) => unpack_intel_driver(context, pci, installer, out)?,
+            _ => return Err(Failure::new("--intel-driver is for a Windows machine on an Intel card.")),
+        }
+    }
     let sizes = sizes_for_disc(&disc);
     let field = if windows {
         RamField::for_gpu(context, context.slot, MIN_RAM_GIB.into(), sizes.ram)

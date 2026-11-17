@@ -13,6 +13,7 @@ guesthouse-vm command NAME
 
 guesthouse-vm new NAME --iso PATH [--kind windows|ubuntu|plain] [--disk GIB] [--disk-folder PATH]
                        [--cores N] [--ram GIB] [--user NAME] [--amd-card PCI]
+                       [--intel-driver PATH]
 guesthouse-vm install NAME [--no-wait]
 guesthouse-vm remove NAME [--yes]
 
@@ -36,7 +37,7 @@ NAME is a machine's id, or its name in any case. If a name fits two machines, it
 
 The disc decides what the machine is, as it does in the app's New Machine dialog: a Windows 11 Pro disc is a Windows machine with GPU-PV, an Ubuntu server disc is Ubuntu, and anything else is a plain VM that you install by hand. `new` says which it found. `--kind` is there to say what you expect, and it refuses if the disc is something else here. A disc that would be Windows or Ubuntu on a PC with the GPU part is a plain VM on a PC without it, and `new` says so.
 
-What you don't give, you get as the dialog would start you: the sizes for that kind, with RAM as high as this PC allows, and for Windows the NVIDIA card, or an AMD or Intel card by its address with `--amd-card`. The dialog's refusals come out as they are, in plain words, and nothing is made.
+What you don't give, you get as the dialog would start you: the sizes for that kind, with RAM as high as this PC allows, and for Windows the NVIDIA card, or an AMD or Intel card by its address with `--amd-card`. For an Intel card, `--intel-driver` takes Intel's installer and unpacks the card's driver from it, as the dialog does when it asks for the installer. The dialog's refusals come out as they are, in plain words, and nothing is made.
 
 `--disk-folder` keeps the disk on another drive. The disk gets a folder of its own inside the one you name, and `remove` takes it with the machine. The disk's file starts small and grows as the guest fills it, so `--disk` is the most it can hold, not what it takes at once.
 
