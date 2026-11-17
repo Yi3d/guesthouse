@@ -10,13 +10,19 @@ pub const MAX_SLICES_SUPPORTED: u32 = 1;
 pub const MAX_DUAL_SUBSLICES_SUPPORTED: u32 = 2;
 pub const MAX_NUM_EU_PER_DSS: u32 = 3;
 pub const NUM_THREADS_PER_EU: u32 = 15;
+/// A card whose table has no dual subslice keys gives the same two numbers under these, as
+/// subslices. On Xe a subslice and a dual subslice are both the Xe core.
+pub const MAX_SUBSLICE: u32 = 70;
+pub const MAX_EU_PER_SUBSLICE: u32 = 71;
 
 /// The names of the keys above, for the probe.
-const NAMES: [(u32, &str); 4] = [
+const NAMES: [(u32, &str); 6] = [
     (MAX_SLICES_SUPPORTED, "max slices supported"),
     (MAX_DUAL_SUBSLICES_SUPPORTED, "max dual subslices supported"),
     (MAX_NUM_EU_PER_DSS, "max EUs per dual subslice"),
     (NUM_THREADS_PER_EU, "threads per EU"),
+    (MAX_SUBSLICE, "max subslices"),
+    (MAX_EU_PER_SUBSLICE, "max EUs per subslice"),
 ];
 
 /// One entry of the table.
@@ -59,6 +65,16 @@ impl Hwconfig {
     pub fn value(&self, key: u32) -> Option<u32> {
         self.entries.iter().find(|entry| entry.key == key)?.values.first().copied()
     }
+
+    /// The most Xe cores the platform has, under whichever key the table gives it.
+    pub fn most_cores(&self) -> Option<u32> {
+        self.value(MAX_DUAL_SUBSLICES_SUPPORTED).or_else(|| self.value(MAX_SUBSLICE))
+    }
+
+    /// The most EUs an Xe core has, under whichever key the table gives it.
+    pub fn most_eus_per_core(&self) -> Option<u32> {
+        self.value(MAX_NUM_EU_PER_DSS).or_else(|| self.value(MAX_EU_PER_SUBSLICE))
+    }
 }
 
 #[cfg(test)]
@@ -81,6 +97,16 @@ pub(crate) mod tests {
         assert_eq!(config.value(NUM_THREADS_PER_EU), Some(8));
         assert_eq!(config.entries[2].name(), Some("threads per EU"));
         assert_eq!(config.value(MAX_NUM_EU_PER_DSS), None);
+    }
+
+    #[test]
+    fn the_cores_are_found_under_either_pair_of_keys() {
+        let dual = Hwconfig::parse(&table(&[(MAX_DUAL_SUBSLICES_SUPPORTED, 8), (MAX_NUM_EU_PER_DSS, 8)]));
+        assert_eq!((dual.most_cores(), dual.most_eus_per_core()), (Some(8), Some(8)));
+        let plain = Hwconfig::parse(&table(&[(MAX_SUBSLICE, 20), (MAX_EU_PER_SUBSLICE, 8)]));
+        assert_eq!((plain.most_cores(), plain.most_eus_per_core()), (Some(20), Some(8)));
+        assert_eq!(plain.entries[0].name(), Some("max subslices"));
+        assert_eq!(Hwconfig::default().most_cores(), None);
     }
 
     #[test]

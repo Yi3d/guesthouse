@@ -6,6 +6,7 @@ mod common;
 use common::*;
 use guesthouse_backend_intel::IntelBackend;
 use guesthouse_backend_intel::card::CardFacts;
+use guesthouse_backend_intel::hwconfig::{self, Hwconfig};
 use guesthouse_backend_intel::xe_query::TopologyMask;
 
 fn record_of(card: CardFacts) -> Vec<u8> {
@@ -81,4 +82,31 @@ fn a_card_whose_hwconfig_does_not_divide_its_cores_leaves_the_arrays_empty() {
     assert!(translate_topology(&record).is_none());
     assert!(!guesthouse_backend_intel::protocol::shape::filled(&record));
     assert_eq!(dword(&record, 0xB34), 64, "the totals are still the card's");
+}
+
+#[test]
+fn a_battlemage_shape_spreads_its_twenty_cores_over_five_slices() {
+    // What intel-probe printed for an Arc B580: bits 0 to 19, five slices, and a hwconfig table
+    // that names its cores as subslices.
+    let mut card = card_with(&[0xFF, 0xFF, 0x0F, 0], &[0xFF, 0], [0, 0, 8]);
+    card.hwconfig = Hwconfig::parse(
+        &[
+            (hwconfig::MAX_SLICES_SUPPORTED, 5u32),
+            (hwconfig::MAX_SUBSLICE, 20),
+            (hwconfig::NUM_THREADS_PER_EU, 8),
+        ]
+        .iter()
+        .flat_map(|&(key, value)| [key, 1, value])
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<u8>>(),
+    );
+    let record = record_of(card);
+    let mapping = translate_topology(&record).expect("the reader accepts it");
+    assert_eq!(mapping.slice_indices, [0, 1, 2, 3, 4]);
+    assert_eq!((mapping.slice_count, mapping.subslice_count, mapping.eu_count), (5, 20, 160));
+    assert_eq!([dword(&record, 0xB3C), dword(&record, 0xB40), dword(&record, 0xB34)], [5, 20, 160]);
+    assert_eq!([dword(&record, 0xB98), dword(&record, 0xBA0)], [5, 20], "the most slices and cores");
+    for slice in 0..5 {
+        assert_eq!(dword(&record, 0xCEC + 0x14C * slice), 4, "four cores in slice {slice}");
+    }
 }

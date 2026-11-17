@@ -114,6 +114,8 @@ pub struct MemoryRegion {
 impl MemoryRegion {
     /// DRM_XE_MEM_REGION_CLASS_SYSMEM.
     pub const SYSTEM: u16 = 0;
+    /// DRM_XE_MEM_REGION_CLASS_VRAM.
+    pub const VRAM: u16 = 1;
     const ENTRY: usize = 88;
 
     pub fn parse_all(answer: &[u8]) -> Vec<Self> {

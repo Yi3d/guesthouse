@@ -55,8 +55,8 @@ use xe_query::{Engine, Gt};
 
 /// How this backend names the host driver's branch: the Linux kernel's xe.
 const HOST_BRANCH: &str = "xe";
-/// The part of the system's memory offered as video memory, as Windows gives an integrated card
-/// half of the memory as shared.
+/// The part of the system's memory offered as shared memory, as Windows gives a card half of the
+/// memory as shared. An integrated card has no other, so for it this is the video memory too.
 const SHARED_MEMORY_PART: u64 = 2;
 
 /// See the crate documentation.
@@ -91,12 +91,17 @@ impl IntelBackend {
         }
         let shared = card.system_memory() / SHARED_MEMORY_PART;
         let record = record::build(&record_facts(&card, generation, shared));
+        // A card with memory of its own offers that; one without offers its share of the system's.
+        let own = card.card_memory();
+        let video_memory = if own > 0 { own } else { shared };
+        let reachable = card.reachable_card_memory();
+        let bar_size = if reachable > 0 { reachable } else { video_memory };
         let facts = AdapterFacts {
             card: PciCard { vendor: INTEL_VENDOR, device: card.pci.device, revision: card.pci.revision },
             name: format!("Intel GPU {:#06x}", card.pci.device),
-            video_memory: shared,
+            video_memory,
             gtt_memory: 0,
-            bar_size: shared,
+            bar_size,
             node_count: protocol::nodes::COUNT,
             engines: card.engine_families(),
             guest_driver_version: 0,
@@ -149,7 +154,7 @@ impl IntelBackend {
         let card = &self.card;
         log::info!(
             "{PREFIX} card pci={:04x}:{:04x} rev={:#04x} subsystem={:04x}:{:04x} address={} driver={} kernel={} \
-             profile=\"{}\" render_ip={} eus={} system_memory={:#x}",
+             profile=\"{}\" render_ip={} eus={} system_memory={:#x} card_memory={:#x}",
             card.pci.vendor,
             card.pci.device,
             card.pci.revision,
@@ -161,7 +166,8 @@ impl IntelBackend {
             self.generation.name,
             card.main_gt().map(|gt| gt.ip).unwrap_or_default(),
             card.eu_count(),
-            card.system_memory()
+            card.system_memory(),
+            card.card_memory()
         );
         for (what, error) in &card.unanswered {
             log::warn!("{PREFIX} card query=\"{what}\" unanswered=\"{error}\"");
@@ -183,7 +189,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
     let config = |key| card.hwconfig.value(key).unwrap_or(0);
     let threads_per_eu =
         card.hwconfig.value(hwconfig::NUM_THREADS_PER_EU).unwrap_or(generation.threads_per_eu);
-    let most_dual_subslices = config(hwconfig::MAX_DUAL_SUBSLICES_SUPPORTED);
+    let most_dual_subslices = card.hwconfig.most_cores().unwrap_or(0);
     // The counts are of the cores the slice arrays can hold, so the arrays and the counts agree.
     let cores = shape::representable(&card.cores(), config(hwconfig::MAX_SLICES_SUPPORTED));
     let (eus, dual_subslices, slices) = if cores.is_empty() {
@@ -210,14 +216,14 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             slice_count: slices,
             subslice_count: dual_subslices,
             dual_subslice_count: dual_subslices,
-            max_eu_per_subslice: config(hwconfig::MAX_NUM_EU_PER_DSS),
+            max_eu_per_subslice: card.hwconfig.most_eus_per_core().unwrap_or(0),
             max_slices: config(hwconfig::MAX_SLICES_SUPPORTED),
             max_subslices: most_dual_subslices,
             max_dual_subslices: most_dual_subslices,
         },
         timestamp_hz: card.main_gt().map_or(0, |gt| gt.reference_clock),
         render_mhz: (card.frequencies.lowest.unwrap_or(0), card.frequencies.highest.unwrap_or(0)),
-        memory: Memory { dedicated: 0, system_shared: shared, system_video: 0 },
+        memory: Memory { dedicated: card.card_memory(), system_shared: shared, system_video: 0 },
         local_memory: card.config.has_vram(),
         cores,
         compute_engines: card.engines_of(Engine::COMPUTE),
@@ -501,6 +507,27 @@ mod tests {
     }
 
     #[test]
+    fn a_card_with_memory_of_its_own_offers_that() {
+        let backend = IntelBackend::from_card(card::tests::battlemage()).unwrap();
+        let facts = backend.facts();
+        assert_eq!((facts.video_memory, facts.bar_size), (12216 << 20, 12216 << 20));
+        let summary = record::summary(backend.record());
+        assert_eq!((summary.product_family, summary.render_core, summary.device_id), (1274, 0xC09, 0xE20B));
+        assert_eq!(summary.eu_count, 160);
+        let built = record_facts(backend.card(), &generation::XE2_HPG, 7);
+        assert_eq!(built.memory, Memory { dedicated: 12216 << 20, system_shared: 7, system_video: 0 });
+        assert!(built.local_memory);
+        assert_eq!(
+            (built.gt.max_slices, built.gt.max_dual_subslices, built.gt.max_eu_per_subslice),
+            (5, 20, 8)
+        );
+        assert_eq!(
+            (built.gt.slice_count, built.gt.dual_subslice_count, built.gt.thread_count),
+            (5, 20, 1280)
+        );
+    }
+
+    #[test]
     fn a_card_with_no_eus_is_refused_in_plain_words() {
         let mut card = card::tests::lunar_lake();
         card.topology.clear();
@@ -511,7 +538,7 @@ mod tests {
     #[test]
     fn a_card_with_no_profile_is_refused_in_plain_words() {
         let mut card = card::tests::lunar_lake();
-        card.gts[0].ip.minor = 1;
+        card.gts[0].ip.minor = 2;
         let refusal = IntelBackend::from_card(card).unwrap_err();
         assert!(refusal.0.contains("no profile"), "{}", refusal.0);
     }

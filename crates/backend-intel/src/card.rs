@@ -99,6 +99,20 @@ impl CardFacts {
         system.map(|region| region.total).sum()
     }
 
+    /// The memory on the card itself, in bytes. An integrated card has none.
+    pub fn card_memory(&self) -> u64 {
+        self.card_regions().map(|region| region.total).sum()
+    }
+
+    /// How much of the card's own memory the processor can reach, in bytes.
+    pub fn reachable_card_memory(&self) -> u64 {
+        self.card_regions().map(|region| region.cpu_visible).sum()
+    }
+
+    fn card_regions(&self) -> impl Iterator<Item = &MemoryRegion> {
+        self.regions.iter().filter(|region| region.class == MemoryRegion::VRAM)
+    }
+
     /// The main GT's masks of these kinds, together.
     fn main_mask_union(&self, kinds: &[u16]) -> Vec<u8> {
         let Some(main) = self.main_gt() else { return Vec::new() };
@@ -134,7 +148,7 @@ impl CardFacts {
     /// the platform has.
     pub fn dual_subslices_per_slice(&self) -> Option<u32> {
         let slices = self.hwconfig.value(hwconfig::MAX_SLICES_SUPPORTED).filter(|&count| count > 0)?;
-        let most = self.hwconfig.value(hwconfig::MAX_DUAL_SUBSLICES_SUPPORTED)?;
+        let most = self.hwconfig.most_cores()?;
         Some((most / slices).max(1))
     }
 
@@ -232,6 +246,74 @@ pub(crate) mod tests {
             frequencies: Frequencies { highest: Some(2050), lowest: Some(400), ..Frequencies::default() },
             ..CardFacts::default()
         }
+    }
+
+    /// An Arc B580 as intel-probe printed one: twenty Xe cores of eight EUs in five slices, 12 GiB
+    /// of its own, and a hwconfig table that counts subslices and has no dual subslice keys.
+    pub fn battlemage() -> CardFacts {
+        let gt = |kind, id, ip| Gt {
+            kind,
+            tile: 0,
+            id,
+            reference_clock: 19_200_000,
+            near_memory: 2,
+            far_memory: 1,
+            ip,
+        };
+        let engine = |class, instance, gt| Engine { class, instance, gt };
+        let mask = |kind, mask: &[u8]| TopologyMask { gt: 0, kind, mask: mask.to_vec() };
+        let region = |class, instance, total, cpu_visible| MemoryRegion {
+            class,
+            instance,
+            min_page_size: 0x1000,
+            total,
+            used: 0,
+            cpu_visible,
+        };
+        CardFacts {
+            address: Some("0000:03:00.0".into()),
+            driver: "xe".into(),
+            pci: PciIdentity { vendor: 0x8086, device: 0xE20B, revision: 0, ..PciIdentity::default() },
+            config: Config { device_id: 0xE20B, revision: 0, flags: 0x3F, va_bits: 48, ..Config::default() },
+            regions: vec![
+                region(MemoryRegion::SYSTEM, 0, 31735 << 20, 0),
+                region(MemoryRegion::VRAM, 1, 12216 << 20, 12216 << 20),
+            ],
+            engines: vec![
+                engine(Engine::RENDER, 0, 0),
+                engine(Engine::COPY, 0, 0),
+                engine(Engine::COMPUTE, 0, 0),
+                engine(Engine::VIDEO_DECODE, 0, 1),
+                engine(Engine::VIDEO_DECODE, 1, 1),
+            ],
+            gts: vec![
+                gt(Gt::MAIN, 0, IpVersion { major: 20, minor: 1, revision: 0 }),
+                gt(Gt::MEDIA, 1, IpVersion { major: 13, minor: 1, revision: 1 }),
+            ],
+            topology: vec![
+                mask(TopologyMask::DSS_GEOMETRY, &[0xFF, 0xFF, 0x0F, 0]),
+                mask(TopologyMask::DSS_COMPUTE, &[0xFF, 0xFF, 0x0F, 0]),
+                mask(TopologyMask::SIMD16_EU_PER_DSS, &[0xFF, 0]),
+            ],
+            hwconfig: Hwconfig::parse(&table(&[
+                (hwconfig::MAX_SLICES_SUPPORTED, 5),
+                (hwconfig::MAX_SUBSLICE, 20),
+                (hwconfig::MAX_EU_PER_SUBSLICE, 8),
+                (hwconfig::NUM_THREADS_PER_EU, 8),
+            ])),
+            frequencies: Frequencies { highest: Some(2850), lowest: Some(400), ..Frequencies::default() },
+            ..CardFacts::default()
+        }
+    }
+
+    #[test]
+    fn a_table_that_counts_subslices_still_places_the_cores() {
+        let card = battlemage();
+        assert_eq!((card.dual_subslices(), card.eu_count(), card.slices()), (20, 160, Some(5)));
+        let cores = card.cores();
+        assert_eq!(cores.len(), 20);
+        assert_eq!((cores[19].slice, cores[19].index), (4, 3), "four to a slice");
+        assert_eq!((card.card_memory(), card.system_memory()), (12216 << 20, 31735 << 20));
     }
 
     #[test]

@@ -42,7 +42,21 @@ pub const XE2_LPG: Generation = Generation {
     threads_per_eu: 8,
 };
 
-const KNOWN: [Generation; 1] = [XE2_LPG];
+/// Battlemage's graphics, the Arc B570 and B580: IGFX_BMG on IGFX_XE2_HPG_CORE, which is the same
+/// core number as Lunar Lake's.
+pub const XE2_HPG: Generation = Generation {
+    name: "Xe2 HPG (Battlemage)",
+    render_ip: (20, 1),
+    product_family: 1274,
+    pch_family: 0,
+    display_core: 0x0C09,
+    render_core: 0x0C09,
+    platform_type: 0,
+    gt_type: 18,
+    threads_per_eu: 8,
+};
+
+const KNOWN: [Generation; 2] = [XE2_LPG, XE2_HPG];
 
 /// The profile for a card whose render IP is `ip`, if there is one. The revision doesn't matter.
 pub fn for_render_ip(ip: IpVersion) -> Option<&'static Generation> {
@@ -62,8 +76,15 @@ mod tests {
     }
 
     #[test]
+    fn battlemage_is_found_by_its_render_ip() {
+        let ip = IpVersion { major: 20, minor: 1, revision: 0 };
+        assert_eq!(for_render_ip(ip), Some(&XE2_HPG));
+        assert_eq!(XE2_HPG.product_family, 1274);
+    }
+
+    #[test]
     fn another_ip_has_no_profile() {
-        assert_eq!(for_render_ip(IpVersion { major: 20, minor: 1, revision: 0 }), None);
+        assert_eq!(for_render_ip(IpVersion { major: 20, minor: 2, revision: 0 }), None);
         assert_eq!(for_render_ip(IpVersion::default()), None, "a kernel that gives no IP version");
     }
 }
