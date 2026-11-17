@@ -18,6 +18,24 @@ use guesthouse_messages::{MessageHeader, Status};
 const PROCESS_ID: usize = 0x20;
 const PROCESS_FLAGS: usize = 0x232;
 const PROCESS_32_BIT: u8 = 4;
+/// Between the PID and the flags, the process's name as UTF-16 ending in a zero, when the guest
+/// gives one: the 261 units of MAX_PATH and its zero.
+const PROCESS_NAME: std::ops::Range<usize> = 0x28..PROCESS_FLAGS;
+
+/// The program a new process runs, by its file name alone: the folders before it can name the
+/// guest's user, and the log has no use for them. Empty when the guest sent no name.
+fn program_name(message: &[u8]) -> String {
+    let field = message.get(PROCESS_NAME).unwrap_or_default();
+    let units: Vec<u16> = field
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .take_while(|unit| *unit != 0)
+        .collect();
+    let path = String::from_utf16_lossy(&units);
+    path.rsplit(['\\', '/']).next().unwrap_or_default().to_owned()
+}
 
 impl<B: Backend, M: GuestMemory> Session<B, M> {
     pub(super) fn create_process(&mut self, message: &[u8], out: &mut Vec<u8>) -> Handled {
@@ -25,7 +43,15 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if u8_at(message, PROCESS_FLAGS)? & PROCESS_32_BIT != 0 {
             self.processes_32_bit.insert(handle);
         }
-        self.guest_pids.insert(handle, u32_at(message, PROCESS_ID)?);
+        let pid = u32_at(message, PROCESS_ID)?;
+        self.guest_pids.insert(handle, pid);
+        // So a later line about this process can be tied to a program in the guest.
+        match program_name(message) {
+            name if name.is_empty() => {
+                log::debug!("process {handle:#x} is guest pid {pid}, which gave no name")
+            }
+            name => log::debug!("process {handle:#x} is guest pid {pid}, {name}"),
+        }
         put_u32(out, handle);
         Ok(())
     }
@@ -280,5 +306,25 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
         answer_status(Status::SUCCESS, out);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_process(name: &str) -> Vec<u8> {
+        let mut message = vec![0; PROCESS_FLAGS + 1];
+        let units: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        message[PROCESS_NAME.start..PROCESS_NAME.start + units.len()].copy_from_slice(&units);
+        message
+    }
+
+    #[test]
+    fn a_process_is_named_by_its_programs_file_name_alone() {
+        assert_eq!(program_name(&create_process("C:\\Users\\ana\\Games\\game.exe")), "game.exe");
+        assert_eq!(program_name(&create_process("dwm.exe")), "dwm.exe");
+        assert_eq!(program_name(&create_process("")), "");
+        assert_eq!(program_name(&[0; 0x30]), "", "a message too short for the name has none");
     }
 }
