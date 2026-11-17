@@ -7,12 +7,13 @@ use regex::Regex;
 
 const NAME: &str = "host/kernel-log.txt";
 /// The drivers and subsystems a GPU guest goes through.
-const WANTED: &str = r"(?i)nvidia|nvrm|amdgpu|drm|kvm|vfio|iommu|gpu|udmabuf|landlock";
+const WANTED: &str = r"(?i)nvidia|nvrm|amdgpu|\bxe\b|i915|drm|kvm|vfio|iommu|gpu|udmabuf|landlock";
 /// The newest lines are the ones about the failure.
 const MOST_LINES: usize = 3000;
 const SECONDS: u32 = 20;
 /// The same, for a tester to run, as sudo can't be asked for here.
-const BY_HAND: &str = "sudo dmesg | grep -iE 'nvidia|nvrm|amdgpu|drm|kvm|vfio|iommu|gpu|udmabuf|landlock'";
+const BY_HAND: &str =
+    "sudo dmesg | grep -iE 'nvidia|nvrm|amdgpu|\\bxe\\b|i915|drm|kvm|vfio|iommu|gpu|udmabuf|landlock'";
 
 pub fn collect(found: &mut Collection) {
     // dmesg first, as journalctl puts the host's name on every line. journalctl is the way in for a
@@ -59,10 +60,12 @@ mod tests {
     #[test]
     fn only_lines_about_gpus_and_kvm_are_kept() {
         let log = "[1.0] usb 1-1: new device\n[2.0] NVRM: loading NVIDIA UNIX Open Kernel Module\n\
-                   [3.0] amdgpu 0000:03:00.0: ring gfx timeout\n[4.0] EXT4-fs mounted\n[5.0] kvm: enabled\n";
+                   [3.0] amdgpu 0000:03:00.0: ring gfx timeout\n[4.0] EXT4-fs mounted\n[5.0] kvm: enabled\n\
+                   [6.0] xe 0000:03:00.0: GT0: Engine reset\n[7.0] systemd: Started foo.exe runner\n";
         assert_eq!(
             wanted_lines(log),
-            "[2.0] NVRM: loading NVIDIA UNIX Open Kernel Module\n[3.0] amdgpu 0000:03:00.0: ring gfx timeout\n[5.0] kvm: enabled\n"
+            "[2.0] NVRM: loading NVIDIA UNIX Open Kernel Module\n[3.0] amdgpu 0000:03:00.0: ring gfx timeout\n[5.0] kvm: enabled\n\
+             [6.0] xe 0000:03:00.0: GT0: Engine reset\n"
         );
     }
 }
