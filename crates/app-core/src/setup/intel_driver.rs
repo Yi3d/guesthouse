@@ -6,12 +6,13 @@
 //! the `Graphics` folder serve every Intel card between them, one for integrated cards and one for
 //! cards with memory of their own, and the driver's files sit beside them in that folder.
 //! The files a card gets are the ones that INF copies for it (see `intel_inf`), so the guest gets
-//! them and not the kernel driver, the firmware or the media software.
+//! them and not the firmware or the media software. Of the kernel driver's files it gets only the
+//! one the daemon names as the adapter's image path, which Windows wants to find in the folder.
 
 use super::driver::Extraction;
 use super::guest_files::{GuestFile, file_list};
 use super::inf::inf_driver_version;
-use super::intel::{SYSTEM_LIST, folder_problem, write_intel_setup};
+use super::intel::{KERNEL_DRIVERS, OPENGL_DRIVERS, SYSTEM_LIST, folder_problem, write_intel_setup};
 use super::intel_inf::{decode, guest_files, lists_device, system_files};
 use crate::context::Context;
 use crate::failure::{Failure, Result};
@@ -107,6 +108,13 @@ fn listed_paths(listing: &str) -> Vec<&str> {
     listing.lines().filter_map(|line| line.strip_prefix(PATH_LINE)).collect()
 }
 
+/// The kernel driver the daemon names for the kind of card whose OpenGL driver is among `names`.
+fn kernel_driver(names: &[String]) -> Option<&'static str> {
+    let has = |wanted: &str| names.iter().any(|name| name.eq_ignore_ascii_case(wanted));
+    let kind = OPENGL_DRIVERS.iter().position(|pair| has(pair[0]))?;
+    Some(KERNEL_DRIVERS[kind])
+}
+
 /// Reads Intel's installer at `path`, and says whether it will do for the card `device`.
 pub fn read_intel_installer(path: &str, device: u32) -> Result<IntelPackage> {
     let listing = String::from_utf8_lossy(&seven_zip(&["l", "-ba", "-slt", path])?).into_owned();
@@ -117,6 +125,7 @@ pub fn read_intel_installer(path: &str, device: u32) -> Result<IntelPackage> {
     }
     let system = system_files(&inf, device);
     let mut names = guest_files(&inf, device);
+    names.extend(kernel_driver(&names).map(str::to_owned));
     names.extend(system.iter().map(|file| file.source.clone()));
     let mut seen = std::collections::BTreeSet::new();
     names.retain(|name| seen.insert(name.to_lowercase()));
@@ -203,7 +212,7 @@ mod tests {
         let installer =
             make_installer_of(&scratch, &[(INF_FILES[0], &other_cards), (INF_FILES[1], &fake_inf())]);
         let package = read_intel_installer(&installer, DEVICE).unwrap();
-        assert_eq!(package.entries.len(), GUEST_FILES.len() + SYSTEM_FILES.len());
+        assert_eq!(package.entries.len(), GUEST_FILES.len() + SYSTEM_FILES.len() + 1);
         let nowhere = read_intel_installer(&installer, 0x1234).unwrap_err();
         assert!(nowhere.0.contains("device 1234"), "{}", nowhere.0);
     }
@@ -225,7 +234,7 @@ mod tests {
         let installer = make_installer(&scratch, &fake_inf());
         let package = read_intel_installer(&installer, DEVICE).unwrap();
         assert_eq!(package.version, INTEL_WINDOWS_DRIVER);
-        assert_eq!(package.entries.len(), GUEST_FILES.len() + SYSTEM_FILES.len());
+        assert_eq!(package.entries.len(), GUEST_FILES.len() + SYSTEM_FILES.len() + 1);
         assert_eq!(package.system_files.len(), SYSTEM_FILES.len());
         let folder = unpack_intel(&Extraction::new(&installer), &context, &package, &|_| {}).unwrap();
         assert_eq!(intel_driver_folder(&context), Some(folder.clone()));
@@ -239,10 +248,12 @@ mod tests {
         let mut wanted: Vec<String> = GUEST_FILES.iter().map(|name| (*name).to_owned()).collect();
         wanted.extend(SYSTEM_FILES.iter().map(|file| file.1.to_owned()));
         wanted.push(SYSTEM_LIST.to_owned());
+        wanted.push(KERNEL_DRIVERS[0].to_owned());
         wanted.sort();
         assert_eq!(
             names, wanted,
-            "nothing but the files the INF copies for the card, no kernel driver, and the list of the system ones"
+            "nothing but the files the INF copies for the card, the kernel driver the daemon names, and the \
+             list of the system ones"
         );
         let list = fs::read_to_string(folder.join(SYSTEM_LIST)).unwrap();
         assert_eq!(list.lines().count(), SYSTEM_FILES.len());

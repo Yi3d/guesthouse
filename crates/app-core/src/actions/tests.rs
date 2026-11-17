@@ -665,6 +665,7 @@ fn an_intel_machine_is_given_neither_nvidias_files_nor_amds_and_the_guest_is_not
 fn an_intel_machine_is_given_the_loaders_from_the_drivers_list_out_of_intels_store_folder() {
     let scratch = Scratch::new();
     let mut context = plain_task_context(&scratch);
+    crate::setup::intel::stand_in::lay_out_driver(&scratch, "intel-driver");
     let folder = scratch.path("intel-driver");
     scratch.write("intel-driver/system-files.txt", "System32\tvulkan-1-64.dll\tvulkan-1.dll\n");
     crate::setup::intel::write_intel_setup(&context, &folder, "32.0.101.9175").unwrap();

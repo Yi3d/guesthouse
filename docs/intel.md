@@ -59,7 +59,7 @@ Give it a PCI address, like `0000:00:02.0`, if you have more than one Intel card
 
 ## What it changes in Windows
 
-At install, Windows gets the user-mode part of Intel's driver in its host driver store, under the folder name the daemon gives it. Not the kernel driver, the firmware, or Intel's media software.
+At install, Windows gets the user-mode part of Intel's driver in its host driver store, under the folder name the daemon gives it, and one file of the kernel driver: `igdkmdn64.sys` for Lunar Lake or `igdkmdnd64.sys` for Battlemage, the card's own. Windows never loads it, as the paravirtual adapter's kernel driver is Windows' own, but the daemon names it as the adapter's driver image, and Windows won't start the adapter unless that file is in the folder. NVIDIA's and AMD's folders carry theirs for the same reason. The rest of the kernel driver, the firmware and Intel's media software don't go in.
 
 It also gets the libraries Intel's INF copies to Windows' system folders, which programs find by name and which lead them to Intel's OpenCL, Vulkan and Level Zero drivers. The app reads the list from the INF when the driver is unpacked (the sections for the card that copy to directory 11 or `10,SysWow64`), leaving out Intel's control library, media libraries and tools such as `vulkaninfo`, and the guest's setup script places them from the store copy. Every start checks them again and puts back any that are missing. A file is only copied when Windows lacks it or has an older one, which is the INF's own rule, so Windows' own `opengl32.dll` stays. For driver 32.0.101.9175 on the Arc 140V:
 

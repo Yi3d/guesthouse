@@ -6,7 +6,8 @@
 //! the other loaders ask the adapter for registry values by name. The file names are the ones
 //! Intel's INF gives the card. Most are the same for every card; the OpenGL and kernel drivers
 //! are not, and come with the card's generation as [`CardDrivers`]. The files have to be in the
-//! guest, under the host driver store, at [`DRIVER_STORE`]. Nothing here copies them.
+//! guest, under the host driver store, at [`DRIVER_STORE`], the kernel driver's too. Nothing here
+//! copies them.
 
 use super::bytes::dword;
 use guesthouse_backend::guest_text::{self, utf16_list, utf16_zero};
@@ -37,7 +38,8 @@ const DIRECT3D_12: usize = 3;
 pub struct CardDrivers {
     pub opengl: &'static str,
     pub opengl_32_bit: &'static str,
-    /// Named to Windows as the adapter's kernel driver. No file of it goes to the guest.
+    /// Named to Windows as the adapter's kernel driver image. The guest never loads it, but Windows
+    /// won't start the adapter unless the file is in the driver's folder, so the app puts it there.
     pub kernel: &'static str,
 }
 

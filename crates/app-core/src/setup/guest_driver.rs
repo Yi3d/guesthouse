@@ -80,8 +80,8 @@ mod tests {
         let mut intel = Machine::new("w", "W", "/d", "/v");
         intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
         assert_eq!(guest_driver(&context, &intel), Err(NO_INTEL_SETUP), "NVIDIA's driver is not Intel's");
+        crate::setup::intel::stand_in::lay_out_driver(&scratch, "intel-driver");
         let unpacked = scratch.path("intel-driver");
-        fs::create_dir_all(&unpacked).unwrap();
         write_intel_setup(&context, &unpacked, "32.0.101.9175").unwrap();
         let driver = guest_driver(&context, &intel).unwrap();
         assert_eq!((driver.disc_folder, driver.store_folder), (INTEL_DISC_FOLDER, INTEL_STORE_FOLDER));
