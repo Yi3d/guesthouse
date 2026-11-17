@@ -34,6 +34,8 @@ pub enum QueryOutcome {
     DriverName(Status, NameAnswer),
     /// OpenGL's query, answered with this driver.
     OpenGl(Status, &'static str),
+    /// A WDDM capability query, answered with what this backend can promise.
+    Caps(Status),
     /// Not one of this backend's, so the core answers it or says it can't.
     LeftToTheCore,
 }
@@ -48,6 +50,8 @@ impl fmt::Display for QueryOutcome {
             Self::Record(status, Asked::Refused(why)) => write!(f, "refused={:#x} why=\"{why}\"", status.0),
             Self::DriverName(_, NameAnswer::Given(name)) => write!(f, "answered=driver-name driver={name}"),
             Self::OpenGl(_, name) => write!(f, "answered=opengl-driver driver={name}"),
+            Self::Caps(status) if *status == Status::SUCCESS => f.write_str("answered=caps"),
+            Self::Caps(status) => write!(f, "refused={:#x} why=\"too short for the caps\"", status.0),
             Self::DriverName(status, NameAnswer::Withheld) => {
                 write!(f, "refused={:#x} why=\"held back by the software desktop switch\"", status.0)
             }
@@ -66,6 +70,7 @@ impl QueryOutcome {
             Self::Record(status, asked) => (status.0, Some(asked), None),
             Self::DriverName(status, name) => (status.0, None, Some(name)),
             Self::OpenGl(status, name) => (status.0, None, Some(NameAnswer::Given(name))),
+            Self::Caps(status) => (status.0, None, None),
             Self::LeftToTheCore => (0, None, None),
         }
     }

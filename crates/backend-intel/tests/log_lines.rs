@@ -48,7 +48,8 @@ fn every_kind_of_exchange_has_its_line() {
     query(&mut session, record::QUERY_TYPE, &[0; record::COUNT_SIZE]);
     query(&mut session, record::QUERY_TYPE, &vec![0; record::RECORD_SIZE]);
     query(&mut session, 1, &DIRECT3D_12.to_le_bytes());
-    query(&mut session, 77, &[0; 16]);
+    query(&mut session, 77, &[0; 4]);
+    query(&mut session, 65, &[0; 16]);
     let context = context(&mut session, 0, &context_data());
     let (queue, _) = queue(&mut session, context);
     allocate(&mut session, &render_target());
@@ -73,7 +74,8 @@ fn every_kind_of_exchange_has_its_line() {
         ("intel query kind=0 size=4 wow64=0 answered=adapter-count", 1),
         ("intel query kind=0 size=9588 wow64=0 answered=record", 1),
         ("intel query kind=1 size=4 wow64=0 answered=driver-name driver=igd12umd64.dll", 1),
-        ("intel query kind=77 size=16 wow64=0 answered=left-to-the-core", 1),
+        ("intel query kind=77 size=4 wow64=0 answered=caps", 1),
+        ("intel query kind=65 size=16 wow64=0 answered=left-to-the-core", 1),
         ("intel context process=0x40002000 node=0 node_name=3d size=144 type=3 guest_pid=4242", 1),
         ("intel queue id=", 1),
         ("intel allocation size=2352 type=2", 1),

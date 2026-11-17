@@ -20,3 +20,4 @@ pub mod nodes;
 pub mod partition;
 pub mod record;
 pub mod shape;
+pub mod wddm_caps;

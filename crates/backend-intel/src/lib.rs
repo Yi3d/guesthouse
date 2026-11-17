@@ -387,13 +387,17 @@ impl Backend for IntelBackend {
                 let (status, name) = guest_driver::write_name(query, self.software_desktop, out);
                 QueryOutcome::DriverName(status, name)
             }
-            _ => QueryOutcome::LeftToTheCore,
+            _ => match protocol::wddm_caps::answer(query, out) {
+                Some(status) => QueryOutcome::Caps(status),
+                None => QueryOutcome::LeftToTheCore,
+            },
         };
         self.traffic.query(query, outcome);
         match outcome {
             QueryOutcome::Record(status, _)
             | QueryOutcome::DriverName(status, _)
-            | QueryOutcome::OpenGl(status, _) => Some(status),
+            | QueryOutcome::OpenGl(status, _)
+            | QueryOutcome::Caps(status) => Some(status),
             QueryOutcome::LeftToTheCore => None,
         }
     }
