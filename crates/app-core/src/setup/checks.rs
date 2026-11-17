@@ -9,6 +9,7 @@ use crate::library::INSTALL_ROOM_GIB;
 use crate::linux::amd::amd_cards;
 use crate::linux::driver_versions::{branch_refusal, branch_refusal_among, untested_warning};
 use crate::machine::{MIN_RAM_GIB, Machine};
+use crate::setup::intel::supported_intel_cards;
 use crate::usb::sysfs_text;
 use crate::vm_args::on_path;
 use guesthouse_backend_nvidia::profile::BRANCHES;
@@ -36,6 +37,10 @@ const BRANCH_FIX: &str = "GPU machines stay off until the branches match. Plain 
 const CARD_FIX: &str = "GPU-PV needs an NVIDIA RTX 50, 40, 30 or 20 series or GTX 16 series card on the open \
                         kernel modules, or an AMD card from the RX 5000 series on, or RDNA2 or newer graphics in a \
                         Ryzen, on amdgpu.";
+/// For a PC with no card of any maker GPU-PV runs on.
+const NO_CARD_FIX: &str = "GPU-PV needs an NVIDIA RTX 50, 40, 30 or 20 series or GTX 16 series card on the open \
+                           kernel modules, an AMD card from the RX 5000 series on, or RDNA2 or newer graphics in a \
+                           Ryzen, on amdgpu, or for testing, an Intel Arc B580 or Arc 140V on xe.";
 const EXPERIMENTAL_FIX: &str =
     "Nobody has run Windows on this card yet. Others on the same chip work, so it likely does too.";
 const AMD_UNSUPPORTED_FIX: &str = "Windows on AMD needs an RDNA card: the RX 5000 series and newer, or RDNA2 or \
@@ -43,6 +48,10 @@ const AMD_UNSUPPORTED_FIX: &str = "Windows on AMD needs an RDNA card: the RX 500
 /// What setup does on a PC whose only cards are AMD's: nothing, as that driver comes with a machine.
 pub const AMD_NEEDS_NO_SETUP: &str = "This PC's card is AMD's, and it needs no setup. AMD's driver is asked for \
                                       when you make a Windows machine.";
+/// What setup does on a PC whose only card GPU-PV runs on is Intel's: nothing, as with AMD's.
+pub const INTEL_NEEDS_NO_SETUP: &str = "This PC's card is Intel's, and it needs no setup. Windows with GPU-PV runs \
+                                        on it at a test stage, where nothing is drawn by the card yet. Intel's \
+                                        driver is asked for when you make a Windows machine.";
 /// The Linux drivers Windows has run on, newest first. The guest's graphics depend on the exact version.
 pub const TESTED_DRIVERS: [&str; 2] = ["620.70.06", "615.78.08"];
 /// What setup keeps of the installer, and room to swap it for a new copy.
@@ -74,6 +83,7 @@ pub enum Part {
     Pc,
     Nvidia,
     Amd,
+    Intel,
 }
 
 /// Which makers' cards a GPU machine can run on, as far as the checks can say.
@@ -81,11 +91,12 @@ pub enum Part {
 pub struct GpuVerdict {
     pub nvidia: bool,
     pub amd: bool,
+    pub intel: bool,
 }
 
 impl GpuVerdict {
     pub fn any(self) -> bool {
-        self.nvidia || self.amd
+        self.nvidia || self.amd || self.intel
     }
 }
 
@@ -99,6 +110,7 @@ pub fn gpu_verdict(checks: &[Check]) -> GpuVerdict {
     GpuVerdict {
         nvidia: pc && found(Part::Nvidia) && fine(Part::Nvidia),
         amd: pc && found(Part::Amd) && fine(Part::Amd),
+        intel: pc && found(Part::Intel) && fine(Part::Intel),
     }
 }
 
@@ -122,14 +134,36 @@ fn card_judged(context: &Context) -> Option<Card> {
     card_in_use(context).or_else(|| find_cards(context).into_iter().next())
 }
 
-/// A check for each maker's card this PC has, or one failure if it has neither.
+/// A check for each maker's card this PC has, or one failure if it has none. Intel's cards are only
+/// looked at on a PC with neither NVIDIA's nor AMD's, as they are at a test stage, and a PC that has
+/// one of those runs on it.
 fn check_cards(context: &Context) -> Vec<Check> {
     let checks: Vec<Check> = [check_card(context), check_amd_card(context)].into_iter().flatten().collect();
-    if checks.is_empty() {
-        let text = "No NVIDIA or AMD card was found.";
-        return vec![Check::new("Graphics card", CheckState::Failed, text, CARD_FIX)];
+    if !checks.is_empty() {
+        return checks;
     }
-    checks
+    match check_intel_card(context) {
+        Some(intel) => vec![intel],
+        None => {
+            let text = "No NVIDIA, AMD or Intel card was found.";
+            vec![Check::new("Graphics card", CheckState::Failed, text, NO_CARD_FIX)]
+        }
+    }
+}
+
+/// The first Intel card the Intel daemon is written for. It's a warning, not a failure: Windows sets
+/// up and starts on it, and nothing is drawn by the card yet.
+fn check_intel_card(context: &Context) -> Option<Check> {
+    const TITLE: &str = "Intel card";
+    let card = supported_intel_cards(context).into_iter().next()?;
+    let check = Check::new(
+        TITLE,
+        CheckState::Warning,
+        format!("{} at {}. Test stage.", card.name, card.pci),
+        "Windows sets up and starts on it, but nothing is drawn by the card yet. Intel's driver is asked for \
+         when you make the machine.",
+    );
+    Some(check.about(Part::Intel))
 }
 
 fn check_card(context: &Context) -> Option<Check> {
@@ -541,7 +575,7 @@ mod tests {
         assert!(
             found.len() == 1
                 && found[0].state == CheckState::Failed
-                && found[0].text.contains("No NVIDIA or AMD card")
+                && found[0].text.contains("No NVIDIA, AMD or Intel card")
                 && found[0].fix.contains("AMD")
         );
         assert!(!gpu_verdict(&found).any());
@@ -585,7 +619,7 @@ mod tests {
         fake_graphics(&scratch, "0000:7c:00.0", 11);
         let found = check_cards(&context);
         assert!(found[0].state == CheckState::Warning && found[0].text.contains("Experimental"));
-        assert_eq!(gpu_verdict(&found), GpuVerdict { nvidia: false, amd: true });
+        assert_eq!(gpu_verdict(&found), GpuVerdict { nvidia: false, amd: true, intel: false });
         fake_render_node(&scratch, 129, "0000:03:00.0", "0x1002", 0x7550);
         fake_graphics(&scratch, "0000:03:00.0", 12);
         let found = check_cards(&context);
@@ -596,7 +630,7 @@ mod tests {
     fn one_makers_failure_leaves_the_other_makers_card() {
         let check = |state, part| Check { part, ..Check::new("x", state, "", "") };
         let both = [check(CheckState::Failed, Part::Nvidia), check(CheckState::Warning, Part::Amd)];
-        assert_eq!(gpu_verdict(&both), GpuVerdict { nvidia: false, amd: true });
+        assert_eq!(gpu_verdict(&both), GpuVerdict { nvidia: false, amd: true, intel: false });
         let pc_failed = [check(CheckState::Ok, Part::Nvidia), check(CheckState::Failed, Part::Pc)];
         assert!(!gpu_verdict(&pc_failed).any());
     }
@@ -614,6 +648,51 @@ mod tests {
         let report = check_host(&context);
         assert!(report.checks.iter().all(|check| !check.title.contains("NVIDIA")), "{:?}", report.checks);
         assert_eq!(check_ubuntu(&context, &["sh"]).state, CheckState::Ok);
+    }
+
+    fn with_render_nodes(scratch: &Scratch, nodes: &[(u32, &str, &str, u32)]) -> Context {
+        let mut context = scratch_context(scratch);
+        context.pci_devices = scratch.path("pci");
+        context.drm_class = scratch.path("drm");
+        context.pci_names = scratch.write("pci.ids", NAMES);
+        context.driver_version_file = scratch.path("nothing");
+        for (minor, pci, vendor, device) in nodes {
+            fake_render_node(scratch, *minor, pci, vendor, *device);
+        }
+        context
+    }
+
+    #[test]
+    fn a_pc_with_only_an_intel_card_can_run_windows_with_nothing_red_about_nvidia() {
+        let scratch = Scratch::new();
+        let context = with_render_nodes(&scratch, &[(128, "0000:03:00.0", "0x8086", 0xE20B)]);
+        let found = check_cards(&context);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((found[0].part, found[0].state), (Part::Intel, CheckState::Warning));
+        assert!(found[0].text.contains("0000:03:00.0"), "{found:?}");
+        assert_eq!(gpu_verdict(&found), GpuVerdict { nvidia: false, amd: false, intel: true });
+        assert!(nvidia_checks(&context).is_empty());
+        let report = check_host(&context);
+        assert!(report.gpu);
+        let red = report.checks.iter().filter(|check| check.state == CheckState::Failed);
+        assert!(red.clone().all(|check| !check.title.contains("NVIDIA") && check.title != "Graphics card"));
+    }
+
+    #[test]
+    fn an_intel_card_beside_an_amd_one_changes_nothing_and_an_intel_igpu_it_does_not_run_on_is_not_one() {
+        let scratch = Scratch::new();
+        let beside = with_render_nodes(
+            &scratch,
+            &[(128, "0000:7c:00.0", "0x1002", 0x13C0), (129, "0000:03:00.0", "0x8086", 0xE20B)],
+        );
+        fake_graphics(&scratch, "0000:7c:00.0", 10);
+        assert!(check_cards(&beside).iter().all(|check| check.part == Part::Amd));
+        let other = Scratch::new();
+        let unsupported = with_render_nodes(&other, &[(128, "0000:00:02.0", "0x8086", 0x46A6)]);
+        let found = check_cards(&unsupported);
+        assert_eq!(found[0].state, CheckState::Failed);
+        assert_eq!(found[0].text, "No NVIDIA, AMD or Intel card was found.");
+        assert!(!gpu_verdict(&found).any());
     }
 
     #[test]

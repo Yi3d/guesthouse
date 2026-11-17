@@ -6,7 +6,9 @@ use super::{Step, Wizard};
 use crate::common::in_background;
 use crate::rows::{row_button, state_row};
 use adw::prelude::*;
-use guesthouse_app_core::setup::checks::{AMD_NEEDS_NO_SETUP, Check, Part, check_pc, gpu_verdict};
+use guesthouse_app_core::setup::checks::{
+    AMD_NEEDS_NO_SETUP, Check, INTEL_NEEDS_NO_SETUP, Part, check_pc, gpu_verdict,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -15,8 +17,8 @@ struct Parts {
     step: Step,
     group: adw::PreferencesGroup,
     rows: RefCell<Vec<adw::ActionRow>>,
-    /// Whether this PC's only cards are AMD's, which need no more setup, so Next ends it.
-    amd_only: Cell<bool>,
+    /// Whether this PC's only cards are AMD's or Intel's, which need no more setup, so Next ends it.
+    needs_no_setup: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -34,13 +36,13 @@ impl CheckPage {
             step,
             group,
             rows: RefCell::default(),
-            amd_only: Cell::default(),
+            needs_no_setup: Cell::default(),
         }));
         let handle = this.clone();
         again.connect_clicked(move |_| handle.check());
         let (pages, next, choosing) = (wizard.pages.clone(), driver.page().clone(), this.clone());
         this.0.step.next.connect_clicked(move |_| {
-            if choosing.0.amd_only.get() {
+            if choosing.0.needs_no_setup.get() {
                 pages.push(&done_page(&choosing.0.wizard));
             } else {
                 pages.push(&next);
@@ -82,11 +84,16 @@ impl CheckPage {
         }
         let verdict = gpu_verdict(checks);
         let has_nvidia = checks.iter().any(|check| check.part == Part::Nvidia);
-        parts.amd_only.set(verdict.amd && !has_nvidia);
+        let amd_only = verdict.amd && !has_nvidia;
+        // The checks look at Intel's cards only on a PC with neither NVIDIA's nor AMD's.
+        let intel_only = verdict.intel;
+        parts.needs_no_setup.set(amd_only || intel_only);
         let text = if verdict.nvidia {
             "This PC can run Windows with GPU-PV. Nothing has been changed."
-        } else if parts.amd_only.get() {
+        } else if amd_only {
             AMD_NEEDS_NO_SETUP
+        } else if intel_only {
+            INTEL_NEEDS_NO_SETUP
         } else if verdict.amd {
             "Windows can run on the AMD card, which needs no setup. The NVIDIA card can't yet: fix what has a \
              red mark, then check again."
@@ -95,6 +102,6 @@ impl CheckPage {
              do not need any of this."
         };
         parts.group.set_description(Some(text));
-        parts.step.next.set_sensitive(verdict.nvidia || parts.amd_only.get());
+        parts.step.next.set_sensitive(verdict.nvidia || parts.needs_no_setup.get());
     }
 }

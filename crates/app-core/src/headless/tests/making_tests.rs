@@ -188,6 +188,17 @@ fn setup_stops_at_a_check_that_failed_and_says_which() {
 }
 
 #[test]
+fn setup_on_a_pc_with_only_an_intel_card_has_nothing_to_do() {
+    let scratch = Scratch::new();
+    let context = with_cards(&scratch, &[]);
+    let intel = Check { part: Part::Intel, state: CheckState::Warning, ..passing("Intel card") };
+    let mut out = Vec::new();
+    setup_after(&context, &[passing("KVM"), intel], None, None, &mut out).unwrap();
+    let said = String::from_utf8(out).unwrap();
+    assert!(said.ends_with(&format!("{}\n", crate::setup::checks::INTEL_NEEDS_NO_SETUP)), "{said}");
+}
+
+#[test]
 fn setup_on_a_pc_with_only_an_amd_card_has_nothing_to_do() {
     let scratch = Scratch::new();
     let mut context = with_cards(&scratch, &[]);
