@@ -45,7 +45,7 @@ You can shut the machine down afterwards. If you build from source, `guesthouse-
 
 ## A desktop you can use
 
-At this stage an Intel machine's desktop is drawn in software: the guest is refused Intel's Direct3D 9, 10 and 11 drivers, while Direct3D 12, OpenCL, Level Zero and Vulkan still come to the card and the log. With those drivers, Windows' desktop compositor starts on the card, crashes as nothing it draws is run, and Windows then stops the card and the basic display with it, which leaves nothing on the screen. The daemon's log says when the desktop is in software. `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=0` in the daemon's environment gives the guest all of Intel's drivers, for an experiment.
+At this stage an Intel machine's desktop is drawn in software: the guest is refused Intel's Direct3D 9, 10 and 11 drivers, and the desktop compositor is refused Direct3D 12 too, while other programs' Direct3D 12, OpenCL, Level Zero and Vulkan still come to the card and the log. With those drivers, Windows' desktop compositor starts on the card, crashes as nothing it draws is run, and Windows then stops the card and the basic display with it, which leaves nothing on the screen. The daemon's log says when the desktop is in software. `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=0` in the daemon's environment gives the guest all of Intel's drivers, for an experiment.
 
 ## intel-probe
 
