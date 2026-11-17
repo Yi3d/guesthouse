@@ -1,13 +1,16 @@
 # What a bug report takes from a running Windows guest, sent by the host when the tester asks for a
-# report. It only reads: the logs Guesthouse's own guest pieces write, recent System events from the
-# display stack, the display adapter as Windows sees it, Windows' build, and whether a crash dump was
-# written, by name, time and size. Never a dump's contents, memory or anyone's files.
+# report. It only reads: the logs Guesthouse's own guest pieces write, recent events from the display
+# stack and about devices that failed to start, the display devices as Windows sees them, Windows'
+# build, and whether a crash dump was written, by name, time and size. Never a dump's contents, memory
+# or anyone's files.
 # Each part starts with a line '=== name', which the host splits on. 'names' is the accounts and the
 # computer's name, which the host takes out of the rest and never puts in the report.
 $ErrorActionPreference = 'SilentlyContinue'
 $mostLines = 2000
 $mostEvents = 300
-$mostMessage = 500
+# An event's message goes on one line. Plug and Play's put the problem and its status on the lines
+# after the first, so the whole message is kept, up to this many characters.
+$mostMessage = 800
 $eventDays = 7
 # The logs Guesthouse's guest pieces write: setup, the NVIDIA driver files, the display driver's
 # take-over and the mode and display checks.
@@ -22,6 +25,14 @@ $logs = [ordered]@{
 # Who writes about the display stack in the System log. 4101 is a driver that stopped answering and
 # was recovered, the timeout and reset a device-removed error follows from.
 $providers = @('Display', 'Microsoft-Windows-DxgKrnl', 'dxgkrnl', 'nvlddmkm', 'amdkmdag', 'amdwddmg', 'BasicDisplay', 'BasicRender')
+# None of those says when Windows stops a device. Plug and Play does, in the System log: 411 is a
+# device that had a problem starting, 219 a driver that failed to load. Its other events are about
+# every device there is, so only these two are taken.
+$pnpProvider = 'Microsoft-Windows-Kernel-PnP'
+$pnpEvents = @(411, 219)
+# The graphics kernel writes its own logs, apart from System: where it says it reset or stopped an
+# adapter. Every event in them is about the display stack.
+$graphicsLogs = @('Microsoft-Windows-DxgKrnl/Admin', 'Microsoft-Windows-DxgKrnl/Operational')
 $dumps = @('C:\Windows\MEMORY.DMP', 'C:\Windows\Minidump\*.dmp', 'C:\Windows\LiveKernelReports\*\*.dmp')
 
 '=== names'
@@ -37,18 +48,35 @@ foreach ($name in $logs.Keys) {
 
 '=== events'
 $since = (Get-Date).AddDays(-$eventDays)
-Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since } -MaxEvents 20000 |
-    Where-Object { $providers -contains $_.ProviderName -or $_.ProviderName -like '*Guesthouse*' } |
+$system = Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since } -MaxEvents 20000 |
+    Where-Object {
+        $providers -contains $_.ProviderName -or $_.ProviderName -like '*Guesthouse*' -or
+            ($_.ProviderName -eq $pnpProvider -and $pnpEvents -contains $_.Id)
+    }
+$graphics = foreach ($log in $graphicsLogs) {
+    Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $since } -MaxEvents $mostEvents
+}
+@($system) + @($graphics) | Where-Object { $_ } | Sort-Object TimeCreated -Descending |
     Select-Object -First $mostEvents |
     ForEach-Object {
-        $message = (($_.Message -split "`n")[0]).Trim()
+        $record = $_
+        $lines = $record.Message -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        $message = $lines -join ' | '
         if ($message.Length -gt $mostMessage) { $message = $message.Substring(0, $mostMessage) }
-        "$($_.TimeCreated.ToString('s')) $($_.ProviderName) $($_.Id) $($_.LevelDisplayName): $message"
+        "$($record.TimeCreated.ToString('s')) $($record.ProviderName) $($record.Id) $($record.LevelDisplayName): $message"
     }
 
 '=== adapter'
 Get-CimInstance Win32_VideoController | ForEach-Object {
     "$($_.Name), driver $($_.DriverVersion) of $($_.DriverDate), $($_.AdapterCompatibility), status $($_.Status)"
+}
+# Every display device Plug and Play has, started or not, with its problem and the status its driver
+# failed with, which say why Windows stopped it. A device with no problem has neither.
+'--- display devices'
+Get-PnpDevice -Class Display | ForEach-Object {
+    $failed = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_ProblemStatus').Data
+    $status = if ($null -ne $failed) { '0x{0:X8}' -f $failed } else { 'none' }
+    "$($_.FriendlyName), $($_.InstanceId), $($_.Status), problem $($_.Problem) ($($_.ConfigManagerErrorCode)), problem status $status"
 }
 
 '=== windows'
