@@ -26,6 +26,7 @@ pub mod generation;
 pub mod hwconfig;
 pub mod ioctl;
 pub mod protocol;
+pub mod recording;
 pub mod sysfs;
 mod traffic;
 mod watch;

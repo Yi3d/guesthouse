@@ -1,14 +1,16 @@
-//! `intel-probe [PCI_ADDRESS]`: what the host's xe driver says about an Intel card, in a form to
-//! paste into an issue.
+//! `intel-probe [PCI_ADDRESS] [--record FILE]`: what the host's xe driver says about an Intel card,
+//! in a form to paste into an issue.
 //!
 //! It reads sysfs and asks xe its read-only device queries, and nothing else: no address space,
 //! buffer or queue is made, so nothing runs on the card and the desktop is not touched. With no
-//! address it takes the first Intel card on xe.
+//! address it takes the first Intel card on xe. `--record FILE` also writes the facts to FILE as a
+//! recording, which a lab's daemon can stand in for the card with (see `recording`).
 
 use guesthouse_backend_intel::IntelBackend;
 use guesthouse_backend_intel::card::CardFacts;
 use guesthouse_backend_intel::ioctl::{self, INTEL_VENDOR, XE_DRIVER};
 use guesthouse_backend_intel::protocol::record;
+use guesthouse_backend_intel::recording;
 use guesthouse_backend_intel::xe_query::{FirmwareVersion, Gt, MemoryRegion};
 use std::path::Path;
 use std::process::ExitCode;
@@ -16,8 +18,22 @@ use std::process::ExitCode;
 const MIB: u64 = 1 << 20;
 const RECORD_WORDS_PER_LINE: usize = 6;
 
+const RECORD_OPTION: &str = "--record";
+
 fn main() -> ExitCode {
-    let address = std::env::args().nth(1);
+    let mut arguments = std::env::args().skip(1);
+    let (mut address, mut record_to) = (None, None);
+    while let Some(argument) = arguments.next() {
+        if argument == RECORD_OPTION {
+            let Some(file) = arguments.next() else {
+                eprintln!("{RECORD_OPTION} needs the file to write the recording to.");
+                return ExitCode::FAILURE;
+            };
+            record_to = Some(file);
+        } else {
+            address = Some(argument);
+        }
+    }
     let Some(node) = ioctl::intel_render_node(address.as_deref()) else {
         eprintln!("No Intel card on the {XE_DRIVER} driver was found.");
         for (name, driver) in ioctl::intel_nodes_in(Path::new("/sys/class/drm")) {
@@ -34,6 +50,13 @@ fn main() -> ExitCode {
         }
     };
     print_card(&node.device_file, &card);
+    if let Some(file) = record_to {
+        if let Err(error) = std::fs::write(&file, recording::write(&card)) {
+            eprintln!("Writing the recording to {file} failed: {error}");
+            return ExitCode::FAILURE;
+        }
+        println!("recorded        {file}");
+    }
     ExitCode::SUCCESS
 }
 
