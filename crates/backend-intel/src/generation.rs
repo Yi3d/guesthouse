@@ -3,8 +3,9 @@
 //! The adapter record names the platform and core families, which have to be right for the card,
 //! so those come from here, along with what the card can't be asked for. The numbers are Intel's
 //! open ones: the family and core enums from gmmlib's `igfxfmid.h`, and the rest from
-//! compute-runtime's hardware tables for the platform. Both are MIT. A card whose IP has no profile
-//! is refused, as the guest would be told the wrong platform.
+//! compute-runtime's hardware tables for the platform. Both are MIT. The driver file names are the
+//! ones Intel's INF gives these cards. A card whose IP has no profile is refused, as the guest would
+//! be told the wrong platform.
 
 use crate::protocol::guest_driver::{CardDrivers, XE2_HPG_DRIVERS, XE2_LPG_DRIVERS};
 use crate::xe_query::IpVersion;

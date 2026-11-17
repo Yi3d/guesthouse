@@ -177,6 +177,9 @@ impl IntelBackend {
         for gap in gaps::unset(shape::filled(&self.record)) {
             log::info!("{PREFIX} record-gap \"{gap}\"");
         }
+        if self.card.config.has_vram() {
+            log::info!("{PREFIX} record-gap \"{}\"", gaps::LOCAL_MEMORY);
+        }
         log::warn!("{PREFIX} this stage runs nothing on the card: the guest's work is finished unrun");
     }
 }

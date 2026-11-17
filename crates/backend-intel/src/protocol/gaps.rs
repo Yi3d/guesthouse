@@ -35,6 +35,9 @@ pub const RECORD: [&str; 19] = [
 const SLICE_ARRAYS: &str = "the slice, subslice and EU arrays of the GPU's shape, which compute-runtime \
      needs to open a device (the card did not say how its cores divide into slices)";
 
+/// What a card with memory of its own is not told about it. An integrated card has no use for these.
+pub const LOCAL_MEMORY: &str = "what goes with memory on the card: whether it takes 4 KiB pages, and which      kinds of memory may or should be placed there";
+
 /// Everything left at zero in a record, given whether its slice arrays were filled.
 pub fn unset(slice_arrays_filled: bool) -> Vec<&'static str> {
     let mut gaps = RECORD.to_vec();
