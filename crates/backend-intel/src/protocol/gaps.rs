@@ -19,7 +19,7 @@ pub const RECORD: [&str; 19] = [
      preemption and the per-context preemption granularity control",
     "the core and bus frequencies, the power limit and the fill rate",
     "the command buffer, patch list and allocation list sizes",
-    "the kernel driver's capability bits",
+    "the kernel driver's capability bits, but the one that says it runs from the driver store",
     "the cache sizes and bank count",
     "the slice array's slots past the ones seen: dual subslices past the sixth in a slice, and the \
      flag that says slices are populated dynamically",

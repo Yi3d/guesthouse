@@ -63,6 +63,8 @@ mod at {
     pub const COMPUTE_ENGINES_VALID: usize = 0x2090;
     /// GMM_GFX_PARTITIONING, [`super::partition`].
     pub const PARTITION: usize = 0x23B8;
+    /// KMD_CAPS_INFO, the kernel driver's capability bits.
+    pub const KERNEL_DRIVER_CAPS: usize = 0xB18;
     /// A byte that marks the adapter as a virtual machine's.
     pub const FROM_VIRTUAL_MACHINE: usize = 0x2468;
     /// A byte that marks that machine as a secure one.
@@ -71,6 +73,11 @@ mod at {
 
 /// The workaround entry that is set for an adapter that is a virtual machine's, and its value.
 const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
+/// KMD_CAPS_INFO's DriverStoreEnabled: the driver runs from the driver store, as one from a DCH INF
+/// always does, and the guest's copy is in its host driver store. Intel's Direct3D 12 driver loads
+/// its shader compiler from its own folder only when this is set, and by bare name, from nowhere it
+/// is, when it isn't: then every device fails.
+const DRIVER_STORE_ENABLED: u32 = 1 << 10;
 /// The compute engines the record's mask has room for.
 const MAX_COMPUTE_ENGINES: u32 = 4;
 /// The GPU address bits from which the card has five levels of page tables.
@@ -206,6 +213,7 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
         record[at::COMPUTE_ENGINES_VALID] = 1;
     }
 
+    put_dword(&mut record, at::KERNEL_DRIVER_CAPS, DRIVER_STORE_ENABLED);
     set_features(&mut record, facts);
     let (entry, value) = VIRTUAL_MACHINE_WORKAROUND;
     features::set_workaround(&mut record, entry, value);
@@ -355,7 +363,7 @@ pub(crate) mod tests {
     }
 
     fn query(size: usize, data: &[u8]) -> VendorQuery<'_> {
-        VendorQuery { kind: QUERY_TYPE, size, data, process_is_32_bit: false }
+        VendorQuery { kind: QUERY_TYPE, size, data, process_is_32_bit: false, program: "" }
     }
 
     #[test]
@@ -382,6 +390,12 @@ pub(crate) mod tests {
         let record = build(&facts());
         assert_eq!(record[at::FROM_VIRTUAL_MACHINE], 1);
         assert_eq!(record[at::SECURE_VIRTUAL_MACHINE], 0);
+    }
+
+    #[test]
+    fn the_kernel_driver_runs_from_the_driver_store_and_says_nothing_else() {
+        let record = build(&facts());
+        assert_eq!(dword(&record, at::KERNEL_DRIVER_CAPS), Some(1 << 10));
     }
 
     #[test]
