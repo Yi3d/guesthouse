@@ -19,7 +19,7 @@ use guesthouse_app_core::library::{
 };
 use guesthouse_app_core::machine::{Kind, MIN_CORES, MIN_RAM_GIB, Machine};
 use guesthouse_app_core::setup::amd::NO_AMD_SETUP;
-use guesthouse_app_core::setup::checks::gpu_warning;
+use guesthouse_app_core::setup::checks::machine_gpu_warning;
 use guesthouse_app_core::setup::guest_driver::guest_driver;
 use guesthouse_app_core::setup::intel::NO_INTEL_SETUP;
 use guesthouse_app_core::tasks::no_slot_text;
@@ -308,11 +308,9 @@ impl NewMachineDialog {
         if let Some(missing) = missing_driver {
             self.show_verdict(&iso.title, missing);
         } else if windows {
-            // The warning is about NVIDIA's card and setup.
             let maker = self.chosen_choice().map_or(GpuMaker::Nvidia, |choice| choice.maker);
-            let on_nvidia = maker == GpuMaker::Nvidia;
-            let warning = gpu_warning(&context)
-                .filter(|_| on_nvidia)
+            // The warning is about NVIDIA's card and setup, so the start's own rule says who hears it.
+            let warning = machine_gpu_warning(&context, &self.chosen_card())
                 .map_or_else(String::new, |text| format!(" {text}"));
             // A build from source has no driver to add, so it says nothing about one.
             let display = DriverPackage::find(&context).map_or("", |_| DISPLAY_DRIVER_NOTE);
