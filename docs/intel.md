@@ -16,7 +16,7 @@ You need a Lunar Lake laptop or an Arc B580, Linux with the `xe` driver on that 
 2. Make sure `7z` can unpack it. Intel's installer keeps its files in a RAR archive, and many distributions' `7z` leave RAR out, so it lists the file and then fails to unpack it. The app says so when that happens. 7-Zip's own Linux build from 7-zip.org works. Put it on your PATH as `7z`.
 3. In the app, choose New Machine and pick your Windows ISO. Pick the Intel card. The dialog asks for Intel's installer. Choose the file, and it takes the drivers out of it. This reads the whole archive, so it takes a few minutes and about 1.8 GB.
 4. Create the machine and let it install. The install is the same as for the other cards. It checks at the end that the driver's files reached Windows, and puts the loaders from Intel's INF in Windows' system folders (see "What it changes in Windows").
-5. Start the machine. The app starts the daemon with its full log on. Wait a minute or two after the desktop comes up, even if it's black.
+5. Start the machine. The app starts the daemon with its full log on. Wait a minute or two after the desktop comes up, even if it's black. If Windows comes up without its GPU, the app says so and leaves the VM running on Windows' basic display, so the next step still works. A bug report from the app then takes the files of step 6 too, with the guest's account and computer names taken out.
 6. Run this in a terminal. `MACHINE` is the name of the machine's folder in `~/.local/share/guesthouse/machines`:
 
    ```sh
