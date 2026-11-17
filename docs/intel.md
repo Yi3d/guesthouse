@@ -57,6 +57,10 @@ cargo run --release -p guesthouse-backend-intel --bin intel-probe
 
 Give it a PCI address, like `0000:00:02.0`, if you have more than one Intel card. If you have one of these cards, or another Intel card on `xe`, and want to help, open an issue with its output.
 
+## A machine from an earlier test build
+
+Test builds up to 0.6.2-intel.1 left the kernel driver file out, so Windows on a machine they made starts without its GPU. Such a machine needs no new install. The first start on this version says Intel's driver on this PC lacks the file. Give Intel's installer again in the New Machine dialog: pick a Windows ISO and the Intel card, choose `gfx_win_101.9175.exe` where it is asked for, wait for it to be unpacked, and close the dialog. Then start the machine. Once its desktop is up, the app copies the file into Windows and restarts Windows once, and the GPU check runs after that.
+
 ## What it changes in Windows
 
 At install, Windows gets the user-mode part of Intel's driver in its host driver store, under the folder name the daemon gives it, and one file of the kernel driver: `igdkmdn64.sys` for Lunar Lake or `igdkmdnd64.sys` for Battlemage, the card's own. Windows never loads it, as the paravirtual adapter's kernel driver is Windows' own, but the daemon names it as the adapter's driver image, and Windows won't start the adapter unless that file is in the folder. NVIDIA's and AMD's folders carry theirs for the same reason. The rest of the kernel driver, the firmware and Intel's media software don't go in.
