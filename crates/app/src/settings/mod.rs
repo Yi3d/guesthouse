@@ -12,6 +12,7 @@ mod gpu_preview;
 mod hardware;
 mod jail;
 mod linux_gpu;
+mod macos;
 mod network;
 mod remove;
 mod sharing;
@@ -98,6 +99,7 @@ struct Parts {
     _gpu_preview: gpu_preview::GpuPreview,
     _jail: jail::Jail,
     linux_gpu: linux_gpu::LinuxGpu,
+    macos: macos::Macos,
     windows_card: windows_card::WindowsCard,
     sharing: sharing::Sharing,
     network: network::Network,
@@ -119,6 +121,7 @@ impl SettingsDialog {
             windows_card: windows_card::WindowsCard::new(&shared, &pages.general),
             _gpu_preview: gpu_preview::GpuPreview::new(&shared, &pages.general),
             linux_gpu: linux_gpu::LinuxGpu::new(&shared, &pages.general),
+            macos: macos::Macos::new(&shared, &pages.general),
             _account: account::Account::new(&shared, &pages.general),
             _token: token::Token::new(&shared, &pages.general),
             _jail: jail::Jail::new(&shared, &pages.general),
@@ -156,6 +159,7 @@ impl SettingsDialog {
         parts.network.set_status(status);
         parts.usb.set_status(status);
         parts.linux_gpu.set_status(status);
+        parts.macos.set_status(status);
         parts.windows_card.set_status(status);
         parts.remove.set_status(status);
     }
