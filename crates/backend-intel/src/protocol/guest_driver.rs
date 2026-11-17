@@ -3,9 +3,10 @@
 //!
 //! The paravirtual adapter's kernel driver is Windows' own, and the user-mode drivers are Intel's.
 //! The guest asks for a Direct3D driver's path with adapter query type 1, OpenGL's with type 2, and
-//! the other loaders ask the adapter for registry values by name. The file names are the ones Intel's INF gives this
-//! card. The files have to be in the guest, under the host driver store, at [`DRIVER_STORE`].
-//! Nothing here copies them.
+//! the other loaders ask the adapter for registry values by name. The file names are the ones
+//! Intel's INF gives the card. Most are the same for every card; the OpenGL and kernel drivers
+//! are not, and come with the card's generation as [`CardDrivers`]. The files have to be in the
+//! guest, under the host driver store, at [`DRIVER_STORE`]. Nothing here copies them.
 
 use super::bytes::dword;
 use guesthouse_backend::guest_text::{self, utf16_list, utf16_zero};
@@ -30,14 +31,30 @@ const VERSION_FIELD: usize = 0;
 const NEWEST: usize = USER_DRIVERS.len() - 1;
 /// Direct3D 12's version in that field. Every version below it is Direct3D 9, 10 or 11.
 const DIRECT3D_12: usize = 3;
-const KERNEL_DRIVER: &str = "igdkmdn64.sys";
+
+/// The drivers Intel's INF names differently from one kind of card to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CardDrivers {
+    pub opengl: &'static str,
+    pub opengl_32_bit: &'static str,
+    /// Named to Windows as the adapter's kernel driver. No file of it goes to the guest.
+    pub kernel: &'static str,
+}
+
+/// Lunar Lake's, from the INF for integrated cards.
+pub const XE2_LPG_DRIVERS: CardDrivers =
+    CardDrivers { opengl: "igxe2lpgicd64.dll", opengl_32_bit: "igxe2lpgicd32.dll", kernel: "igdkmdn64.sys" };
+/// Battlemage's, from the INF for cards with memory of their own.
+pub const XE2_HPG_DRIVERS: CardDrivers =
+    CardDrivers { opengl: "igxe2hpgicd64.dll", opengl_32_bit: "igxe2hpgicd32.dll", kernel: "igdkmdnd64.sys" };
 
 /// The adapter query OpenGL's loader asks for its driver with.
 pub const QUERY_OPENGL: u32 = 2;
 /// The answer's path field: MAX_PATH UTF-16 units. The version and flags follow it.
 const OPENGL_NAME_BYTES: usize = 520;
-const OPENGL_DRIVER: &str = "igxe2lpgicd64.dll";
-const OPENGL_DRIVER_32_BIT: &str = "igxe2lpgicd32.dll";
+/// The values that name the OpenGL drivers, which the INF writes as lists of one.
+const OPENGL_DRIVER_VALUE: &str = "OpenGLDriverName";
+const OPENGL_DRIVER_32_BIT_VALUE: &str = "OpenGLDriverNameWow";
 /// What the INF gives for the OpenGL driver's version, flags and installed marker. The 32-bit
 /// driver has the same.
 const OPENGL_VERSION: u32 = 1;
@@ -49,19 +66,16 @@ const OPENGL_INSTALLED_VALUE: &str = "OpenGLInstalled";
 /// A value as the INF writes it, with file names in the driver store.
 enum Form {
     File(&'static str),
-    Files(&'static [&'static str]),
     Number(u32),
 }
 
 /// The values the loaders ask for, by the names the INF gives them. Registry names ignore case.
-const VALUES: [(&str, Form); 11] = [
+const VALUES: [(&str, Form); 9] = [
     ("OpenCLDriverName", Form::File("igdrcl64.dll")),
     ("OpenCLDriverNameWow", Form::File("igdrcl32.dll")),
     ("VulkanDriverName", Form::File("igvk64.json")),
     ("VulkanDriverNameWow", Form::File("igvk32.json")),
     ("LevelZeroDriverPath", Form::File("ze_intel_gpu64.dll")),
-    ("OpenGLDriverName", Form::Files(&[OPENGL_DRIVER])),
-    ("OpenGLDriverNameWow", Form::Files(&[OPENGL_DRIVER_32_BIT])),
     ("OpenGLVersion", Form::Number(OPENGL_VERSION)),
     ("OpenGLVersionWow", Form::Number(OPENGL_VERSION)),
     ("OpenGLFlags", Form::Number(OPENGL_FLAGS)),
@@ -99,8 +113,8 @@ fn in_store(file: &str) -> String {
 }
 
 /// Answers OpenGL's query: the driver's path, then its version and flags. Gives the driver's name.
-pub fn write_opengl_info(query: &VendorQuery<'_>, out: &mut Vec<u8>) -> &'static str {
-    let driver = if query.process_is_32_bit { OPENGL_DRIVER_32_BIT } else { OPENGL_DRIVER };
+pub fn write_opengl_info(query: &VendorQuery<'_>, drivers: &CardDrivers, out: &mut Vec<u8>) -> &'static str {
+    let driver = if query.process_is_32_bit { drivers.opengl_32_bit } else { drivers.opengl };
     let start = out.len();
     let mut path = utf16_zero(&in_store(driver));
     path.truncate(OPENGL_NAME_BYTES);
@@ -112,13 +126,17 @@ pub fn write_opengl_info(query: &VendorQuery<'_>, out: &mut Vec<u8>) -> &'static
 }
 
 /// The driver paths, DXCore's attributes, and the loaders' values, each of the type the INF gives it.
-pub fn registry(name: &RegistryName) -> Option<RegistryValue> {
+pub fn registry(name: &RegistryName, drivers: &CardDrivers) -> Option<RegistryValue> {
+    let one_file_list = |file: &str| RegistryValue {
+        value_type: Some(TYPE_STRING_LIST),
+        bytes: utf16_list(&[in_store(file)]),
+    };
     match name {
         RegistryName::DriverStorePath => {
             Some(RegistryValue { value_type: None, bytes: utf16_zero(DRIVER_STORE) })
         }
         RegistryName::DriverImagePath => {
-            let path = format!("{DRIVER_STORE}\\{KERNEL_DRIVER}");
+            let path = format!("{DRIVER_STORE}\\{}", drivers.kernel);
             Some(RegistryValue { value_type: None, bytes: utf16_zero(&path) })
         }
         RegistryName::Value(name) if name.eq_ignore_ascii_case(guest_text::DXCORE_ATTRIBUTES_VALUE) => {
@@ -131,14 +149,16 @@ pub fn registry(name: &RegistryName) -> Option<RegistryValue> {
                 bytes: OPENGL_INSTALLED.to_le_bytes().to_vec(),
             })
         }
+        RegistryName::Value(name) if name.eq_ignore_ascii_case(OPENGL_DRIVER_VALUE) => {
+            Some(one_file_list(drivers.opengl))
+        }
+        RegistryName::Value(name) if name.eq_ignore_ascii_case(OPENGL_DRIVER_32_BIT_VALUE) => {
+            Some(one_file_list(drivers.opengl_32_bit))
+        }
         RegistryName::Value(name) => {
             let (_, form) = VALUES.iter().find(|(known, _)| known.eq_ignore_ascii_case(name))?;
             let (value_type, bytes) = match form {
                 Form::File(file) => (TYPE_STRING, utf16_zero(&in_store(file))),
-                Form::Files(files) => {
-                    let paths: Vec<String> = files.iter().map(|file| in_store(file)).collect();
-                    (TYPE_STRING_LIST, utf16_list(&paths))
-                }
                 Form::Number(number) => (TYPE_NUMBER, number.to_le_bytes().to_vec()),
             };
             Some(RegistryValue { value_type: Some(value_type), bytes })
@@ -207,10 +227,30 @@ mod tests {
         }
     }
 
+    const DRIVERS: CardDrivers = XE2_LPG_DRIVERS;
+    const OPENGL_DRIVER: &str = DRIVERS.opengl;
+    const OPENGL_DRIVER_32_BIT: &str = DRIVERS.opengl_32_bit;
+
     fn opengl_answer(process_is_32_bit: bool) -> (&'static str, Vec<u8>) {
         let query = VendorQuery { kind: QUERY_OPENGL, size: 528, data: &[], process_is_32_bit };
         let mut out = Vec::new();
-        (write_opengl_info(&query, &mut out), out)
+        (write_opengl_info(&query, &DRIVERS, &mut out), out)
+    }
+
+    fn registry(name: &RegistryName) -> Option<RegistryValue> {
+        super::registry(name, &DRIVERS)
+    }
+
+    #[test]
+    fn a_card_with_memory_of_its_own_gets_its_own_opengl_and_kernel_drivers() {
+        let query = VendorQuery { kind: QUERY_OPENGL, size: 528, data: &[], process_is_32_bit: false };
+        let mut out = Vec::new();
+        assert_eq!(write_opengl_info(&query, &XE2_HPG_DRIVERS, &mut out), "igxe2hpgicd64.dll");
+        assert!(text(&out).ends_with("\\igxe2hpgicd64.dll"));
+        let wow = super::registry(&RegistryName::Value("OpenGLDriverNameWow".into()), &XE2_HPG_DRIVERS);
+        assert_eq!(wow.unwrap().bytes, utf16_list(&[in_store("igxe2hpgicd32.dll")]));
+        let image = super::registry(&RegistryName::DriverImagePath, &XE2_HPG_DRIVERS).unwrap();
+        assert!(text(&image.bytes).ends_with("\\igdkmdnd64.sys"));
     }
 
     #[test]
@@ -260,7 +300,7 @@ mod tests {
     fn the_store_the_kernel_driver_and_dxcore_are_answered() {
         assert_eq!(registry(&RegistryName::DriverStorePath).unwrap().bytes, utf16_zero(DRIVER_STORE));
         let image = registry(&RegistryName::DriverImagePath).unwrap();
-        assert!(text(&image.bytes).ends_with(KERNEL_DRIVER));
+        assert!(text(&image.bytes).ends_with(DRIVERS.kernel));
         let dxcore = registry(&RegistryName::Value("dxcoreattributes".into())).unwrap();
         assert_eq!(dxcore.value_type, Some(TYPE_STRING_LIST));
     }

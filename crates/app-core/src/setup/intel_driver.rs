@@ -2,8 +2,9 @@
 //! taking the user-mode drivers out of it.
 //!
 //! The installer is a program with Intel's whole package attached as a RAR archive, which `7z` lists
-//! on any system but can only unpack where it was built with RAR support. In the archive, one INF in
-//! the `Graphics` folder serves every Intel card, and the driver's files sit beside it in that folder.
+//! on any system but can only unpack where it was built with RAR support. In the archive, two INFs in
+//! the `Graphics` folder serve every Intel card between them, one for integrated cards and one for
+//! cards with memory of their own, and the driver's files sit beside them in that folder.
 //! The files a card gets are the ones that INF copies for it (see `intel_inf`), so the guest gets
 //! them and not the kernel driver, the firmware or the media software.
 
@@ -22,9 +23,10 @@ use std::process::Command;
 /// The release of Intel's Windows driver the Intel daemon takes, which refuses any other. Intel's
 /// package for it is `gfx_win_101.9175.exe`.
 pub const INTEL_WINDOWS_DRIVER: &str = "32.0.101.9175";
-/// The folder of the package that holds the driver, and the INF that names its files.
+/// The folder of the package that holds the driver, and the INFs that name its files: the one for
+/// integrated cards, then the one for cards with memory of their own.
 const DRIVER_ENTRY: &str = "Graphics";
-const INF_FILE: &str = "iigd_dch.inf";
+const INF_FILES: [&str; 2] = ["iigd_dch.inf", "iigd_dch_d.inf"];
 const PATH_LINE: &str = "Path = ";
 const READ_SECONDS: &str = "120";
 /// What `timeout` exits with.
@@ -46,8 +48,25 @@ pub struct IntelPackage {
     pub system_files: Vec<GuestFile>,
 }
 
-fn inf_entry() -> String {
-    format!("{DRIVER_ENTRY}/{INF_FILE}")
+fn inf_entry(inf_file: &str) -> String {
+    format!("{DRIVER_ENTRY}/{inf_file}")
+}
+
+/// The package's INF for the card `device`: the one that lists it, or the first there is, whose
+/// problem is then the package's.
+fn inf_for_device(path: &str, paths: &[&str], device: u32) -> Result<String> {
+    let mut first = None;
+    for inf_path in INF_FILES.map(inf_entry) {
+        if !paths.contains(&inf_path.as_str()) {
+            continue;
+        }
+        let inf = decode(&seven_zip(&["e", "-so", path, &inf_path])?);
+        if lists_device(&inf, device) {
+            return Ok(inf);
+        }
+        first.get_or_insert(inf);
+    }
+    first.ok_or_else(|| Failure::new("This file is not Intel's driver installer."))
 }
 
 /// Says why a package with this INF won't do for the card `device`, if it won't.
@@ -92,11 +111,7 @@ fn listed_paths(listing: &str) -> Vec<&str> {
 pub fn read_intel_installer(path: &str, device: u32) -> Result<IntelPackage> {
     let listing = String::from_utf8_lossy(&seven_zip(&["l", "-ba", "-slt", path])?).into_owned();
     let paths = listed_paths(&listing);
-    let inf_path = inf_entry();
-    if !paths.contains(&inf_path.as_str()) {
-        return Err(Failure::new("This file is not Intel's driver installer."));
-    }
-    let inf = decode(&seven_zip(&["e", "-so", path, &inf_path])?);
+    let inf = inf_for_device(path, &paths, device)?;
     if let Some(problem) = package_problem(&inf, device) {
         return Err(Failure(problem));
     }
@@ -145,9 +160,15 @@ mod tests {
     /// An archive laid out like Intel's package, which 7z can read: the INF in UTF-16 and a file for
     /// each name in it, with the kernel driver and firmware that a guest doesn't get.
     fn make_installer(scratch: &Scratch, inf: &str) -> String {
-        let mut text = vec![0xFF, 0xFE];
-        text.extend(inf.encode_utf16().flat_map(u16::to_le_bytes));
-        scratch.write(&format!("source/{DRIVER_ENTRY}/{INF_FILE}"), text);
+        make_installer_of(scratch, &[(INF_FILES[0], inf)])
+    }
+
+    fn make_installer_of(scratch: &Scratch, infs: &[(&str, &str)]) -> String {
+        for (file, inf) in infs {
+            let mut text = vec![0xFF, 0xFE];
+            text.extend(inf.encode_utf16().flat_map(u16::to_le_bytes));
+            scratch.write(&format!("source/{DRIVER_ENTRY}/{file}"), text);
+        }
         let extras =
             ["igdkmdn64.sys", "not-ours.dll", "mfxplugin64_hw.dll", "ControlLib.dll", "vulkaninfo-64.exe"];
         let sources = SYSTEM_FILES.iter().map(|file| &file.1);
@@ -173,6 +194,18 @@ mod tests {
 
     fn inf_for(version: &str) -> String {
         fake_inf().replace(INTEL_WINDOWS_DRIVER, version)
+    }
+
+    #[test]
+    fn a_card_is_looked_for_in_both_of_the_packages_infs() {
+        let scratch = Scratch::new();
+        let other_cards = fake_inf().replace("DEV_64A0", "DEV_7D55");
+        let installer =
+            make_installer_of(&scratch, &[(INF_FILES[0], &other_cards), (INF_FILES[1], &fake_inf())]);
+        let package = read_intel_installer(&installer, DEVICE).unwrap();
+        assert_eq!(package.entries.len(), GUEST_FILES.len() + SYSTEM_FILES.len());
+        let nowhere = read_intel_installer(&installer, 0x1234).unwrap_err();
+        assert!(nowhere.0.contains("device 1234"), "{}", nowhere.0);
     }
 
     #[test]

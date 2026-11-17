@@ -377,7 +377,7 @@ impl Backend for IntelBackend {
                 QueryOutcome::Record(status, asked)
             }
             guest_driver::QUERY_OPENGL => {
-                let driver = guest_driver::write_opengl_info(query, out);
+                let driver = guest_driver::write_opengl_info(query, &self.generation.drivers, out);
                 QueryOutcome::OpenGl(Status::SUCCESS, driver)
             }
             QUERY_USER_DRIVER_NAME => {
@@ -396,7 +396,7 @@ impl Backend for IntelBackend {
     }
 
     fn registry_value(&mut self, name: &RegistryName) -> Option<RegistryValue> {
-        let value = guest_driver::registry(name);
+        let value = guest_driver::registry(name, &self.generation.drivers);
         self.traffic.registry(name, value.is_some());
         value
     }

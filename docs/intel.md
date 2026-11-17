@@ -1,6 +1,6 @@
 # Windows on an Intel card
 
-This doesn't work yet, and none of it has met a guest. It's the first step towards Intel's integrated graphics, starting with Lunar Lake (Arc 130V and 140V) on Linux's `xe` driver. Only the Arc 140V, PCI id 8086:64A0, is offered so far.
+This doesn't work yet, and none of it has met a guest. It's the first step towards Intel's graphics, starting with Lunar Lake (Arc 130V and 140V) on Linux's `xe` driver. Two cards are offered so far: the Arc 140V, PCI id 8086:64A0, and the Arc B580, 8086:E20B.
 
 ## What it's meant to do
 
@@ -10,7 +10,7 @@ It only takes Intel's driver 32.0.101.9175 in the guest, as the data it passes a
 
 ## Trying it
 
-You need a Lunar Lake laptop, Linux with the `xe` driver on that card, and a test build of Guesthouse. It takes a Windows 11 ISO and about an hour.
+You need a Lunar Lake laptop or an Arc B580, Linux with the `xe` driver on that card, and a test build of Guesthouse. It takes a Windows 11 ISO and about an hour.
 
 1. Download Intel's graphics driver 32.0.101.9175 for Arc from Intel's site. The file is `gfx_win_101.9175.exe`, about 860 MB. Other releases are refused.
 2. Make sure `7z` can unpack it. Intel's installer keeps its files in a RAR archive, and many distributions' `7z` leave RAR out, so it lists the file and then fails to unpack it. The app says so when that happens. 7-Zip's own Linux build from 7-zip.org works. Put it on your PATH as `7z`.
@@ -55,7 +55,7 @@ Setting `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP` in the daemon's environment refuses 
 cargo run --release -p guesthouse-backend-intel --bin intel-probe
 ```
 
-Give it a PCI address, like `0000:00:02.0`, if you have more than one Intel card. If you have a Lunar Lake laptop and want to help, open an issue with its output.
+Give it a PCI address, like `0000:00:02.0`, if you have more than one Intel card. If you have one of these cards, or another Intel card on `xe`, and want to help, open an issue with its output.
 
 ## What it changes in Windows
 

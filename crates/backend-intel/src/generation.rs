@@ -6,6 +6,7 @@
 //! compute-runtime's hardware tables for the platform. Both are MIT. A card whose IP has no profile
 //! is refused, as the guest would be told the wrong platform.
 
+use crate::protocol::guest_driver::{CardDrivers, XE2_HPG_DRIVERS, XE2_LPG_DRIVERS};
 use crate::xe_query::IpVersion;
 
 /// One architecture.
@@ -27,6 +28,8 @@ pub struct Generation {
     pub gt_type: u32,
     /// Hardware threads in each EU, for a card whose hwconfig doesn't say.
     pub threads_per_eu: u32,
+    /// The drivers Intel's INF names for these cards alone.
+    pub drivers: CardDrivers,
 }
 
 /// Lunar Lake's graphics, the Arc 130V and 140V: IGFX_LUNARLAKE on IGFX_XE2_LPG_CORE.
@@ -40,6 +43,7 @@ pub const XE2_LPG: Generation = Generation {
     platform_type: 0,
     gt_type: 18,
     threads_per_eu: 8,
+    drivers: XE2_LPG_DRIVERS,
 };
 
 /// Battlemage's graphics, the Arc B570 and B580: IGFX_BMG on IGFX_XE2_HPG_CORE, which is the same
@@ -54,6 +58,7 @@ pub const XE2_HPG: Generation = Generation {
     platform_type: 0,
     gt_type: 18,
     threads_per_eu: 8,
+    drivers: XE2_HPG_DRIVERS,
 };
 
 const KNOWN: [Generation; 2] = [XE2_LPG, XE2_HPG];

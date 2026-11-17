@@ -23,29 +23,31 @@ const DRIVER_VERSION_FIELD: &str = "driver_version";
 pub const NO_INTEL_SETUP: &str = "A Windows machine on an Intel card needs Intel's Windows driver unpacked first, \
                                   and it hasn't been.";
 
-/// The files the Intel daemon names to Windows, apart from the kernel driver: the Direct3D drivers
-/// for 64-bit and 32-bit programs, the OpenGL, OpenCL and Level Zero drivers, and the Vulkan
-/// manifests. The kernel driver is named too, as the adapter is said to have one, but no file of it
-/// goes to the guest. A test holds the daemon to this list.
-pub const NAMED_FILES: [&str; 13] = [
+/// The files the Intel daemon names to Windows for every card, apart from the kernel driver: the
+/// Direct3D drivers for 64-bit and 32-bit programs, the OpenCL and Level Zero drivers, and the
+/// Vulkan manifests. The kernel driver is named too, as the adapter is said to have one, but no
+/// file of it goes to the guest. A test holds the daemon to this list and the next.
+pub const NAMED_FILES: [&str; 11] = [
     "igd9trinity64.dll",
     "igd10iumd64.dll",
     "igd12umd64.dll",
     "igd9trinity32.dll",
     "igd10iumd32.dll",
     "igd12umd32.dll",
-    "igxe2lpgicd64.dll",
-    "igxe2lpgicd32.dll",
     "igdrcl64.dll",
     "igdrcl32.dll",
     "igvk64.json",
     "igvk32.json",
     "ze_intel_gpu64.dll",
 ];
-/// The Intel cards the Intel daemon is written for, by PCI device id: Lunar Lake's Arc 140V. Intel's
-/// other cards are in this PC's list as well, and offering them would put an iGPU that can't work in
-/// the card choice of nearly every PC with an Intel processor.
-pub const SUPPORTED_DEVICES: [u32; 1] = [0x64A0];
+/// The OpenGL drivers the daemon names, which differ by the kind of card: Lunar Lake's pair, then
+/// Battlemage's. A driver folder is unpacked for one card, so it holds one pair.
+pub const OPENGL_DRIVERS: [[&str; 2]; 2] =
+    [["igxe2lpgicd64.dll", "igxe2lpgicd32.dll"], ["igxe2hpgicd64.dll", "igxe2hpgicd32.dll"]];
+/// The Intel cards the Intel daemon is written for, by PCI device id: Lunar Lake's Arc 140V and
+/// Battlemage's Arc B580. Intel's other cards are in this PC's list as well, and offering them would
+/// put an iGPU that can't work in the card choice of nearly every PC with an Intel processor.
+pub const SUPPORTED_DEVICES: [u32; 2] = [0x64A0, 0xE20B];
 
 /// The Intel cards in this PC that a Windows machine can be set up for.
 pub fn supported_intel_cards(context: &Context) -> Vec<RenderCard> {
@@ -92,6 +94,11 @@ fn manifest_libraries(folder: &Path) -> Vec<String> {
 pub fn missing_files(folder: &Path) -> Vec<String> {
     let mut wanted: Vec<String> = NAMED_FILES.iter().map(|name| (*name).to_owned()).collect();
     wanted.extend(manifest_libraries(folder));
+    // The pair the folder has most of is the one its card takes.
+    let fewest_absent = OPENGL_DRIVERS
+        .iter()
+        .min_by_key(|pair| pair.iter().filter(|name| !folder.join(name).is_file()).count());
+    wanted.extend(fewest_absent.into_iter().flatten().map(|name| (*name).to_owned()));
     wanted.retain(|name| !folder.join(name).is_file());
     wanted.sort();
     wanted
@@ -135,7 +142,7 @@ pub mod stand_in {
     /// Writes an unpacked driver folder `folder` in `scratch` with every file the daemon names, and
     /// the libraries the manifests name. Each file holds its own path.
     pub fn lay_out_driver(scratch: &Scratch, folder: &str) {
-        for name in super::NAMED_FILES {
+        for name in super::NAMED_FILES.iter().chain(&super::OPENGL_DRIVERS[0]) {
             scratch.write(&format!("{folder}/{name}"), format!("{folder}/{name}"));
         }
         scratch.write(&format!("{folder}/igvk64.json"), manifest("igvk64.dll"));
@@ -155,8 +162,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     const CARD: &str = "0000:00:02.0";
-    /// The kernel driver's name, which the daemon gives and the guest gets no file for.
-    const KERNEL_DRIVER: &str = "igdkmdn64.sys";
+    /// The kernel drivers' names, which the daemon gives and the guest gets no file for.
+    const KERNEL_DRIVERS: [&str; 2] = ["igdkmdn64.sys", "igdkmdnd64.sys"];
 
     #[test]
     fn only_the_card_the_daemon_is_written_for_counts() {
@@ -218,6 +225,27 @@ mod tests {
         assert!(problem.contains("igd12umd64.dll, igvk32.dll"), "{problem}");
     }
 
+    #[test]
+    fn a_folder_needs_one_cards_opengl_drivers_whole() {
+        let scratch = Scratch::new();
+        lay_out_driver(&scratch, "driver");
+        let folder = scratch.path("driver");
+        for name in OPENGL_DRIVERS[0] {
+            fs::rename(folder.join(name), folder.join(name.replace("lpg", "hpg"))).unwrap();
+        }
+        assert_eq!(folder_problem(&folder), None, "the other kind of card's pair will do");
+        fs::remove_file(folder.join("igxe2hpgicd32.dll")).unwrap();
+        assert_eq!(missing_files(&folder), ["igxe2hpgicd32.dll"]);
+    }
+
+    #[test]
+    fn a_battlemage_card_counts_too() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        fake_render_node(&scratch, 128, "0000:03:00.0", "0x8086", 0xe20b);
+        assert_eq!(supported_intel_cards(&context).len(), 1);
+    }
+
     /// The file names in the daemon's answers, from its source: a name the daemon gives that isn't
     /// here would never be checked for.
     #[test]
@@ -227,8 +255,9 @@ mod tests {
         let text = fs::read_to_string(path).unwrap();
         let named: BTreeSet<String> =
             file_name.captures_iter(&text).map(|found| found[1].to_owned()).collect();
+        let opengl = OPENGL_DRIVERS.iter().flatten().copied();
         let ours: BTreeSet<String> =
-            NAMED_FILES.iter().copied().chain([KERNEL_DRIVER]).map(str::to_owned).collect();
+            NAMED_FILES.iter().copied().chain(opengl).chain(KERNEL_DRIVERS).map(str::to_owned).collect();
         assert_eq!(named, ours);
     }
 }

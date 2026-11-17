@@ -1,5 +1,5 @@
-//! What Intel's INF says a guest on one card needs. Intel's driver is one INF for every card it
-//! supports, so the files a card gets are found the way Windows would find them: the install section
+//! What Intel's INF says a guest on one card needs. Intel's driver has one INF for every integrated
+//! card and one for every card with memory of its own, so the files a card gets are found the way Windows would find them: the install section
 //! its hardware id names, then the file lists that section copies, and from those the ones that go
 //! into the driver's own folder, which is the folder the guest's driver store copy is made from.
 
@@ -16,10 +16,13 @@ const PLATFORM_SUFFIX: &str = ".ntamd64";
 
 /// File lists a guest has no use for: the kernel driver, which the adapter the host gives it has
 /// no need of, the libraries for Linux under WSL, content protection, the media frameworks, Intel's
-/// services for a desktop, and the compiler for its C-for-Metal kernels. A guest on a paravirtual
-/// adapter draws through the user-mode drivers alone.
-const NOT_FOR_THE_GUEST: [&str; 8] = [
+/// services for a desktop, the compiler for its C-for-Metal kernels, and the tools that update a
+/// card's firmware. A guest on a paravirtual adapter draws through the user-mode drivers alone.
+const NOT_FOR_THE_GUEST: [&str; 11] = [
     "igfx.Miniport_DS_N",
+    "igfx.Miniport_DS_N_D",
+    "FwUpdateServiceBinary.Copy_DS",
+    "Igsc.Copy_DS",
     "igfx.UserMode_WSL",
     "Opm.Copy_DS",
     "MFX_Common.Copy_DS",
@@ -390,6 +393,8 @@ mod tests {
         for named in crate::setup::intel::NAMED_FILES {
             assert!(files.iter().any(|file| file == named), "{named} is not among them");
         }
+        let has_pair = |pair: &[&str; 2]| pair.iter().all(|name| files.iter().any(|file| file == name));
+        assert!(crate::setup::intel::OPENGL_DRIVERS.iter().any(has_pair), "no OpenGL drivers among them");
         assert!(!files.iter().any(|file| file.ends_with(".sys")), "no kernel driver");
         let system = system_files(&inf, device);
         for file in &system {
