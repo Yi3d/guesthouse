@@ -140,17 +140,18 @@ fn serve_intel(
             Needs::of_render_node(slot, &project, &setup.driver_folder, node.device_file, None)
         }
     };
-    let software_desktop = env::var_os(INTEL_SOFTWARE_DESKTOP).is_some();
+    use guesthouse_daemon::intel_stage::{SOFTWARE_DESKTOP_VARIABLE, software_desktop};
+    let software_desktop = software_desktop(env::var_os(SOFTWARE_DESKTOP_VARIABLE).as_deref());
+    if software_desktop {
+        log::info!(
+            "Intel's test stage composes the guest's desktop in software; {SOFTWARE_DESKTOP_VARIABLE}=0 gives it \
+             Intel's Direct3D 9, 10 and 11 drivers instead"
+        );
+    }
     serve_on_render_node::<IntelBackend>(slot, project, &setup, needs, |backend| {
         backend.set_software_desktop(software_desktop)
     })
 }
-
-/// A lab switch for an Intel guest: set, the guest is refused the Direct3D 9, 10 and 11 drivers, so
-/// its desktop composes in software while Direct3D 12, compute and Vulkan still reach the backend.
-/// Untried on a guest.
-#[cfg(feature = "intel")]
-const INTEL_SOFTWARE_DESKTOP: &str = "GUESTHOUSE_INTEL_SOFTWARE_DESKTOP";
 
 /// Serves with a backend whose card is reached through one render node, which with what else is in
 /// `needs` is all the jail lets this process open. A recorded card needs no device at all.

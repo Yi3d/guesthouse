@@ -12,6 +12,7 @@ pub mod environment;
 pub mod gpu_note;
 pub mod guest_memory;
 pub mod handover;
+pub mod intel_stage;
 pub mod jail;
 pub mod logger;
 pub mod memory_files;

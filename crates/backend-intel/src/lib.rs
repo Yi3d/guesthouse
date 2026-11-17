@@ -121,9 +121,9 @@ impl IntelBackend {
         Ok(backend)
     }
 
-    /// A lab switch, off unless set: the guest is refused the drivers for Direct3D 9, 10 and 11, so
-    /// that the desktop composes in software and stays usable, while Direct3D 12, compute and
-    /// Vulkan still come here. Nothing has tried it on a guest.
+    /// The guest is refused the drivers for Direct3D 9, 10 and 11, so that the desktop composes in
+    /// software and stays up, while Direct3D 12, compute and Vulkan still come here. The daemon
+    /// turns it on for this stage: see its `intel_stage`.
     pub fn set_software_desktop(&mut self, on: bool) {
         self.software_desktop = on;
         let state = if on { "on" } else { "off" };
