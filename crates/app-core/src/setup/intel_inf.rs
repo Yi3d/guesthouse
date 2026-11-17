@@ -14,10 +14,11 @@ const DRIVER_FOLDER: &str = "13";
 /// Windows looks for an install section with its platform's suffix first.
 const PLATFORM_SUFFIX: &str = ".ntamd64";
 
-/// File lists a guest has no use for: the kernel driver's, as the adapter the host gives it runs
-/// none of them (the one file of it Windows looks for is added by `intel_driver`), the libraries for Linux under WSL, content protection, the media frameworks, Intel's
-/// services for a desktop, the compiler for its C-for-Metal kernels, and the tools that update a
-/// card's firmware. A guest on a paravirtual adapter draws through the user-mode drivers alone.
+/// File lists a guest has no use for: the kernel driver's, as the adapter the host gives it runs none
+/// of them (the one file Windows looks for is added by `intel_driver`), the libraries for Linux under
+/// WSL, content protection, the media frameworks, Intel's services for a desktop, the compiler for
+/// its C-for-Metal kernels, and the tools that update a card's firmware. A guest on a paravirtual
+/// adapter draws through the user-mode drivers alone.
 const NOT_FOR_THE_GUEST: [&str; 11] = [
     "igfx.Miniport_DS_N",
     "igfx.Miniport_DS_N_D",
