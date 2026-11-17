@@ -25,7 +25,9 @@ const NVIDIA_TAINT_FILE: &str = "/sys/module/nvidia/taint";
 const AMD_MODULE_FOLDER: &str = "/sys/module/amdgpu";
 const INTEL_MODULE_FOLDER: &str = "/sys/module/xe";
 /// The kernel modules that matter to a GPU guest: the GPU drivers, KVM, and what hands memory around.
-const MODULE_PREFIXES: [&str; 8] = ["nvidia", "amdgpu", "xe", "i915", "kvm", "vfio", "udmabuf", "drm"];
+const MODULE_PREFIXES: [&str; 7] = ["nvidia", "amdgpu", "i915", "kvm", "vfio", "udmabuf", "drm"];
+/// Intel's driver, by its whole name, as a prefix would take in Xen's modules too.
+const INTEL_MODULE: &str = "xe";
 const VERSION_SECONDS: u32 = 10;
 const GIB: u64 = 1 << 30;
 
@@ -153,7 +155,7 @@ fn loaded_modules() -> Vec<String> {
     let mut names: Vec<String> = text
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-        .filter(|name| MODULE_PREFIXES.iter().any(|prefix| name.starts_with(prefix)))
+        .filter(|name| *name == INTEL_MODULE || MODULE_PREFIXES.iter().any(|prefix| name.starts_with(prefix)))
         .map(str::to_owned)
         .collect();
     names.sort();
@@ -177,5 +179,27 @@ fn session() -> String {
     match variable("XDG_CURRENT_DESKTOP") {
         Some(desktop) => format!("{kind}, {desktop}"),
         None => kind,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::Kind;
+
+    #[test]
+    fn the_card_a_report_names_is_the_machines_by_its_maker() {
+        let mut windows = Machine::new("w", "W", "/d", "/v");
+        assert_eq!(render_node_card(&windows), None, "NVIDIA's card is setup's, not a render node");
+        windows.use_windows_card(GpuMaker::Amd, "0000:7c:00.0");
+        assert_eq!(render_node_card(&windows), Some((GpuMaker::Amd, "0000:7c:00.0")));
+        windows.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+        assert_eq!(render_node_card(&windows), Some((GpuMaker::Intel, "0000:00:02.0")));
+        let linux = Machine {
+            kind: Kind::Linux,
+            amd_gpu: "0000:7c:00.0".into(),
+            ..Machine::new("u", "U", "/d", "/v")
+        };
+        assert_eq!(render_node_card(&linux), Some((GpuMaker::Amd, "0000:7c:00.0")));
     }
 }
