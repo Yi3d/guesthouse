@@ -2,12 +2,13 @@
 
 use super::cards::{Card, Support, amd_support, card_in_use, find_cards};
 use crate::context::Context;
+use crate::gpu_maker::GpuMaker;
 use crate::host::{RamOffer, free_gib, total_ram};
 use crate::iso::any_iso_maker;
 use crate::library::INSTALL_ROOM_GIB;
 use crate::linux::amd::amd_cards;
 use crate::linux::driver_versions::{branch_refusal, branch_refusal_among, untested_warning};
-use crate::machine::{Kind, MIN_RAM_GIB, Machine};
+use crate::machine::{MIN_RAM_GIB, Machine};
 use crate::usb::sysfs_text;
 use crate::vm_args::on_path;
 use guesthouse_backend_nvidia::profile::BRANCHES;
@@ -200,7 +201,7 @@ pub fn gpu_warning(context: &Context) -> Option<String> {
 /// What a person should hear before this machine starts: only a Windows machine on the NVIDIA card is
 /// about NVIDIA's card and driver.
 pub fn machine_gpu_warning(context: &Context, machine: &Machine) -> Option<String> {
-    (machine.kind == Kind::Windows && machine.amd_gpu.is_empty()).then(|| gpu_warning(context)).flatten()
+    (machine.windows_maker() == Some(GpuMaker::Nvidia)).then(|| gpu_warning(context)).flatten()
 }
 
 /// Says if the host's driver isn't the one this was tested on.
