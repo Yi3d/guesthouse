@@ -6,7 +6,10 @@
 use super::Task;
 use crate::agent::guest_script;
 use crate::failure::{Failure, Result};
-use crate::gpu_identity::{IdentityState, Shown, maker_identity, maker_name, read_state, write_state};
+use crate::gpu_identity::{
+    FELL_BACK, IdentityState, STAYS_ON_INTEL, Shown, falls_back_after_failed_check, machine_maker,
+    maker_identity, maker_name, read_state, write_state,
+};
 use crate::gpu_support::qemu_sets_identity;
 use crate::log::write_log;
 use std::collections::hash_map::DefaultHasher;
@@ -17,8 +20,6 @@ const SCRIPT: &str = "gpu-identity.ps1";
 const STAGE_SECONDS: u64 = 110;
 const STAGED_MARK: &str = "identity staged";
 const STAY_MARK: &str = "stay: ";
-
-const FELL_BACK: &str = "The next start shows Windows Microsoft's vendor ID again.";
 
 fn qemu_without(maker: &str) -> String {
     format!("This QEMU can't show Windows {maker}'s vendor ID, so Windows sees Microsoft's.")
@@ -105,11 +106,15 @@ pub(super) fn set_up_identity(task: &mut Task) {
 }
 
 /// Windows started without its GPU. If it was shown its maker's number, that's the first suspect, and
-/// the next start goes back to the one that always works.
+/// the next start goes back to the one that always works, unless the maker's card can't do without
+/// its number: see [`falls_back_after_failed_check`].
 pub(super) fn after_failed_gpu(task: &Task, failure: Failure) -> Failure {
     let mut state = read_state(task.context, &task.machine);
     if state.shown != Shown::Maker {
         return failure;
+    }
+    if !falls_back_after_failed_check(machine_maker(&task.machine)) {
+        return Failure(format!("{} {STAYS_ON_INTEL}", failure.0));
     }
     state.shown = Shown::Microsoft;
     state.restart_due = false;

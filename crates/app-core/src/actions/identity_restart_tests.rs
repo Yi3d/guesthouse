@@ -156,7 +156,7 @@ fn a_gpu_gone_after_the_restart_goes_back_to_microsofts_number() {
 }
 
 #[test]
-fn an_intel_gpu_gone_after_the_restart_falls_back_and_leaves_the_vm_running() {
+fn an_intel_gpu_gone_after_the_restart_keeps_intels_number_and_leaves_the_vm_running() {
     let scratch = Scratch::new();
     let mut rig = Rig::new(&scratch, switching(), true, &["restarting\r\n", DESKTOP_UP]);
     rig.machine.use_windows_card(crate::gpu_maker::GpuMaker::Intel, "0000:03:00.0");
@@ -164,6 +164,6 @@ fn an_intel_gpu_gone_after_the_restart_falls_back_and_leaves_the_vm_running() {
     write_state(&rig.context, &rig.machine, &IdentityState { package_vendor, ..switching() }).unwrap();
     let (result, error) = rig.start();
     assert_eq!(result, Ok(Gpu::Missing));
-    assert!(error.contains("left running") && error.contains("Microsoft's vendor ID again"), "{error}");
-    assert_eq!(rig.state().shown, Shown::Microsoft);
+    assert!(error.contains("left running") && error.contains("keeps Intel's vendor ID"), "{error}");
+    assert_eq!(rig.state().shown, Shown::Maker);
 }

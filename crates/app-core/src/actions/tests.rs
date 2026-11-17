@@ -260,7 +260,7 @@ fn an_intel_guest_with_no_gpu_is_left_running_and_says_why() {
 }
 
 #[test]
-fn an_intel_guest_shown_intels_number_still_falls_back_to_microsofts() {
+fn an_intel_guest_shown_intels_number_keeps_it_after_a_failed_check() {
     let scratch = Scratch::new();
     let mut context = plain_task_context(&scratch);
     let mut vm = guest_saying(&mut context, "gpu working 0\n");
@@ -271,8 +271,8 @@ fn an_intel_guest_shown_intels_number_still_falls_back_to_microsofts() {
     let host = RecordingHost::default();
     let mut task = Task::new(&context, &host, "start", vm.clone());
     assert_eq!(boot(&mut task), Ok(()));
-    assert!(task.error.contains("Microsoft's vendor ID again"), "{}", task.error);
-    assert_eq!(read_state(&context, &vm).shown, Shown::Microsoft);
+    assert!(task.error.contains("keeps Intel's vendor ID"), "{}", task.error);
+    assert_eq!(read_state(&context, &vm).shown, Shown::Maker);
     assert_eq!(host.said(), ["start gpu"]);
 }
 
