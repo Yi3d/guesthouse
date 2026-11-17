@@ -66,6 +66,10 @@ pub fn collect(context: &Context, request: &Request, found: &mut Collection) {
     for card in [GpuMaker::Amd, GpuMaker::Intel].into_iter().flat_map(|maker| render_cards(context, maker)) {
         facts.add("GPU", format!("{} at {}", card.name, card.pci));
     }
+    if let Some(said) = recorded_intel_card(context) {
+        facts.add("RECORDED INTEL CARD", &said);
+        found.notes.push(format!("This report is from a lab run on a recorded Intel card: {said}"));
+    }
     let nvidia = nvidia_driver(context);
     facts.add("NVIDIA driver", nvidia.clone().unwrap_or_else(|| "not loaded".to_owned()));
     let amd_loaded = Path::new(AMD_MODULE_FOLDER).is_dir();
@@ -98,6 +102,22 @@ pub fn collect(context: &Context, request: &Request, found: &mut Collection) {
     };
     found.summary.set(summary::DRIVER, &driver);
     found.add("host/facts.txt", facts.text());
+}
+
+/// What a recorded Intel card is, when one stands in for a card: whose, and whether it reads.
+fn recorded_intel_card(context: &Context) -> Option<String> {
+    let file = context.recorded_intel_card.as_ref()?;
+    let read = fs::read_to_string(file).map_err(|error| error.to_string());
+    let card = read.and_then(|text| guesthouse_backend_intel::recording::read(&text).map_err(|bad| bad.0));
+    Some(match card {
+        Ok(card) => format!(
+            "{} is a recording of the Intel card {:04x} at {}, and no such card is in this PC",
+            file.display(),
+            card.pci.device,
+            card.address.as_deref().unwrap_or("no address")
+        ),
+        Err(why) => format!("{} was named as one, and can't be used: {why}", file.display()),
+    })
 }
 
 /// The maker and address of the card the machine reaches through a render node: a Linux guest's AMD
@@ -186,6 +206,18 @@ fn session() -> String {
 mod tests {
     use super::*;
     use crate::machine::Kind;
+
+    #[test]
+    fn a_recorded_card_is_said_and_one_that_is_not_named_is_not() {
+        let scratch = crate::testing::Scratch::new();
+        let mut context = crate::testing::scratch_context(&scratch);
+        assert_eq!(recorded_intel_card(&context), None);
+        context.recorded_intel_card = Some(scratch.write("b580.card", crate::render_cards::tests::ARC_B580));
+        let said = recorded_intel_card(&context).unwrap();
+        assert!(said.contains("recording of the Intel card e20b at 0000:03:00.0"), "{said}");
+        context.recorded_intel_card = Some(scratch.path("nowhere.card"));
+        assert!(recorded_intel_card(&context).unwrap().contains("can't be used"));
+    }
 
     #[test]
     fn the_card_a_report_names_is_the_machines_by_its_maker() {

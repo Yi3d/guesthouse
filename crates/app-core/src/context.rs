@@ -65,6 +65,9 @@ pub struct Context {
     pub clock: Arc<dyn Clock>,
     /// Replaces the room an install needs, for a test on a small disk.
     pub install_room: Option<u64>,
+    /// A recording of an Intel card that stands in for one, for a lab run on a PC without it. Only
+    /// a process started with the variable that names it has one: see [`Context::from_process`].
+    pub recorded_intel_card: Option<PathBuf>,
 }
 
 impl Context {
@@ -97,13 +100,15 @@ impl Context {
             agent: Arc::new(TcpAgent),
             clock: Arc::new(RealClock::default()),
             install_room: None,
+            recorded_intel_card: None,
         }
     }
 
     /// For this process. A slot that can't be read stops it, as a guess could reach another VM's files.
     pub fn from_process() -> crate::Result<Self> {
         let slot = Slot::from_environment().map_err(|error| crate::Failure::new(error.to_string()))?;
-        Ok(Self::new(Paths::from_process(), slot))
+        let recorded_intel_card = guesthouse_backend_intel::recording::recorded_card_file();
+        Ok(Self { recorded_intel_card, ..Self::new(Paths::from_process(), slot) })
     }
 
     pub fn second_instance(&self) -> bool {

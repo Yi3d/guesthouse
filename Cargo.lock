@@ -522,6 +522,7 @@ dependencies = [
 name = "guesthouse-app-core"
 version = "0.6.2-intel.2"
 dependencies = [
+ "guesthouse-backend-intel",
  "guesthouse-backend-nvidia",
  "guesthouse-card-check",
  "guesthouse-daemon",
