@@ -191,6 +191,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             size: query.size,
             data: query.data,
             process_is_32_bit: self.processes_32_bit.contains(&process),
+            program: self.programs.get(&process).map_or("", String::as_str),
         };
         put_u32(out, Status::SUCCESS.0);
         let status = match self.backend.adapter_answer(&vendor_query, out) {

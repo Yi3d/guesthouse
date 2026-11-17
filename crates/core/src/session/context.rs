@@ -50,7 +50,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             name if name.is_empty() => {
                 log::debug!("process {handle:#x} is guest pid {pid}, which gave no name")
             }
-            name => log::debug!("process {handle:#x} is guest pid {pid}, {name}"),
+            name => {
+                log::debug!("process {handle:#x} is guest pid {pid}, {name}");
+                self.programs.insert(handle, name);
+            }
         }
         put_u32(out, handle);
         Ok(())
@@ -61,6 +64,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let process = MessageHeader::process_of(message)?;
         self.processes_32_bit.remove(&process);
         self.guest_pids.remove(&process);
+        self.programs.remove(&process);
         self.process_going(process);
         self.context_processes.retain(|_, owner| *owner != process);
         self.reservations.retain(|&(owner, _), _| owner != process);

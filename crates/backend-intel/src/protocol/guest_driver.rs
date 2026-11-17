@@ -88,20 +88,25 @@ const VALUES: [(&str, Form); 9] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NameAnswer {
     Given(&'static str),
-    /// Direct3D 9, 10 or 11, held back by the software desktop switch.
+    /// Held back by the software desktop switch: Direct3D 9, 10 or 11, or any to the compositor.
     Withheld,
 }
 
+/// The desktop's compositor, by its program's file name. Windows names it in lower case.
+const COMPOSITOR: &str = "dwm.exe";
+
 /// Writes the Direct3D driver's path into `out`, keeping the guest's version dword. With
-/// `only_direct3d_12`, the drivers for Direct3D 9, 10 and 11 are refused, so that those programs,
-/// the desktop's compositor among them, fall back to drawing in software.
+/// `software_desktop`, the drivers for Direct3D 9, 10 and 11 are refused, and the compositor is
+/// refused every one: it would take Direct3D 12 when 11 is refused, and nothing it draws is run.
+/// Those programs fall back to drawing in software.
 pub fn write_name(
     query: &VendorQuery<'_>,
-    only_direct3d_12: bool,
+    software_desktop: bool,
     out: &mut Vec<u8>,
 ) -> (Status, NameAnswer) {
     let version = dword(query.data, VERSION_FIELD).map_or(NEWEST, |version| (version as usize).min(NEWEST));
-    if only_direct3d_12 && version < DIRECT3D_12 {
+    let compositor = query.program.eq_ignore_ascii_case(COMPOSITOR);
+    if software_desktop && (version < DIRECT3D_12 || compositor) {
         return (Status::NOT_SUPPORTED, NameAnswer::Withheld);
     }
     let drivers = if query.process_is_32_bit { USER_DRIVERS_32_BIT } else { USER_DRIVERS };
@@ -184,6 +189,7 @@ mod tests {
             size: data.len(),
             data: &data,
             process_is_32_bit,
+            program: "",
         };
         let mut out = Vec::new();
         let (status, answer) = write_name(&query, false, &mut out);
@@ -202,9 +208,27 @@ mod tests {
                 size: 4,
                 data: &data,
                 process_is_32_bit: false,
+                program: "",
             };
             assert_eq!(write_name(&query, true, &mut out).1, wanted, "{version}");
         }
+    }
+
+    #[test]
+    fn the_software_desktop_holds_back_even_direct3d_12_from_the_compositor_only() {
+        let data = [3u8, 0, 0, 0];
+        let query = |program| VendorQuery {
+            kind: guest_text::QUERY_USER_DRIVER_NAME,
+            size: 4,
+            data: &data,
+            process_is_32_bit: false,
+            program,
+        };
+        let mut out = Vec::new();
+        assert_eq!(write_name(&query("dwm.exe"), true, &mut out).1, NameAnswer::Withheld);
+        assert_eq!(write_name(&query("DWM.EXE"), true, &mut out).1, NameAnswer::Withheld);
+        assert_eq!(write_name(&query("dwm.exe"), false, &mut out).1, NameAnswer::Given("igd12umd64.dll"));
+        assert_eq!(write_name(&query("game.exe"), true, &mut out).1, NameAnswer::Given("igd12umd64.dll"));
     }
 
     #[test]
@@ -234,7 +258,7 @@ mod tests {
     const OPENGL_DRIVER_32_BIT: &str = DRIVERS.opengl_32_bit;
 
     fn opengl_answer(process_is_32_bit: bool) -> (&'static str, Vec<u8>) {
-        let query = VendorQuery { kind: QUERY_OPENGL, size: 528, data: &[], process_is_32_bit };
+        let query = VendorQuery { kind: QUERY_OPENGL, size: 528, data: &[], process_is_32_bit, program: "" };
         let mut out = Vec::new();
         (write_opengl_info(&query, &DRIVERS, &mut out), out)
     }
@@ -245,7 +269,8 @@ mod tests {
 
     #[test]
     fn a_card_with_memory_of_its_own_gets_its_own_opengl_and_kernel_drivers() {
-        let query = VendorQuery { kind: QUERY_OPENGL, size: 528, data: &[], process_is_32_bit: false };
+        let query =
+            VendorQuery { kind: QUERY_OPENGL, size: 528, data: &[], process_is_32_bit: false, program: "" };
         let mut out = Vec::new();
         assert_eq!(write_opengl_info(&query, &XE2_HPG_DRIVERS, &mut out), "igxe2hpgicd64.dll");
         assert!(text(&out).ends_with("\\igxe2hpgicd64.dll"));

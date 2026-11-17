@@ -243,6 +243,9 @@ pub struct VendorQuery<'a> {
     pub data: &'a [u8],
     /// The asking process is 32-bit, and so needs the 32-bit user-mode driver.
     pub process_is_32_bit: bool,
+    /// The program the asking process runs, by its file name, as `dwm.exe`, or empty when the guest
+    /// didn't say.
+    pub program: &'a str,
 }
 
 /// A registry value. `value_type` is `None` for the driver paths, which have no type to match.

@@ -62,6 +62,7 @@ mod tests {
             size: data.len(),
             data: &data,
             process_is_32_bit: false,
+            program: "",
         };
         let mut out = Vec::new();
         user_driver_name(&query, "C:\\d.dll", &mut out);

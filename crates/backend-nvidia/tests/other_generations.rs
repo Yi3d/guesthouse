@@ -227,7 +227,7 @@ fn word(bytes: &[u8], at: usize) -> u32 {
 
 fn answer(backend: &NvidiaBackend<FakeRm>, kind: u32, size: usize, data: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    let query = VendorQuery { kind, size, data, process_is_32_bit: false };
+    let query = VendorQuery { kind, size, data, process_is_32_bit: false, program: "" };
     (backend.answers().answer(&query, &mut out) == Some(Status::SUCCESS)).then_some(out)
 }
 

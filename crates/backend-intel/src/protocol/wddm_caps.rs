@@ -65,7 +65,8 @@ mod tests {
 
     fn ask(kind: u32, size: usize, data: &[u8]) -> (Option<Status>, Vec<u8>) {
         let mut out = Vec::new();
-        let status = answer(&VendorQuery { kind, size, data, process_is_32_bit: false }, &mut out);
+        let status =
+            answer(&VendorQuery { kind, size, data, process_is_32_bit: false, program: "" }, &mut out);
         (status, out)
     }
 

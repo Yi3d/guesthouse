@@ -126,6 +126,8 @@ pub struct Session<B, M> {
     pub(crate) processes_32_bit: HashSet<u32>,
     /// Each process's PID in the guest, by the handle this side gave it.
     pub(crate) guest_pids: HashMap<u32, u32>,
+    /// Each process's program, by its file name, where the guest named it.
+    pub(crate) programs: HashMap<u32, String>,
     pub(crate) spaces: HashMap<u32, SpaceId>,
     /// The daemon's own address space, apart from `spaces` so that no message can name it.
     own_space: Option<SpaceId>,
@@ -227,6 +229,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             io_space: None,
             processes_32_bit: HashSet::new(),
             guest_pids: HashMap::new(),
+            programs: HashMap::new(),
             spaces: HashMap::new(),
             own_space: None,
             closed_spaces: HashSet::new(),

@@ -54,7 +54,7 @@ fn main() {
     fs::create_dir_all(&output).unwrap();
     let answer = |kind, size, data: &[u8]| {
         let mut out = Vec::new();
-        let query = VendorQuery { kind, size, data, process_is_32_bit: false };
+        let query = VendorQuery { kind, size, data, process_is_32_bit: false, program: "" };
         (backend.answers().answer(&query, &mut out) == Some(Status::SUCCESS)).then_some(out)
     };
     fs::write(output.join("record"), answer(0, GUEST_617.record.size, &[]).unwrap()).unwrap();

@@ -93,6 +93,7 @@ mod tests {
             size: data.len(),
             data: &data,
             process_is_32_bit,
+            program: "",
         };
         write_name(&query, &mut out);
         assert_eq!(out[0], version);

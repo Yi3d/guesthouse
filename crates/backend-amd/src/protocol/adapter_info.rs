@@ -673,26 +673,51 @@ pub(crate) mod tests {
     fn only_the_block_query_is_answered() {
         let info = small_card();
         let mut out = Vec::new();
-        let other = VendorQuery { kind: 7, size: BLOCK_SIZE, data: &[], process_is_32_bit: false };
+        let other =
+            VendorQuery { kind: 7, size: BLOCK_SIZE, data: &[], process_is_32_bit: false, program: "" };
         assert_eq!(answer(&other, &info, &mut out), None);
-        let short = VendorQuery { kind: QUERY_TYPE, size: 0x100, data: &[], process_is_32_bit: false };
+        let short =
+            VendorQuery { kind: QUERY_TYPE, size: 0x100, data: &[], process_is_32_bit: false, program: "" };
         assert_eq!(answer(&short, &info, &mut out), Some(Status::INVALID_PARAMETER));
         assert!(out.is_empty());
-        let too_big =
-            VendorQuery { kind: QUERY_TYPE, size: BLOCK_SIZE + 4, data: &[], process_is_32_bit: false };
+        let too_big = VendorQuery {
+            kind: QUERY_TYPE,
+            size: BLOCK_SIZE + 4,
+            data: &[],
+            process_is_32_bit: false,
+            program: "",
+        };
         assert_eq!(answer(&too_big, &info, &mut out), Some(Status::INVALID_PARAMETER));
         assert!(out.is_empty());
-        let right = VendorQuery { kind: QUERY_TYPE, size: BLOCK_SIZE, data: &[], process_is_32_bit: false };
+        let right = VendorQuery {
+            kind: QUERY_TYPE,
+            size: BLOCK_SIZE,
+            data: &[],
+            process_is_32_bit: false,
+            program: "",
+        };
         assert_eq!(answer(&right, &info, &mut out), Some(Status::SUCCESS));
         assert_eq!(out.len(), BLOCK_SIZE);
         out.clear();
         let header_size = adapter_header::HEADER_SIZE;
-        let header = VendorQuery { kind: QUERY_TYPE, size: header_size, data: &[], process_is_32_bit: false };
+        let header = VendorQuery {
+            kind: QUERY_TYPE,
+            size: header_size,
+            data: &[],
+            process_is_32_bit: false,
+            program: "",
+        };
         assert_eq!(answer(&header, &info, &mut out), Some(Status::SUCCESS));
         assert_eq!(out, adapter_header::build(&info, header_size));
         out.clear();
         let both_size = header_size + BLOCK_SIZE;
-        let both = VendorQuery { kind: QUERY_TYPE, size: both_size, data: &[], process_is_32_bit: false };
+        let both = VendorQuery {
+            kind: QUERY_TYPE,
+            size: both_size,
+            data: &[],
+            process_is_32_bit: false,
+            program: "",
+        };
         assert_eq!(answer(&both, &info, &mut out), Some(Status::SUCCESS));
         assert_eq!(out[..header_size], adapter_header::build(&info, both_size)[..]);
         assert_eq!(out[header_size..], build(&info)[..]);
@@ -707,7 +732,8 @@ pub(crate) mod tests {
         {
             let mut out = Vec::new();
             let size = header_size + tail;
-            let query = VendorQuery { kind: QUERY_TYPE, size, data: &[], process_is_32_bit: false };
+            let query =
+                VendorQuery { kind: QUERY_TYPE, size, data: &[], process_is_32_bit: false, program: "" };
             assert_eq!(answer(&query, &info, &mut out), Some(Status::SUCCESS));
             assert_eq!(out[header_size..], body[..]);
         }
