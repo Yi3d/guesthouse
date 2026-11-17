@@ -20,6 +20,7 @@ mod window_speed;
 use amd_files::{bring_amd_driver_up_to_date, complete_host_driver};
 pub use desktop::{apply_share, boots, rebooted};
 use desktop::{note_boot, set_up_desktop, wait_for_desktop};
+pub use diagnose::{API_FILE, GATHERED_FOLDER, PROBE_FILE, REPORT_FILE};
 use gpu_check::{Gpu, confirm_gpu};
 use guest_files::{place_driver_files, place_profile_store, place_system_files};
 use identity::set_up_identity;

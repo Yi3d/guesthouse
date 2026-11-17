@@ -26,8 +26,8 @@ const GUEST_REPORT: &str = r"C:\gpupv\dxdiag.txt";
 pub const REPORT_FILE: &str = "dxdiag.txt";
 /// The folder in the machine's own folder that a run's files are gathered in, and the file the
 /// host's view of the card goes in. The probe is a program of the Intel backend.
-const GATHERED_FOLDER: &str = "test-report";
-const PROBE_FILE: &str = "intel-probe.txt";
+pub const GATHERED_FOLDER: &str = "test-report";
+pub const PROBE_FILE: &str = "intel-probe.txt";
 const PROBE_PROGRAM: &str = "intel-probe";
 /// The API check's script as the app holds it, where the guest keeps it, and where it writes its
 /// report, which is what the check is called beside the others.

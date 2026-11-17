@@ -21,8 +21,8 @@ const SECTION_START: &str = "=== ";
 const NAMES: &str = "names";
 const END: &str = "end";
 const LOG_START: &str = "log ";
-const GUEST_USER_MARK: &str = "<guest-user>";
-const GUEST_PC_MARK: &str = "<guest-pc>";
+pub(super) const GUEST_USER_MARK: &str = "<guest-user>";
+pub(super) const GUEST_PC_MARK: &str = "<guest-pc>";
 /// Accounts every Windows has, whose names are words in its own logs and say nothing of whose it is.
 const BUILT_IN_ACCOUNTS: [&str; 4] = ["Administrator", "Guest", "DefaultAccount", "WDAGUtilityAccount"];
 const NEEDS_RUNNING: &str = "Logs from inside the guest need the machine running, so there are none here.";

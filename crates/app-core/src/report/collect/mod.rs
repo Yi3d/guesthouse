@@ -15,6 +15,7 @@ mod kernel_log;
 mod machine_files;
 mod run_logs;
 mod running;
+mod test_report;
 
 pub use machine_files::{chosen_machine, latest_machine};
 
@@ -127,6 +128,7 @@ pub fn collect(context: &Context, request: &Request) -> Collection {
         machine_files::collect(context, machine, &mut found);
         run_logs::collect(context, machine, request, &mut found);
         guest_logs::collect(context, machine, request, &mut found);
+        test_report::collect(context, machine, &mut found);
     } else {
         found
             .notes
