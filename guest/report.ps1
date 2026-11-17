@@ -31,8 +31,9 @@ $providers = @('Display', 'Microsoft-Windows-DxgKrnl', 'dxgkrnl', 'nvlddmkm', 'a
 $pnpProvider = 'Microsoft-Windows-Kernel-PnP'
 $pnpEvents = @(411, 219)
 # The graphics kernel writes its own logs, apart from System: where it says it reset or stopped an
-# adapter. Every event in them is about the display stack.
-$graphicsLogs = @('Microsoft-Windows-DxgKrnl/Admin', 'Microsoft-Windows-DxgKrnl/Operational')
+# adapter. Every event in them is about the display stack. They're named with a hyphen where Event
+# Viewer shows a slash.
+$graphicsLogs = @('Microsoft-Windows-DxgKrnl-Admin', 'Microsoft-Windows-DxgKrnl-Operational')
 $dumps = @('C:\Windows\MEMORY.DMP', 'C:\Windows\Minidump\*.dmp', 'C:\Windows\LiveKernelReports\*\*.dmp')
 
 '=== names'
@@ -53,8 +54,10 @@ $system = Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $sinc
         $providers -contains $_.ProviderName -or $_.ProviderName -like '*Guesthouse*' -or
             ($_.ProviderName -eq $pnpProvider -and $pnpEvents -contains $_.Id)
     }
+# A log Windows doesn't have stops the whole script with "The parameter is incorrect", whatever the
+# error preference, and with it every part after this one, so each is tried on its own.
 $graphics = foreach ($log in $graphicsLogs) {
-    Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $since } -MaxEvents $mostEvents
+    try { Get-WinEvent -FilterHashtable @{ LogName = $log; StartTime = $since } -MaxEvents $mostEvents } catch { }
 }
 @($system) + @($graphics) | Where-Object { $_ } | Sort-Object TimeCreated -Descending |
     Select-Object -First $mostEvents |
@@ -76,7 +79,7 @@ Get-CimInstance Win32_VideoController | ForEach-Object {
 Get-PnpDevice -Class Display | ForEach-Object {
     $failed = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_ProblemStatus').Data
     $status = if ($null -ne $failed) { '0x{0:X8}' -f $failed } else { 'none' }
-    "$($_.FriendlyName), $($_.InstanceId), $($_.Status), problem $($_.Problem) ($($_.ConfigManagerErrorCode)), problem status $status"
+    "$($_.FriendlyName), $($_.InstanceId), $($_.Status), problem $($_.Problem) ($([int]$_.ConfigManagerErrorCode)), problem status $status"
 }
 
 '=== windows'

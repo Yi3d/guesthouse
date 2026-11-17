@@ -231,8 +231,8 @@ mod tests {
         for wanted in [
             "'Microsoft-Windows-Kernel-PnP'",
             "@(411, 219)",
-            "'Microsoft-Windows-DxgKrnl/Admin'",
-            "'Microsoft-Windows-DxgKrnl/Operational'",
+            "'Microsoft-Windows-DxgKrnl-Admin'",
+            "'Microsoft-Windows-DxgKrnl-Operational'",
             "$lines -join ' | '",
             "Get-PnpDevice -Class Display",
             "DEVPKEY_Device_ProblemStatus",
