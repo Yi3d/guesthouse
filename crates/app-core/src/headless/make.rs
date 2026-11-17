@@ -12,9 +12,13 @@ use crate::host::{RamField, physical_cores};
 use crate::iso::Iso;
 use crate::library::{NewMachine, create, delete, folders_text, remove_entry};
 use crate::machine::{Kind, MIN_RAM_GIB, Machine, load};
+use crate::macos_setup::{HOW_IT_INSTALLS, MACOS_SIZES, MACOS_TITLE, NewMac, create_macos};
 use crate::setup::checks::machine_gpu_warning;
 use crate::tasks::{State, status};
 use std::io::Write;
+
+/// What `--kind` calls a macOS machine, which is a plain one with a boot image of its own.
+const MACOS_KIND: &str = "macos";
 
 fn kind_text(kind: Kind) -> &'static str {
     match kind {
@@ -81,12 +85,37 @@ fn card_for(context: &Context, named: Option<&str>) -> Result<String> {
     Err(Failure(format!("There is no card at {pci} to use. The cards are {}.", cards.join(", "))))
 }
 
+/// A macOS machine has no disc: its installer comes from Apple at its install.
+fn new_mac(context: &Context, name: &str, options: &NewOptions, out: &mut dyn Write) -> Result<()> {
+    if options.iso.is_some() || options.user.is_some() || options.amd_card.is_some() {
+        return Err(Failure::new("A macOS machine takes --disk, --cores and --ram, and nothing else."));
+    }
+    let number = |option: &str, text: Option<&str>, usual: u32| match text {
+        Some(text) => whole_number(option, text),
+        None => Ok(usual),
+    };
+    let ram = RamField::for_plain(context, 1, MACOS_SIZES.ram).value as u32;
+    let new = NewMac {
+        name: name.to_owned(),
+        cores: number("--cores", options.cores, MACOS_SIZES.cores.min(physical_cores(&context.cpus)))?,
+        ram_gib: number("--ram", options.ram, ram)?,
+        disk_gib: number("--disk", options.disk, MACOS_SIZES.disk)?,
+    };
+    let machine = create_macos(context, &new)?;
+    writeln!(out, "Made {} for {MACOS_TITLE} in {}.", machine.name, machine.folder(context).display())?;
+    writeln!(out, "{HOW_IT_INSTALLS}")?;
+    Ok(writeln!(out, "Run: guesthouse-vm install {}", machine.id)?)
+}
+
 pub(super) fn new_machine(
     context: &Context,
     name: &str,
     options: &NewOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
+    if options.kind.is_some_and(|kind| kind.eq_ignore_ascii_case(MACOS_KIND)) {
+        return new_mac(context, name, options, out);
+    }
     let iso = options.iso.ok_or_else(|| Failure::new("new needs --iso PATH, the disc to install from."))?;
     let disc = disc_offered(context, iso, options.kind, out)?;
     let kind = disc.kind;
@@ -161,6 +190,9 @@ pub(super) fn install(context: &Context, machine: &Machine, wait: bool, out: &mu
     }
     if !found.error.is_empty() {
         writeln!(out, "Note: {}", found.error)?;
+    }
+    if machine.macos() {
+        return Ok(writeln!(out, "{name} has started Apple's installer. The rest is done in its window.")?);
     }
     Ok(writeln!(out, "{name} is installed.")?)
 }

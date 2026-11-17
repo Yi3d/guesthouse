@@ -13,6 +13,7 @@ mod identity_restart;
 mod identity_switch;
 mod install;
 mod macos;
+mod macos_install;
 mod own_linux;
 mod ubuntu;
 mod window_speed;
@@ -121,6 +122,8 @@ impl<'a> Task<'a> {
         self.context.clock.now()
     }
 }
+
+pub use macos::start_refusal as macos_start_refusal;
 
 /// The plan for this machine, in this task's slot, as things stand on the PC now.
 pub fn plan_for(context: &Context, machine: &Machine, boot: Boot) -> VmPlan {
@@ -376,6 +379,7 @@ fn run_action(task: &mut Task, arguments: &[String]) -> Result<()> {
             display::install_display(task);
             Ok(())
         }
+        "install" if task.machine.macos() => macos_install::install(task),
         "install" if task.machine.kind == Kind::Linux => ubuntu::install(task),
         "install" => install(task),
         "take_snapshot" => take_snapshot(task, text),
