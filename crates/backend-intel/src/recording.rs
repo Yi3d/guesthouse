@@ -25,7 +25,12 @@ const NONE: &str = "-";
 /// The recording this process was asked to use, if it was. This is the one place that reads the
 /// variable, so nothing picks a recording up by accident.
 pub fn recorded_card_file() -> Option<PathBuf> {
-    std::env::var_os(RECORDED_CARD_VARIABLE).filter(|value| !value.is_empty()).map(PathBuf::from)
+    named(std::env::var_os(RECORDED_CARD_VARIABLE))
+}
+
+/// The file a value of the variable names. Empty names none, so `VARIABLE=` turns it off.
+fn named(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 /// What is wrong with a recording, with the line it is on.
@@ -316,6 +321,13 @@ pub fn read(text: &str) -> Result<CardFacts, BadRecording> {
 mod tests {
     use super::*;
     use crate::card::tests::{battlemage, lunar_lake};
+
+    #[test]
+    fn only_a_value_given_names_a_recording() {
+        assert_eq!(named(None), None);
+        assert_eq!(named(Some("".into())), None);
+        assert_eq!(named(Some("/lab/arc-b580.card".into())), Some("/lab/arc-b580.card".into()));
+    }
 
     #[test]
     fn a_card_reads_back_as_it_was_written() {

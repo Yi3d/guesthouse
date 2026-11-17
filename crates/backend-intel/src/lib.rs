@@ -185,6 +185,31 @@ impl IntelBackend {
     }
 }
 
+/// The facts of a card recorded elsewhere, for a lab run on a PC without it. The guest must have
+/// been given the recorded card's address, so a machine made for another card can't start on it
+/// unnoticed. The log says loudly that nothing here is a card.
+fn recorded_card(file: &std::path::Path, address: Option<&str>) -> Result<CardFacts, Refusal> {
+    let refused = |why: String| Refusal(format!("The recorded Intel card in {} {why}", file.display()));
+    let text =
+        std::fs::read_to_string(file).map_err(|error| refused(format!("could not be read: {error}")))?;
+    let card = recording::read(&text).map_err(|bad| refused(format!("is damaged: {bad}")))?;
+    let recorded = card.address.as_deref().unwrap_or("-");
+    if address.is_some_and(|wanted| wanted != recorded) {
+        return Err(refused(format!(
+            "is of the card at {recorded}, and this guest was given the one at {}.",
+            address.unwrap_or_default()
+        )));
+    }
+    log::warn!(
+        "{PREFIX} RECORDED CARD: no Intel card is opened. The facts are a recording, from {} ({}), named in \
+         {}. A lab run only: nothing the guest sends reaches a card.",
+        file.display(),
+        recorded,
+        recording::RECORDED_CARD_VARIABLE
+    );
+    Ok(card)
+}
+
 /// What the record is built from: the card where it can say, and the generation where it can't.
 fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> RecordFacts {
     let ip = |gt: Option<&Gt>| {
@@ -265,11 +290,19 @@ impl Backend for IntelBackend {
 
     fn open(setup: &Setup, _survey: &DriverSurvey) -> Result<Self, Refusal> {
         let address = setup.card_address.map(|address| address.to_string());
-        let node = intel_render_node(address.as_deref()).ok_or_else(|| {
-            Refusal("No Intel card on the xe driver was found at the address this guest was given.".into())
-        })?;
-        let card = CardFacts::read(&node)
-            .map_err(|error| Refusal(format!("Opening the Intel card failed: {error}")))?;
+        let card = match recording::recorded_card_file() {
+            Some(file) => recorded_card(&file, address.as_deref())?,
+            None => {
+                let node = intel_render_node(address.as_deref()).ok_or_else(|| {
+                    Refusal(
+                        "No Intel card on the xe driver was found at the address this guest was given."
+                            .into(),
+                    )
+                })?;
+                CardFacts::read(&node)
+                    .map_err(|error| Refusal(format!("Opening the Intel card failed: {error}")))?
+            }
+        };
         let mut backend = Self::from_card(card)?;
         backend.facts.guest_driver_version = setup.guest_driver_version.packed();
         Ok(backend)
@@ -474,6 +507,33 @@ impl Backend for IntelBackend {
 mod tests {
     use super::*;
     use guesthouse_backend::{DriverVersion, StartDecision, decide_start};
+
+    /// A recording of the test card in a file of its own.
+    fn recorded(name: &str, text: &str) -> std::path::PathBuf {
+        let file =
+            std::env::temp_dir().join(format!("guesthouse-recorded-{}-{name}.card", std::process::id()));
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_recorded_card_stands_in_only_for_the_card_at_its_address() {
+        let file = recorded("address", &recording::write(&card::tests::lunar_lake()));
+        let card = recorded_card(&file, Some("0000:00:02.0")).unwrap();
+        assert_eq!(card.pci.device, 0x64A0);
+        assert!(recorded_card(&file, None).is_ok(), "a guest given no address takes it too");
+        let other = recorded_card(&file, Some("0000:03:00.0")).unwrap_err();
+        assert!(other.0.contains("is of the card at 0000:00:02.0"), "{}", other.0);
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_or_missing_recording_is_refused_and_says_where_it_is() {
+        let file = recorded("damaged", "guesthouse-intel-card 1\nconfg 1\n");
+        assert!(recorded_card(&file, None).unwrap_err().0.contains("is damaged: line 2"));
+        std::fs::remove_file(&file).unwrap();
+        assert!(recorded_card(&file, None).unwrap_err().0.contains("could not be read"));
+    }
 
     fn setup_for(version: &str) -> Setup {
         Setup {

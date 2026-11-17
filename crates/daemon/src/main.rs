@@ -101,7 +101,14 @@ fn serve_amd(
     log::info!("AMD card at {}", node.display());
     let memory_device = PathBuf::from(guesthouse_backend_amd::Udmabuf::DEVICE);
     let memory_device = memory_device.exists().then_some(memory_device);
-    serve_on_render_node::<AmdBackend>(slot, project, &setup, node, memory_device, |_| {})
+    let needs = guesthouse_daemon::jail::Needs::of_render_node(
+        slot,
+        &project,
+        &setup.driver_folder,
+        node,
+        memory_device,
+    );
+    serve_on_render_node::<AmdBackend>(slot, project, &setup, needs, |_| {})
 }
 
 /// Starts the Intel backend on `card`, or with none, on the card in the Intel setup file, and
@@ -113,19 +120,28 @@ fn serve_intel(
     card: Option<guesthouse_backend::PciAddress>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use guesthouse_backend_intel::IntelBackend;
+    use guesthouse_daemon::jail::Needs;
     use guesthouse_daemon::vendor_setup::INTEL;
 
     let mut setup = INTEL.read()?;
     if card.is_some() {
         setup.card_address = card;
     }
-    let address = setup.card_address.map(|pci| pci.to_string());
-    let node = guesthouse_backend_intel::intel_render_node(address.as_deref())
-        .ok_or("No Intel graphics card on the xe driver was found at the address this guest was given.")?;
-    log::info!("Intel card at {}", node.device_file.display());
+    // A recording a person named stands in for the card, and then no card is looked for or opened.
+    let needs = match guesthouse_backend_intel::recording::recorded_card_file() {
+        Some(recording) => Needs::of_recorded_card(slot, &project, &setup.driver_folder, recording),
+        None => {
+            let address = setup.card_address.map(|pci| pci.to_string());
+            let node = guesthouse_backend_intel::intel_render_node(address.as_deref()).ok_or(
+                "No Intel graphics card on the xe driver was found at the address this guest was given.",
+            )?;
+            log::info!("Intel card at {}", node.device_file.display());
+            // Intel's backend makes no dma-buf of the guest's memory, so it is given no device for one.
+            Needs::of_render_node(slot, &project, &setup.driver_folder, node.device_file, None)
+        }
+    };
     let software_desktop = env::var_os(INTEL_SOFTWARE_DESKTOP).is_some();
-    // Intel's backend makes no dma-buf of the guest's memory, so it is given no device for one.
-    serve_on_render_node::<IntelBackend>(slot, project, &setup, node.device_file, None, |backend| {
+    serve_on_render_node::<IntelBackend>(slot, project, &setup, needs, |backend| {
         backend.set_software_desktop(software_desktop)
     })
 }
@@ -136,22 +152,21 @@ fn serve_intel(
 #[cfg(feature = "intel")]
 const INTEL_SOFTWARE_DESKTOP: &str = "GUESTHOUSE_INTEL_SOFTWARE_DESKTOP";
 
-/// Serves with a backend whose card is reached through one render node, which is the only device
-/// file the jail lets this process open, beside `memory_device` where the backend uses one.
+/// Serves with a backend whose card is reached through one render node, which with what else is in
+/// `needs` is all the jail lets this process open. A recorded card needs no device at all.
 /// `configure` sets the backend's own switches once it is open.
 #[cfg(any(feature = "amd", feature = "intel"))]
 fn serve_on_render_node<B: guesthouse_backend::Backend>(
     slot: Slot,
     project: PathBuf,
     setup: &guesthouse_backend::Setup,
-    node: PathBuf,
-    memory_device: Option<PathBuf>,
+    needs: guesthouse_daemon::jail::Needs,
     configure: impl FnOnce(&mut B),
 ) -> Result<(), Box<dyn std::error::Error>> {
     use guesthouse_core::{Config, MemoryLimits, Session};
     use guesthouse_daemon::environment::{guest_ram, video_cap};
     use guesthouse_daemon::guest_memory::SharedMemory;
-    use guesthouse_daemon::jail::{Needs, lock_calls, lock_files};
+    use guesthouse_daemon::jail::{lock_calls, lock_files};
     use guesthouse_daemon::router::Router;
     use guesthouse_daemon::server::Server;
     use guesthouse_daemon::startup::start_backend;
@@ -159,7 +174,6 @@ fn serve_on_render_node<B: guesthouse_backend::Backend>(
     let run_folder = slot.run_folder(&project);
     let (ram, cap) = (env::var("GUESTHOUSE_RAM").ok(), env::var("GUESTHOUSE_VRAM").ok());
     let memory = SharedMemory::from_environment(slot, guest_ram(ram.as_deref()))?;
-    let needs = Needs::of_render_node(slot, &project, &setup.driver_folder, node, memory_device);
     needs.prepare()?;
     let locked = lock_files(&needs)?;
     let mut backend: B = start_backend(setup)?;
