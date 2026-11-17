@@ -44,7 +44,7 @@ impl VmPlan {
         }
     }
 
-    fn sound_backend(&self) -> (String, &'static str) {
+    pub(super) fn sound_backend(&self) -> (String, &'static str) {
         match &self.sound {
             None => ("none,id=silent".to_owned(), "silent"),
             Some(Sound { sink: None }) => ("pipewire,id=sound".to_owned(), "sound"),
@@ -218,7 +218,7 @@ impl VmPlan {
                 "ide-cd,bus=ahci.2,drive=cd1",
             ]),
             Boot::Gpu => self.gpu_arguments(),
-            Boot::UbuntuInstall(_) | Boot::Ubuntu(_) => Vec::new(),
+            Boot::UbuntuInstall(_) | Boot::Ubuntu(_) | Boot::Macos(_) => Vec::new(),
         }
     }
 
@@ -229,6 +229,9 @@ impl VmPlan {
 
     pub fn qemu_arguments(&self) -> Vec<String> {
         if let Some(arguments) = self.ubuntu_arguments() {
+            return arguments;
+        }
+        if let Some(arguments) = self.macos_arguments() {
             return arguments;
         }
         let mut arguments = self.qemu_files_arguments();
@@ -274,6 +277,7 @@ impl VmPlan {
             self.jail.as_ref().map(|jail| self.jailed_environment(jail)).unwrap_or_default();
         environment.extend(self.share.iter().map(|folder| ("SHARE".to_owned(), folder.clone())));
         environment.extend(self.amd_environment());
+        environment.extend(self.macos_environment());
         environment
     }
 

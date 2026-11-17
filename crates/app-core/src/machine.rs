@@ -245,6 +245,10 @@ pub struct Machine {
     /// can still read it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub disk_folder: String,
+    /// The OpenCore image of a plain machine that holds macOS, which it boots through. Its GPU is
+    /// reims-vgpu's device. Left out of the file when empty, so an older build can still read it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub opencore: String,
 }
 
 impl Machine {
@@ -291,6 +295,7 @@ impl Machine {
             window_speed_off: false,
             file_drop_off: false,
             disk_folder: String::new(),
+            opencore: String::new(),
         }
     }
 
@@ -365,6 +370,11 @@ impl Machine {
     /// goes on the GPU where the guest can put it there, and stays on QEMU's display where it can't.
     pub fn own_linux_gpu(&self) -> bool {
         self.kind == Kind::Plain && self.linux_gpu
+    }
+
+    /// Whether this plain machine holds macOS.
+    pub fn macos(&self) -> bool {
+        self.kind == Kind::Plain && !self.opencore.is_empty()
     }
 
     /// The AMD card a Linux guest's GPU is to be, by its PCI address, if it has the GPU and it's AMD's.

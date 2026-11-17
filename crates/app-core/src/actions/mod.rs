@@ -19,6 +19,7 @@ mod identity_switch;
 mod install;
 mod intel_device;
 mod intel_files;
+mod macos;
 mod own_linux;
 mod remote_access;
 mod ubuntu;
@@ -162,6 +163,9 @@ pub fn start(task: &mut Task) -> Result<()> {
     }
     if task.machine.own_linux_gpu() {
         return own_linux::start(task);
+    }
+    if task.machine.macos() {
+        return macos::start(task);
     }
     let machine = task.machine.clone();
     if machine.has_gpu() {
