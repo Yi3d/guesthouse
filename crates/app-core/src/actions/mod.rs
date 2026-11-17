@@ -12,6 +12,7 @@ mod identity;
 mod identity_restart;
 mod identity_switch;
 mod install;
+mod macos;
 mod own_linux;
 mod ubuntu;
 mod window_speed;
@@ -148,6 +149,9 @@ pub fn start(task: &mut Task) -> Result<()> {
     }
     if task.machine.own_linux_gpu() {
         return own_linux::start(task);
+    }
+    if task.machine.macos() {
+        return macos::start(task);
     }
     let machine = task.machine.clone();
     if machine.has_gpu() {
