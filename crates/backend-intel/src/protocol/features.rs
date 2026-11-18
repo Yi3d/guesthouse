@@ -2,7 +2,7 @@
 //!
 //! The record carries a feature table, a long run of one-bit flags saying what the hardware can do.
 //! Only the flags whose place is known are here, under gmmlib's names. The rest of the table stays zero.
-//! The table's workaround counterpart has one entry set, [`set_workaround`].
+//! The table's workaround counterpart has two entries set, with [`set_workaround`].
 
 /// One flag: the byte it is in, counted from the start of the record, and its bit there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +59,35 @@ pub const WALKER_MTP: Feature = at("FtrWalkerMTP", WORD_B, 19);
 pub const GPGPU_MID_BATCH_PREEMPT: Feature = at("FtrGpGpuMidBatchPreempt", WORD_B, 9);
 pub const GPGPU_THREAD_GROUP_PREEMPT: Feature = at("FtrGpGpuThreadGroupLevelPreempt", WORD_B, 10);
 pub const GPGPU_MID_THREAD_PREEMPT: Feature = at("FtrGpGpuMidThreadLevelPreempt", WORD_B, 11);
+
+/// The 3D pipeline levels Intel's Direct3D 10 and 11 driver reports, from 10_0 up, which have no
+/// names in gmmlib. Its 12_0 and 12_1 come from [`WDDM2_GPU_MMU`]. Direct3D 11 refuses a driver
+/// whose levels have a gap, and with these clear the gap is below 12_0, so no Direct3D 10 or 11
+/// device could be made on the adapter, the desktop's compositor's included.
+pub const PIPELINE_LEVELS: [Feature; 4] = [
+    at("3D pipeline 10_0", WORD_FIRST, 648),
+    at("3D pipeline 10_1", WORD_FIRST, 649),
+    at("3D pipeline 11_0", WORD_FIRST, 651),
+    at("3D pipeline 11_1", WORD_FIRST, 652),
+];
+
+/// The Direct3D 11 interface versions past 11.0's first two, 0x000B0023 to 0x000B002D, one bit
+/// each, which have no names in gmmlib. Intel's driver offers a version only when its bit is set,
+/// and the newer ones carry the runtime's callbacks for hardware queues, which the driver calls on a
+/// card with hardware scheduling.
+pub const DDI_VERSIONS: [Feature; 11] = [
+    at("D3D11 DDI 0x000B0023", WORD_FIRST, 1413),
+    at("D3D11 DDI 0x000B0024", WORD_FIRST, 1414),
+    at("D3D11 DDI 0x000B0025", WORD_FIRST, 1415),
+    at("D3D11 DDI 0x000B0026", WORD_FIRST, 1416),
+    at("D3D11 DDI 0x000B0027", WORD_FIRST, 1417),
+    at("D3D11 DDI 0x000B0028", WORD_FIRST, 1418),
+    at("D3D11 DDI 0x000B0029", WORD_FIRST, 1419),
+    at("D3D11 DDI 0x000B002A", WORD_FIRST, 1420),
+    at("D3D11 DDI 0x000B002B", WORD_FIRST, 1421),
+    at("D3D11 DDI 0x000B002C", WORD_FIRST, 1422),
+    at("D3D11 DDI 0x000B002D", WORD_FIRST, 1423),
+];
 
 /// The four flags that let the guest compress surfaces. Compression needs the host to set up
 /// memory the same way, which this backend can't yet, so all four stay clear.
@@ -143,6 +172,10 @@ mod tests {
             COMPRESSION[1],
             COMPRESSION[2],
             COMPRESSION[3],
+            PIPELINE_LEVELS[0],
+            PIPELINE_LEVELS[1],
+            PIPELINE_LEVELS[2],
+            PIPELINE_LEVELS[3],
         ];
         for (at, one) in all.iter().enumerate() {
             for other in &all[at + 1..] {
@@ -151,6 +184,26 @@ mod tests {
         }
         assert_eq!((HW_SCHEDULING.byte, HW_SCHEDULING.bit), (0x2EC + 6, 1));
         assert_eq!((BLITTER_RING.byte, BLITTER_RING.bit), (0x2B4 + 1, 6));
+    }
+
+    #[test]
+    fn the_ddi_versions_are_bits_5_to_15_of_the_dword_at_0x364() {
+        let mut record = vec![0u8; 0x400];
+        for version in DDI_VERSIONS {
+            set(&mut record, version, true);
+        }
+        assert_eq!(dword(&record, 0x364), Some(0xFFE0));
+        assert_eq!(record.iter().filter(|&&byte| byte != 0).count(), 2);
+    }
+
+    #[test]
+    fn the_pipeline_levels_are_bits_0_1_3_and_4_of_byte_0x305() {
+        let mut record = vec![0u8; 0x400];
+        for level in PIPELINE_LEVELS {
+            set(&mut record, level, true);
+        }
+        assert_eq!(record[0x305], 0x1B);
+        assert_eq!(record.iter().filter(|&&byte| byte != 0).count(), 1);
     }
 
     #[test]

@@ -11,7 +11,7 @@ pub const RECORD: [&str; 18] = [
     "the media IP version",
     "the platform word between the display and render IP versions",
     "the per-adapter block after the platform",
-    "the workaround table, every entry but the one that marks a virtual machine's adapter",
+    "the workaround table, every entry but the one that marks a virtual machine's adapter and the one for tiled resources",
     "the feature flags whose places aren't known: Tile64Optimization, the video and video-enhancement \
      ring flags, and the rest of the table",
     "the feature flags whose places are only inferred: 3D mid-batch preemption, 3D object-level \

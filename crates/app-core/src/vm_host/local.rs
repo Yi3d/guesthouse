@@ -4,9 +4,11 @@ use super::{Stopped, VmHost};
 use crate::context::Context;
 use crate::daemon::{self, DaemonStart, detached, is_own_daemon};
 use crate::failure::{Failure, Result};
+use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::GuestMemory;
 use crate::host::GIB;
 use crate::host_drives::OpenDrives;
+use crate::intel_desktop;
 use crate::jailing;
 use crate::kept_logs;
 use crate::log::write_log;
@@ -286,6 +288,9 @@ impl LocalHost<'_> {
         }
         if let Some(maker) = machine.windows_maker() {
             start = start.on_card(maker, &machine.amd_gpu)?;
+            if maker == GpuMaker::Intel {
+                start = start.with_intel_desktop(intel_desktop::for_start(self.context, machine));
+            }
         }
         let mut daemon = start.spawn(&plan.run_folder, &memory)?;
         self.wait_for_daemon(&mut daemon)?;

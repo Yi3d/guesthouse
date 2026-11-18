@@ -9,7 +9,7 @@ use crate::machine::{Machine, load_all};
 use crate::slots;
 use crate::tasks::read_task;
 use crate::vm_host::MACHINE_NOTE;
-use crate::{display, gpu_identity, linux};
+use crate::{display, gpu_identity, intel_desktop, linux};
 use guesthouse_daemon::slot::Slot;
 use serde_json::Value;
 use std::fs;
@@ -67,6 +67,8 @@ pub fn collect(context: &Context, machine: &Machine, found: &mut Collection) {
     found.add_file_if_there("machine/display.json", &display::state_file(context, machine));
     found.add_file_if_there("machine/gpu-identity.json", &gpu_identity::state_file(context, machine));
     found.add_file_if_there("machine/amd-fallback", &linux::amd::fallback_file(context, machine));
+    found
+        .add_file_if_there("machine/intel-software-desktop", &intel_desktop::fallback_file(context, machine));
 }
 
 /// The settings with each private field marked as left out, so it's still clear whether it was set.

@@ -650,6 +650,17 @@ impl Backend for IntelBackend {
                 }
                 QueryOutcome::DriverName(status, name)
             }
+            protocol::update_status::QUERY_DRIVER_UPDATE_STATUS => {
+                match protocol::update_status::answer(query, self.desktop, out) {
+                    Some(status) => QueryOutcome::UpdateInProgress(status),
+                    None => QueryOutcome::LeftToTheCore,
+                }
+            }
+            protocol::node_metadata::QUERY_NODE_METADATA => match protocol::node_metadata::answer(query, out)
+            {
+                Some(status) => QueryOutcome::Caps(status),
+                None => QueryOutcome::LeftToTheCore,
+            },
             _ => match protocol::wddm_caps::answer(query, out) {
                 Some(status) => QueryOutcome::Caps(status),
                 None => QueryOutcome::LeftToTheCore,
@@ -660,7 +671,8 @@ impl Backend for IntelBackend {
             QueryOutcome::Record(status, _)
             | QueryOutcome::DriverName(status, _)
             | QueryOutcome::OpenGl(status, _)
-            | QueryOutcome::Caps(status) => Some(status),
+            | QueryOutcome::Caps(status)
+            | QueryOutcome::UpdateInProgress(status) => Some(status),
             QueryOutcome::LeftToTheCore => None,
         }
     }

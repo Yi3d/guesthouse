@@ -118,6 +118,10 @@ const VEBOX_VALID: usize = 0x18;
 
 /// The workaround entry that is set for an adapter that is a virtual machine's, and its value.
 const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
+/// An unnamed entry, the top nibble of the record's dword at 0x4A8, that Intel's Direct3D 11 driver
+/// reads as tiled resources at tier 2 or above. Direct3D 11 refuses a device at 12_0 or above from a
+/// driver that says less, which is every device, the desktop compositor's included.
+const TILED_RESOURCES_WORKAROUND: (usize, u8) = (535, 1);
 /// KMD_CAPS_INFO's DriverStoreEnabled: the driver runs from the driver store, as one from a DCH INF
 /// always does, and the guest's copy is in its host driver store. Intel's Direct3D 12 driver loads
 /// its shader compiler from its own folder only when this is set, and by bare name, from nowhere it
@@ -326,8 +330,9 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
         }
     }
     set_features(&mut record, facts);
-    let (entry, value) = VIRTUAL_MACHINE_WORKAROUND;
-    features::set_workaround(&mut record, entry, value);
+    for (entry, value) in [VIRTUAL_MACHINE_WORKAROUND, TILED_RESOURCES_WORKAROUND] {
+        features::set_workaround(&mut record, entry, value);
+    }
     let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
     partition::write(block, &partition::ours());
     record[at::FROM_VIRTUAL_MACHINE] = 1;
@@ -369,6 +374,9 @@ fn set_features(record: &mut [u8], facts: &RecordFacts) {
     ];
     for (feature, on) in flags {
         features::set(record, feature, on);
+    }
+    for feature in features::PIPELINE_LEVELS.into_iter().chain(features::DDI_VERSIONS) {
+        features::set(record, feature, true);
     }
     for feature in features::COMPRESSION {
         features::set(record, feature, false);
@@ -552,6 +560,13 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn direct3d_11_sees_every_pipeline_level_from_10_0_to_12_1_with_no_gap() {
+        let record = build(&facts());
+        assert_eq!(record[0x305] & 0x1B, 0x1B, "10_0, 10_1, 11_0 and 11_1");
+        assert!(features::is_set(&record, features::WDDM2_GPU_MMU), "12_0 and 12_1");
+    }
+
+    #[test]
     fn the_memory_model_is_the_cores() {
         let record = build(&facts());
         for feature in [features::PPGTT, features::WDDM2_GPU_MMU, features::WDDM2_64KB_PAGES] {
@@ -611,6 +626,15 @@ pub(crate) mod tests {
     fn five_level_page_tables_need_the_address_bits() {
         let wide = build(&RecordFacts { address_bits: 57, ..facts() });
         assert!(features::is_set(&wide, features::PML5));
+    }
+
+    #[test]
+    fn direct3d_11_reads_tiled_resources_from_the_top_of_dword_0x4a8() {
+        let record = build(&facts());
+        assert_eq!(features::workaround(&record, 535), Some(1));
+        assert_eq!(record[0x4AB], 0x10);
+        assert_ne!(dword(&record, 0x4A8).unwrap() & 0xF000_0000, 0);
+        assert_eq!(features::workaround(&record, 534), Some(0));
     }
 
     #[test]

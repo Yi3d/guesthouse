@@ -2,6 +2,7 @@
 
 mod adapter;
 mod allocation;
+mod batch_note;
 mod context;
 mod copies;
 mod copy_bounds;

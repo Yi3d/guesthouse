@@ -258,6 +258,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.run_deferred();
         let request = SubmitToQueue::parse(message)?;
         let value = request.fence_value;
+        self.note_batch(request.queue, request.commands, request.commands_length);
         self.note_waiting_updates(request.queue);
         let commands = CommandBuffer { address: request.commands, length: request.commands_length };
         match self.start_on_gpu(

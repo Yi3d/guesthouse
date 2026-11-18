@@ -29,6 +29,9 @@ public static class Rep {
         while (n < max && offset + n < data.Length && data[offset + n] != 0) n++;
         return System.Text.Encoding.ASCII.GetString(data, offset, n);
     }
+    // The furthest layer the probe got to, said as it gets there, so a probe cut off by its time limit
+    // or a crash still says where it stopped. The report's summary takes the last one.
+    public static void Reached(string layer) { Line("reached: " + layer); }
     public static void Threw(string call, Exception e) {
         Line("   !! " + call + " threw " + e.GetType().Name + ": " + e.Message);
     }
@@ -71,6 +74,10 @@ public static class Probe {
         return (level >> 12) + "_" + ((level >> 8) & 0xF);
     }
 
+    // The vendor of the adapter being tried, so reaching a device can say whose it is.
+    static uint vendor;
+    static string Whose() { return vendor == 0 ? "the default adapter" : "vendor 0x" + vendor.ToString("X4"); }
+
     static void Try12(IntPtr adapter, string label, uint minLevel) {
         Guid iid = new Guid("189819f1-1db6-4b57-be54-1821339b85f7");
         IntPtr device;
@@ -78,7 +85,7 @@ public static class Probe {
         try {
             int hr = D3D12CreateDevice(adapter, minLevel, ref iid, out device);
             Rep.Line("<- D3D12CreateDevice = " + Rep.Hr(hr) + (hr == 0 ? " (device created)" : ""));
-            if (hr == 0) Release(device);
+            if (hr == 0) { Rep.Reached("D3D12 device, feature level " + Level(minLevel) + ", on " + Whose()); Release(device); }
         } catch (Exception e) { Rep.Threw("D3D12CreateDevice", e); }
     }
 
@@ -91,7 +98,7 @@ public static class Probe {
         try {
             int hr = D3D11CreateDevice(adapter, type, IntPtr.Zero, 0, levels, (uint)levels.Length, 7, out device, out got, out context);
             Rep.Line("<- D3D11CreateDevice = " + Rep.Hr(hr) + (hr == 0 ? " (device created, feature level " + Level(got) + ")" : ""));
-            if (hr == 0) { Release(context); Release(device); }
+            if (hr == 0) { Rep.Reached("D3D11 device on " + Whose()); Release(context); Release(device); }
         } catch (Exception e) { Rep.Threw("D3D11CreateDevice", e); }
     }
 
@@ -118,6 +125,7 @@ public static class Probe {
                     Desc1 desc;
                     hr = ((GetDesc1Fn)Fn(adapter, 10, typeof(GetDesc1Fn)))(adapter, out desc);
                     string label = "adapter " + i;
+                    vendor = hr == 0 ? desc.VendorId : 0;
                     if (hr == 0) {
                         Rep.Line(label + ": \"" + desc.Description + "\" vendor 0x" + desc.VendorId.ToString("X4") + " device 0x" + desc.DeviceId.ToString("X4")
                             + " subsys 0x" + desc.SubSysId.ToString("X8") + " revision " + desc.Revision + " dedicated " + (ulong)desc.DedicatedVideoMemory
@@ -131,6 +139,7 @@ public static class Probe {
             }
         } catch (Exception e) { Rep.Threw("DXGI", e); }
         Release(factory);
+        vendor = 0;
         Try12(IntPtr.Zero, "default adapter", 0xB000);
         Try11(IntPtr.Zero, "default adapter");
         Rep.Line("finished");
@@ -168,6 +177,14 @@ public static class Probe {
     [DllImport(Dll)] static extern int clReleaseContext(IntPtr h);
 
     const string Source = "__kernel void fill(__global int* out) { out[get_global_id(0)] = (int)get_global_id(0) + 1; }";
+    // The kernel's items, and the buffer's ints: item i writes i + 1.
+    const int Items = 64;
+
+    // The first item whose value isn't what the kernel writes, or -1 if every one is.
+    static int Wrong(byte[] data) {
+        for (int i = 0; i < Items; i++) if (BitConverter.ToInt32(data, i * 4) != i + 1) return i;
+        return -1;
+    }
 
     static string PlatformText(IntPtr platform, uint what, string label) {
         byte[] b = new byte[512]; UIntPtr ret;
@@ -196,11 +213,12 @@ public static class Probe {
         IntPtr context = clCreateContext(IntPtr.Zero, 1, list, IntPtr.Zero, IntPtr.Zero, out err);
         Rep.Line("   <- clCreateContext = " + err + (context != IntPtr.Zero ? " (context)" : " (null)"));
         if (context == IntPtr.Zero) return;
+        Rep.Reached("context");
         Rep.Line("   -> clCreateCommandQueue");
         IntPtr queue = clCreateCommandQueue(context, device, 0, out err);
         Rep.Line("   <- clCreateCommandQueue = " + err + (queue != IntPtr.Zero ? " (queue)" : " (null)"));
-        Rep.Line("   -> clCreateBuffer (256 bytes)");
-        IntPtr buffer = clCreateBuffer(context, 1, (UIntPtr)256, IntPtr.Zero, out err);
+        Rep.Line("   -> clCreateBuffer (" + Items * 4 + " bytes)");
+        IntPtr buffer = clCreateBuffer(context, 1, (UIntPtr)(Items * 4), IntPtr.Zero, out err);
         Rep.Line("   <- clCreateBuffer = " + err + (buffer != IntPtr.Zero ? " (buffer)" : " (null)"));
         Rep.Line("   -> clCreateProgramWithSource");
         IntPtr program = clCreateProgramWithSource(context, 1, new string[] { Source }, IntPtr.Zero, out err);
@@ -209,6 +227,7 @@ public static class Probe {
             Rep.Line("   -> clBuildProgram");
             int built = clBuildProgram(program, 1, list, null, IntPtr.Zero, IntPtr.Zero);
             Rep.Line("   <- clBuildProgram = " + built);
+            if (built == 0) Rep.Reached("program built");
             byte[] log = new byte[2048]; UIntPtr ret;
             int le = clGetProgramBuildInfo(program, device, 0x1183, (UIntPtr)2048, log, out ret);
             if (le == 0 && Rep.Ascii(log, 0, 2048).Length > 0) Rep.Line("      build log: " + Rep.Ascii(log, 0, 2048).Replace("\n", " "));
@@ -230,17 +249,22 @@ public static class Probe {
         IntPtr arg = buffer;
         int e = clSetKernelArg(kernel, 0, (UIntPtr)IntPtr.Size, ref arg);
         Rep.Line("   clSetKernelArg = " + e);
-        Rep.Line("   -> clEnqueueNDRangeKernel (64 items)");
-        e = clEnqueueNDRangeKernel(queue, kernel, 1, IntPtr.Zero, new UIntPtr[] { (UIntPtr)64 }, IntPtr.Zero, 0, IntPtr.Zero, IntPtr.Zero);
+        Rep.Line("   -> clEnqueueNDRangeKernel (" + Items + " items)");
+        e = clEnqueueNDRangeKernel(queue, kernel, 1, IntPtr.Zero, new UIntPtr[] { (UIntPtr)Items }, IntPtr.Zero, 0, IntPtr.Zero, IntPtr.Zero);
         Rep.Line("   <- clEnqueueNDRangeKernel = " + e);
+        if (e != 0) { clReleaseKernel(kernel); return; }
+        Rep.Reached("kernel enqueued");
         Rep.Line("   -> clFinish");
         e = clFinish(queue);
         Rep.Line("   <- clFinish = " + e);
-        byte[] data = new byte[256];
+        if (e != 0) { clReleaseKernel(kernel); return; }
+        Rep.Reached("clFinish returned");
+        byte[] data = new byte[Items * 4];
         Rep.Line("   -> clEnqueueReadBuffer");
-        e = clEnqueueReadBuffer(queue, buffer, 1, UIntPtr.Zero, (UIntPtr)256, data, 0, IntPtr.Zero, IntPtr.Zero);
+        e = clEnqueueReadBuffer(queue, buffer, 1, UIntPtr.Zero, (UIntPtr)data.Length, data, 0, IntPtr.Zero, IntPtr.Zero);
         Rep.Line("   <- clEnqueueReadBuffer = " + e + (e == 0 ? ", first values " + BitConverter.ToInt32(data, 0) + " " + BitConverter.ToInt32(data, 4)
             + " " + BitConverter.ToInt32(data, 8) + " " + BitConverter.ToInt32(data, 12) + " (1 2 3 4 if the kernel ran)" : ""));
+        if (e == 0) Rep.Reached(Wrong(data) < 0 ? "result right, all " + Items + " values" : "result WRONG from item " + Wrong(data));
         clReleaseKernel(kernel);
     }
 
@@ -255,6 +279,7 @@ public static class Probe {
             int e = clGetPlatformIDs(0, null, out count);
             Rep.Line("<- clGetPlatformIDs = " + e + ", " + count + " platform(s)");
             if (e != 0 || count == 0) return;
+            Rep.Reached("platform");
             IntPtr[] platforms = new IntPtr[count];
             e = clGetPlatformIDs(count, platforms, out count);
             Rep.Line("<- clGetPlatformIDs(list) = " + e);
@@ -271,6 +296,7 @@ public static class Probe {
                 IntPtr[] list = new IntPtr[devices];
                 e = clGetDeviceIDs(platforms[p], 0xFFFFFFFFUL, devices, list, out devices);
                 Rep.Line("   <- clGetDeviceIDs(list) = " + e);
+                if (e == 0) Rep.Reached("device");
                 for (int d = 0; d < list.Length; d++) {
                     Rep.Line("   device " + d);
                     DeviceText(list[d], 0x102B, "NAME");
@@ -345,6 +371,7 @@ public static class Probe {
             uint r = zeInit(0);
             Rep.Line("<- zeInit = " + Rep.Hr(r));
             if (r != 0) return;
+            Rep.Reached("zeInit");
             uint drivers = 0;
             r = zeDriverGet(ref drivers, null);
             Rep.Line("<- zeDriverGet(count) = " + Rep.Hr(r) + ", " + drivers + " driver(s)");
@@ -367,6 +394,7 @@ public static class Probe {
                     IntPtr[] deviceList = new IntPtr[devices];
                     r = zeDeviceGet(driverList[i], ref devices, deviceList);
                     Rep.Line("   zeDeviceGet(list) = " + Rep.Hr(r));
+                    if (r == 0) Rep.Reached("device");
                     for (int d = 0; r == 0 && d < deviceList.Length; d++) {
                         DeviceProps props = new DeviceProps(); props.stype = 3; props.uuid = new byte[16]; props.name = new byte[256];
                         Marshal.StructureToPtr(props, block, false);
@@ -384,7 +412,7 @@ public static class Probe {
                 Rep.Line("   -> zeContextCreate");
                 r = zeContextCreate(driverList[i], block, out context);
                 Rep.Line("   <- zeContextCreate = " + Rep.Hr(r));
-                if (r == 0) { r = zeContextDestroy(context); Rep.Line("   zeContextDestroy = " + Rep.Hr(r)); }
+                if (r == 0) { Rep.Reached("context"); r = zeContextDestroy(context); Rep.Line("   zeContextDestroy = " + Rep.Hr(r)); }
                 Marshal.FreeHGlobal(block);
             }
         } catch (Exception e) { Rep.Threw("Level Zero", e); }
@@ -451,6 +479,7 @@ public static class Probe {
             int r = vkCreateInstance(ref ii, IntPtr.Zero, out instance);
             Rep.Line("<- vkCreateInstance = " + r);
             if (r != 0) return;
+            Rep.Reached("instance");
             uint count = 0;
             r = vkEnumeratePhysicalDevices(instance, ref count, null);
             Rep.Line("<- vkEnumeratePhysicalDevices(count) = " + r + ", " + count + " device(s)");
@@ -458,6 +487,7 @@ public static class Probe {
             IntPtr[] devices = new IntPtr[count];
             r = vkEnumeratePhysicalDevices(instance, ref count, devices);
             Rep.Line("<- vkEnumeratePhysicalDevices(list) = " + r);
+            if (r == 0) Rep.Reached("physical device");
             IntPtr props = Marshal.AllocHGlobal(4096);
             for (int i = 0; i < devices.Length; i++) {
                 for (int z = 0; z < 4096; z += 8) Marshal.WriteInt64(props, z, 0);
@@ -494,6 +524,7 @@ public static class Probe {
                     IntPtr queue;
                     vkGetDeviceQueue(device, (uint)pick, 0, out queue);
                     Rep.Line("   vkGetDeviceQueue -> " + (queue != IntPtr.Zero ? "a queue" : "null"));
+                    Rep.Reached(queue != IntPtr.Zero ? "device and queue" : "device, no queue");
                     vkDestroyDevice(device, IntPtr.Zero);
                 }
             }
@@ -564,6 +595,7 @@ public static class Probe {
             context = wglCreateContext(dc);
             Rep.Line("<- wglCreateContext = " + (context != IntPtr.Zero ? "a context" : "null, error " + Marshal.GetLastWin32Error()));
             if (context == IntPtr.Zero) return;
+            Rep.Reached("context");
             bool current = wglMakeCurrent(dc, context);
             Rep.Line("wglMakeCurrent = " + current);
             if (current) {
@@ -649,6 +681,24 @@ foreach ($folder in 'System32', 'SysWOW64') {
     }
 }
 
+# Each probe's furthest layer, for the summary at the end. Direct3D tries every adapter, so for it
+# only a layer reached on Intel's counts.
+$summary = New-Object System.Collections.Generic.List[string]
+$reachedMark = 'reached: '
+$intelVendor = 'vendor 0x8086'
+function Get-Furthest([string]$probe, [string[]]$lines) {
+    $reached = @($lines | Where-Object { $_.StartsWith($reachedMark) } | ForEach-Object { $_.Substring($reachedMark.Length) })
+    if ($probe -eq 'd3d') {
+        $reached = @($reached | Where-Object { $_.EndsWith($intelVendor) })
+        if ($reached.Count -eq 0) { return "no device on $intelVendor" }
+        $twelve = @($reached | Where-Object { $_.StartsWith('D3D12') })
+        $eleven = @($reached | Where-Object { $_.StartsWith('D3D11') })
+        return (@(($twelve | Select-Object -Last 1), ($eleven | Select-Object -Last 1)) | Where-Object { $_ }) -join '; '
+    }
+    if ($reached.Count -eq 0) { return 'nothing' }
+    return $reached[-1]
+}
+
 function Invoke-Probe([string]$probe, [int]$bits) {
     Add-Report ''
     Add-Report "-- $probe, $bits-bit PowerShell --"
@@ -672,8 +722,10 @@ function Invoke-Probe([string]$probe, [int]$bits) {
     } catch {
         $result = "could not run: $($_.Exception.Message)"
     }
+    $lines = @()
     if (Test-Path -LiteralPath $file) {
-        foreach ($line in [IO.File]::ReadAllLines($file)) { Add-Report "  $line" }
+        $lines = [IO.File]::ReadAllLines($file)
+        foreach ($line in $lines) { Add-Report "  $line" }
     } else {
         Add-Report '  (the probe wrote nothing)'
     }
@@ -685,6 +737,7 @@ function Invoke-Probe([string]$probe, [int]$bits) {
         }
     }
     Add-Report "  result: $result"
+    $summary.Add("  $probe $bits-bit: furthest $(Get-Furthest $probe $lines) ($result)")
 }
 
 Invoke-Probe 'd3d' 64
@@ -694,5 +747,8 @@ Invoke-Probe 'vulkan' 64
 Invoke-Probe 'opengl' 64
 Invoke-Probe 'd3d' 32
 Invoke-Probe 'opencl' 32
+Add-Report ''
+Add-Report 'summary, the furthest layer each API reached:'
+foreach ($line in $summary) { Add-Report $line }
 Add-Report ''
 Add-Report 'api-check done'

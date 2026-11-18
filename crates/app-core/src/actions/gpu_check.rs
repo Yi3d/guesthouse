@@ -22,7 +22,7 @@ const KEPT_WITHOUT_GPU: &str = "Windows started without its GPU. The VM was left
 const DAEMON_ERROR_MARK: &str = "ERROR ";
 
 /// The virtual render device, under any identity the QEMU patch can give it.
-fn is_render_device() -> String {
+pub(super) fn is_render_device() -> String {
     let identities = std::iter::once(MICROSOFT_RENDER).chain(GpuMaker::ALL.map(identity_of));
     let patterns =
         identities.map(|identity| format!("$_.PNPDeviceID -like '{}'", identity.windows_pattern()));
@@ -87,6 +87,8 @@ pub(super) enum Gpu {
     Working,
     /// Windows is up without it, and the machine stays running: see [`runs_without_gpu`].
     Missing,
+    /// The desktop failed on an Intel card, and a start on the software desktop has done the rest.
+    StartedAgain,
 }
 
 /// Whether a machine whose Windows started without its GPU is left running, by its card's maker.
