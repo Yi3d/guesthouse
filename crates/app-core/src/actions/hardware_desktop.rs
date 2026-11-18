@@ -9,11 +9,13 @@
 //! picture: the display driver's ring, with a frame on it. One with none fails the same way.
 
 use super::{STOP_WAIT_SECONDS, Task};
-use crate::display::{DriverPackage, read_state, ring_in};
+use crate::context::Context;
+use crate::display::{DriverPackage, read_state, ring_in, write_state};
 use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
 use crate::intel_desktop;
 use crate::log::write_log;
+use crate::machine::Machine;
 use crate::vm_host::Stopped;
 use guesthouse_backend_intel::stage::Desktop;
 use guesthouse_daemon::display_note::ScreenNote;
@@ -162,6 +164,17 @@ pub(super) fn no_picture(task: &Task) -> Option<String> {
     }
 }
 
+/// A display driver that showed nothing on a desktop the card couldn't draw was not at fault, so the
+/// next hardware desktop gets it again rather than going without it for good.
+fn forgive_display_driver(context: &Context, machine: &Machine) -> Result<()> {
+    let mut state = read_state(context, machine);
+    if state.failed_package.is_empty() {
+        return Ok(());
+    }
+    state.failed_package.clear();
+    write_state(context, machine, &state)
+}
+
 /// What the user is told once the machine is up on the software desktop.
 fn told(why: &str) -> String {
     format!(
@@ -174,6 +187,7 @@ fn told(why: &str) -> String {
 pub(super) fn fall_back_and_stop(task: &mut Task, why: &str) -> Result<String> {
     write_log(task.context, &format!("hardware desktop: {why}; back to the software desktop"))?;
     intel_desktop::fall_back(task.context, &task.machine, why)?;
+    forgive_display_driver(task.context, &task.machine)?;
     task.step("Starting again on the software desktop");
     if task.host.stop(&task.machine, STOP_WAIT_SECONDS)? == Stopped::TurnedOff {
         write_log(
@@ -222,6 +236,19 @@ mod tests {
         assert_eq!(picture_failure(None), Some(NO_RING));
         assert_eq!(picture_failure(Some(ring(false))), Some(NO_FRAME));
         assert_eq!(picture_failure(Some(ring(true))), None);
+    }
+
+    #[test]
+    fn falling_back_lets_the_display_driver_be_tried_again() {
+        let scratch = crate::testing::Scratch::new();
+        let context = crate::testing::scratch_context(&scratch);
+        let machine = Machine::new("arc", "Arc", "/m/disk.qcow2", "");
+        std::fs::create_dir_all(machine.folder(&context)).unwrap();
+        let mut state = read_state(&context, &machine);
+        state.failed_package = "guesthouse-display-1".to_owned();
+        write_state(&context, &machine, &state).unwrap();
+        forgive_display_driver(&context, &machine).unwrap();
+        assert!(read_state(&context, &machine).failed_package.is_empty());
     }
 
     #[test]
