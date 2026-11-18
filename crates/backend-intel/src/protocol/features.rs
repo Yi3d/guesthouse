@@ -129,6 +129,12 @@ pub fn is_set(record: &[u8], feature: Feature) -> bool {
     record.get(feature.byte).is_some_and(|byte| byte & (1 << feature.bit) != 0)
 }
 
+/// The one newer Direct3D 11 interface version the record offers: the newest, which carries the
+/// hardware-queue callbacks the compositor needs. With the older ones as well, Intel's OpenGL driver
+/// takes the pixel format and then divides by zero making a context; with this one alone it stays
+/// out and OpenGL falls back to Microsoft's, as it did before any were offered.
+pub const OFFERED_DDI_VERSION: Feature = DDI_VERSIONS[DDI_VERSIONS.len() - 1];
+
 #[cfg(test)]
 mod tests {
     use super::*;

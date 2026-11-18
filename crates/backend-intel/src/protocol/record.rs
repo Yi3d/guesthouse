@@ -375,7 +375,7 @@ fn set_features(record: &mut [u8], facts: &RecordFacts) {
     for (feature, on) in flags {
         features::set(record, feature, on);
     }
-    for feature in features::PIPELINE_LEVELS.into_iter().chain(features::DDI_VERSIONS) {
+    for feature in features::PIPELINE_LEVELS.into_iter().chain([features::OFFERED_DDI_VERSION]) {
         features::set(record, feature, true);
     }
     for feature in features::COMPRESSION {
@@ -694,6 +694,13 @@ pub(crate) mod tests {
             at::FROM_VIRTUAL_MACHINE,
             "it ends where the next field starts"
         );
+    }
+
+    #[test]
+    fn the_record_offers_the_newest_direct3d_11_interface_version_alone() {
+        let record = build(&facts());
+        let ddi_bits = dword(&record, 0x364).unwrap() & 0xFFE0;
+        assert_eq!(ddi_bits, 1 << 15, "0x000B002D, and none of the older ones");
     }
 
     #[test]
