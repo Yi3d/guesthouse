@@ -75,7 +75,7 @@ From this build the daemon can run the guest's work on the card through `xe`: re
 
 At each start the daemon runs the short self-test `intel-probe --run` runs. If any step fails, or the card can't be opened for work, the machine starts as before with nothing run on the card. A line in `daemon.out` starting with `intel stage=` says which it is and, if nothing runs, what refused.
 
-`GUESTHOUSE_INTEL_RUN_ON_CARD=0` in the daemon's environment keeps everything off the card. `GUESTHOUSE_INTEL_RUN_ON_CARD=compute` runs OpenCL work only. A recorded card never runs anything.
+`GUESTHOUSE_INTEL_RUN_ON_CARD=0` in the environment the app or `guesthouse-vm` starts the machine from keeps everything off the card. The daemon and the app both read it there, so set it where the machine is started. `GUESTHOUSE_INTEL_RUN_ON_CARD=compute` runs OpenCL work only. A recorded card never runs anything.
 
 A guest program whose work hangs or faults loses its device, as it would on Windows, and the other programs go on. On a card with memory of its own the guest can't take all of it: a quarter of the card, or 1 GiB if that is more, and what your desktop already holds stay out of its reach.
 
