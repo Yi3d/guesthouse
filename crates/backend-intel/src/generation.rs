@@ -204,7 +204,13 @@ pub const XE_HPG: Generation = Generation {
     threads_per_eu: XE_THREADS_PER_EU,
     xe2_tiling: false,
     drivers: XE_HPG_DRIVERS,
-    guesses: &[GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT, GUESS_BEFORE_XE2, GUESS_ON_XE],
+    guesses: &[
+        GUESS_NO_RECORDING,
+        GUESS_RECORD_LAYOUT,
+        GUESS_BEFORE_XE2,
+        GUESS_ON_XE,
+        "the record's render IP is 0, as xe gives none for this card",
+    ],
 };
 
 const KNOWN: [Generation; 6] = [XE2_LPG, XE2_HPG, XE3_LPG, XE_LPG_METEOR_LAKE, XE_LPG_ARROW_LAKE, XE_HPG];
