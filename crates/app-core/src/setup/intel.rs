@@ -10,7 +10,7 @@ use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
 use crate::render_cards::{RenderCard, render_card, render_cards};
 use crate::settings::write_json;
-use guesthouse_backend_intel::generation;
+use guesthouse_backend_intel::generation::{self, Generation};
 use guesthouse_backend_intel::protocol::guest_driver::{CardDrivers, OPENCL_32_BIT};
 use serde_json::{Value, json};
 use std::fs;
@@ -63,15 +63,77 @@ pub fn kind_files(drivers: &CardDrivers) -> Vec<&'static str> {
     files
 }
 
-/// The Intel cards the Intel daemon is written for, by PCI device id: Lunar Lake's Arc 140V and
-/// Battlemage's Arc B580. Intel's other cards are in this PC's list as well, and offering them would
-/// put an iGPU that can't work in the card choice of nearly every PC with an Intel processor.
-pub const SUPPORTED_DEVICES: [u32; 2] = [0x64A0, 0xE20B];
+/// The Linux driver the Intel daemon works through, and the older one that takes most Intel cards
+/// from before Lunar Lake unless told not to.
+const XE_DRIVER: &str = "xe";
+const I915_DRIVER: &str = "i915";
+
+/// Cards xe takes that Intel's Windows package has no driver for, by PCI device id: Nova Lake's and
+/// Crescent Island's, from the kernel's list.
+const NO_WINDOWS_DRIVER: [u32; 17] = [
+    0xD740, 0xD741, 0xD742, 0xD743, 0xD745, 0xD74A, 0xD74B, 0xD750, 0xD751, 0xD752, 0xD753, 0xD75F, 0x674C,
+    0x674D, 0x674E, 0x674F, 0x6750,
+];
+
+/// What a Windows machine can make of an Intel card in this PC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntelCard {
+    /// It can be set up for.
+    Offered,
+    /// It's of a generation the daemon knows, but i915 has it, and the daemon needs xe.
+    OnI915(&'static Generation),
+    /// It's not one the daemon is written for: an older Intel iGPU, which every PC with an Intel
+    /// processor has, or a newer card Intel's Windows package doesn't cover.
+    NotOffered,
+}
+
+/// The Linux driver bound to a card, from the link sysfs keeps beside its render node.
+fn bound_driver(context: &Context, card: &RenderCard) -> Option<String> {
+    let node = card.render_node.file_name()?;
+    let link = fs::read_link(context.drm_class.join(node).join("device").join("driver")).ok()?;
+    Some(link.file_name()?.to_string_lossy().into_owned())
+}
+
+/// What a Windows machine can make of `card`. A card of a generation the daemon knows is offered,
+/// whatever its id, as the daemon tells its generation from the card itself. So is a card on xe of
+/// an id no generation lists, as the daemon says when it can't place one and asks for a recording.
+pub fn intel_card(context: &Context, card: &RenderCard) -> IntelCard {
+    // A recorded card has no node, and stands in for a card on xe.
+    if card.render_node.as_os_str().is_empty() {
+        return IntelCard::Offered;
+    }
+    let driver = bound_driver(context, card);
+    let known = generation::for_device(card.device as u16);
+    match (driver.as_deref(), known) {
+        (Some(I915_DRIVER), Some(generation)) => IntelCard::OnI915(generation),
+        (Some(I915_DRIVER), None) => IntelCard::NotOffered,
+        (_, Some(_)) => IntelCard::Offered,
+        (Some(XE_DRIVER), None) if !NO_WINDOWS_DRIVER.contains(&card.device) => IntelCard::Offered,
+        _ => IntelCard::NotOffered,
+    }
+}
 
 /// The Intel cards in this PC that a Windows machine can be set up for.
 pub fn supported_intel_cards(context: &Context) -> Vec<RenderCard> {
     let cards = render_cards(context, GpuMaker::Intel);
-    cards.into_iter().filter(|card| SUPPORTED_DEVICES.contains(&card.device)).collect()
+    cards.into_iter().filter(|card| intel_card(context, card) == IntelCard::Offered).collect()
+}
+
+/// The Intel cards in this PC the daemon could use if xe had them instead of i915, with their
+/// generation.
+pub fn intel_cards_on_i915(context: &Context) -> Vec<(RenderCard, &'static Generation)> {
+    let cards = render_cards(context, GpuMaker::Intel).into_iter();
+    cards
+        .filter_map(|card| match intel_card(context, &card) {
+            IntelCard::OnI915(generation) => Some((card, generation)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What to add to the kernel's command line so xe takes the card `device` from i915.
+pub fn xe_force_probe(device: u32) -> String {
+    format!("i915.force_probe=!{device:04x} xe.force_probe={device:04x}")
 }
 
 /// Vulkan's manifests name the library the loader opens, beside them.
@@ -190,7 +252,7 @@ pub mod stand_in {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::stand_in::lay_out_driver;
     use super::*;
     use crate::linux::amd::stand_in::fake_render_node;
@@ -322,6 +384,43 @@ mod tests {
         let mut opengl: Vec<&str> = kinds.iter().map(|kind| kind.opengl).collect();
         opengl.dedup();
         assert_eq!(opengl.len(), kinds.len(), "the OpenGL pair tells the kinds apart");
+    }
+
+    /// Binds the card at `pci` to `driver`, as sysfs shows it.
+    pub fn bind(scratch: &Scratch, pci: &str, driver: &str) {
+        let folder = scratch.path(&format!("drivers/{driver}"));
+        fs::create_dir_all(&folder).unwrap();
+        std::os::unix::fs::symlink(folder, scratch.path(&format!("pci/{pci}/driver"))).unwrap();
+    }
+
+    #[test]
+    fn a_card_of_a_known_generation_is_offered_by_any_id_on_xe_but_not_on_i915() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        for (node, pci, device, driver) in [
+            (128, "0000:00:02.0", 0xB080, "xe"),
+            (129, "0000:03:00.0", 0xE2FF, "xe"),
+            (130, "0000:04:00.0", 0xD740, "xe"),
+            (131, "0000:05:00.0", 0x46A6, "i915"),
+            (132, "0000:06:00.0", 0x64A0, "i915"),
+        ] {
+            fake_render_node(&scratch, node, pci, "0x8086", device);
+            bind(&scratch, pci, driver);
+        }
+        let found: Vec<String> = supported_intel_cards(&context).into_iter().map(|card| card.pci).collect();
+        assert_eq!(
+            found,
+            ["0000:00:02.0", "0000:03:00.0"],
+            "Panther Lake, and an id no generation lists yet"
+        );
+        let on_i915 = intel_cards_on_i915(&context);
+        assert_eq!(on_i915.len(), 1, "Alder Lake's iGPU is not one the daemon knows");
+        assert_eq!((on_i915[0].0.device, on_i915[0].1.name), (0x64A0, "Xe2 LPG (Lunar Lake)"));
+    }
+
+    #[test]
+    fn xe_is_told_to_take_a_card_by_its_id_in_hex() {
+        assert_eq!(xe_force_probe(0x56A0), "i915.force_probe=!56a0 xe.force_probe=56a0");
     }
 
     #[test]

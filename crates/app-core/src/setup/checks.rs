@@ -9,7 +9,7 @@ use crate::library::INSTALL_ROOM_GIB;
 use crate::linux::amd::amd_cards;
 use crate::linux::driver_versions::{branch_refusal, branch_refusal_among, untested_warning};
 use crate::machine::{MIN_RAM_GIB, Machine};
-use crate::setup::intel::supported_intel_cards;
+use crate::setup::intel::{intel_cards_on_i915, supported_intel_cards, xe_force_probe};
 use crate::usb::sysfs_text;
 use crate::vm_args::on_path;
 use guesthouse_backend_nvidia::profile::BRANCHES;
@@ -155,13 +155,37 @@ fn check_cards(context: &Context) -> Vec<Check> {
 /// up and starts on it, and nothing is drawn by the card yet.
 fn check_intel_card(context: &Context) -> Option<Check> {
     const TITLE: &str = "Intel card";
-    let card = supported_intel_cards(context).into_iter().next()?;
+    let Some(card) = supported_intel_cards(context).into_iter().next() else {
+        return check_intel_card_on_i915(context);
+    };
     let check = Check::new(
         TITLE,
         CheckState::Warning,
         format!("{} at {}. Test stage.", card.name, card.pci),
         "Windows sets up and starts on it, but nothing is drawn by the card yet. Intel's driver is asked for \
          when you make the machine.",
+    );
+    Some(check.about(Part::Intel))
+}
+
+/// An Intel card of a generation the daemon knows, on i915, which takes Alchemist, Meteor Lake and
+/// Arrow Lake by default. xe takes it only when the kernel is told to. It fails, as nothing can run
+/// on it as it is, and the fix says how.
+fn check_intel_card_on_i915(context: &Context) -> Option<Check> {
+    const TITLE: &str = "Intel card";
+    let (card, generation) = intel_cards_on_i915(context).into_iter().next()?;
+    let check = Check::new(
+        TITLE,
+        CheckState::Failed,
+        format!(
+            "{} at {}, {}, is on the i915 driver. Guesthouse needs xe.",
+            card.name, card.pci, generation.name
+        ),
+        format!(
+            "xe takes this card only when the kernel is told to. Add {} to the kernel's command line and \
+             restart. xe on this card is newer than i915 and less tried.",
+            xe_force_probe(card.device)
+        ),
     );
     Some(check.about(Part::Intel))
 }
@@ -692,6 +716,19 @@ mod tests {
         let found = check_cards(&unsupported);
         assert_eq!(found[0].state, CheckState::Failed);
         assert_eq!(found[0].text, "No NVIDIA, AMD or Intel card was found.");
+        assert!(!gpu_verdict(&found).any());
+    }
+
+    #[test]
+    fn an_intel_card_the_daemon_knows_on_i915_says_how_to_give_it_to_xe() {
+        let scratch = Scratch::new();
+        let context = with_render_nodes(&scratch, &[(128, "0000:00:02.0", "0x8086", 0x64A0)]);
+        crate::setup::intel::tests::bind(&scratch, "0000:00:02.0", "i915");
+        let found = check_cards(&context);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((found[0].part, found[0].state), (Part::Intel, CheckState::Failed));
+        assert!(found[0].text.contains("on the i915 driver"), "{}", found[0].text);
+        assert!(found[0].fix.contains("xe.force_probe=64a0"), "{}", found[0].fix);
         assert!(!gpu_verdict(&found).any());
     }
 
