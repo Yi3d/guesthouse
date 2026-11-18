@@ -18,6 +18,7 @@ use crate::log::write_log;
 use crate::machine::REFRESH_RATES;
 use crate::screen_gpu::memory_frames;
 use crate::text::base64_encode;
+use crate::updates::VERSION;
 use guesthouse_daemon::display_note::ScreenNote;
 use guesthouse_daemon::gpu_note::read_note as read_gpu_note;
 use std::fs;
@@ -213,7 +214,7 @@ fn install(task: &Task, package: &DriverPackage, state: &mut DisplayState, found
     write_log(task.context, &format!("display driver: {}", said.trim()))?;
     if !went_in(&said) {
         take_out(task)?;
-        state.failed_package.clone_from(&package.id);
+        mark_failed(state, package.id.clone());
         return fail(task, state, DID_NOT_INSTALL, "the install did not finish");
     }
     let wanted = Wanted::of(task);
@@ -226,12 +227,40 @@ fn install(task: &Task, package: &DriverPackage, state: &mut DisplayState, found
     state.driver = Driver::Installed;
     state.package.clone_from(&package.id);
     state.failed_package.clear();
+    state.failed_on.clear();
     state.reason.clear();
     state.shown_frames = false;
     state.blank_boots = 0;
     state.restart_owed = said.contains(RESTART_MARK);
     // The install put the shipped settings back in Windows.
     state.offered_hz = 0;
+    Ok(())
+}
+
+/// `package` failed on this version of the app, so a start doesn't try it again.
+fn mark_failed(state: &mut DisplayState, package: String) {
+    state.failed_package = package;
+    state.failed_on = VERSION.to_owned();
+}
+
+/// An Intel machine's display driver that failed under an older app failed on a desktop the card
+/// couldn't draw, as no older app ran the guest's work on the card, so its failure says nothing of
+/// the driver. A start on the hardware desktop gives it its try again. One that fails on this
+/// version stays out until the next, as for any card.
+fn forgive_older_apps_failure(task: &Task, state: &mut DisplayState) -> Result<()> {
+    let intel = task.machine.windows_maker() == Some(GpuMaker::Intel);
+    if !intel || state.failed_package.is_empty() || state.failed_on == VERSION {
+        return Ok(());
+    }
+    let on = if state.failed_on.is_empty() { "an older version" } else { state.failed_on.as_str() };
+    write_log(
+        task.context,
+        &format!(
+            "display driver: it failed under {on} of the app, on a desktop the card couldn't draw; tried again on the hardware desktop"
+        ),
+    )?;
+    state.failed_package.clear();
+    state.failed_on.clear();
     Ok(())
 }
 
@@ -279,6 +308,7 @@ fn make_sure_of_driver(task: &Task, state: &mut DisplayState, again: bool) -> Re
     if kept_off(task) {
         return keep_off(task, state);
     }
+    forgive_older_apps_failure(task, state)?;
     task.step("Checking the display driver");
     let Some(found) = device(task) else {
         write_log(task.context, "display driver: the agent did not say how the device is")?;
@@ -387,7 +417,8 @@ fn settle_on_basic(task: &mut Task, state: &mut DisplayState, wanted: &Wanted) -
 
 fn give_up(task: &mut Task, state: &mut DisplayState, wanted: &Wanted, reason: &str) -> Result<()> {
     take_out(task)?;
-    state.failed_package = std::mem::take(&mut state.package);
+    let package = std::mem::take(&mut state.package);
+    mark_failed(state, package);
     fail(task, state, reason, "taken out again, as it never came up")?;
     settle_on_basic(task, state, wanted)
 }

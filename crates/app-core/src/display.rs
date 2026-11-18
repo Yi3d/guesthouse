@@ -81,6 +81,10 @@ pub struct DisplayState {
     /// The build that failed, which a start doesn't try again.
     #[serde(default)]
     pub failed_package: String,
+    /// The app's version when that build failed. Empty for a failure an older app noted, before
+    /// this was kept.
+    #[serde(default)]
+    pub failed_on: String,
     /// Why Windows is on the basic display.
     pub reason: String,
     /// What couldn't be done of what was asked for.

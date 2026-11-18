@@ -340,6 +340,35 @@ pub(crate) mod tests {
         assert_eq!(missing_files(&folder), ["igxe2hpgicd32.dll"]);
     }
 
+    /// A B580's folder as 0.6.2-intel.2 and .3 unpacked it, with the files they named, does for this
+    /// version too: Intel's installer needn't be given again.
+    #[test]
+    fn a_b580_folder_an_older_app_unpacked_needs_nothing_more() {
+        let scratch = Scratch::new();
+        let older_named = [
+            "igd9trinity64.dll",
+            "igd10iumd64.dll",
+            "igd12umd64.dll",
+            "igd9trinity32.dll",
+            "igd10iumd32.dll",
+            "igd12umd32.dll",
+            "igdrcl64.dll",
+            "igdrcl32.dll",
+            "igvk64.json",
+            "igvk32.json",
+            "ze_intel_gpu64.dll",
+        ];
+        let older_b580 = ["igxe2hpgicd64.dll", "igxe2hpgicd32.dll", "igdkmdnd64.sys"];
+        for name in older_named.iter().chain(&older_b580) {
+            scratch.write(&format!("driver/{name}"), name);
+        }
+        scratch.write("driver/igvk64.json", stand_in::manifest("igvk64.dll"));
+        scratch.write("driver/igvk32.json", stand_in::manifest("igvk32.dll"));
+        scratch.write("driver/igvk64.dll", "vulkan");
+        scratch.write("driver/igvk32.dll", "vulkan");
+        assert_eq!(missing_files(&scratch.path("driver")), Vec::<String>::new());
+    }
+
     /// Panther Lake's folder has no 32-bit OpenCL, as Intel's INF gives it none, and needs none.
     #[test]
     fn a_kind_of_card_without_32_bit_opencl_does_without_it() {
