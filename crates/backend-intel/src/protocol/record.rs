@@ -25,11 +25,25 @@ pub const COUNT_SIZE: usize = 4;
 /// A paravirtual adapter is never linked to another.
 const LINKED_ADAPTERS: u32 = 1;
 
+/// The registry key the record names as the device's, under HKEY_LOCAL_MACHINE. Intel's OpenCL and
+/// Level Zero drivers read it from the record and look in the guest's own registry for the OpenCL
+/// driver's name there, and offer no device when it has none. On a real machine the kernel driver
+/// names the adapter's key under the display class; in the guest that key belongs to Windows' virtual
+/// render driver and its number isn't known here, so the key is this backend's choice, and the app
+/// writes [`DEVICE_KEY_VALUES`] into it at start.
+pub const DEVICE_KEY: &str = r"SOFTWARE\Guesthouse\Intel adapter";
+/// The values the drivers look for in [`DEVICE_KEY`], as text.
+pub const DEVICE_KEY_VALUES: [(&str, &str); 1] = [("OpenCLDriverName", "igdrcl64.dll")];
+/// How the kernel driver's path starts, which Intel's drivers cut off before opening the key.
+const MACHINE_ROOT: &str = r"\REGISTRY\MACHINE\";
+
 /// Where the record's fields are. The names are those of gmmlib's ADAPTER_INFO and the structures
 /// in it, though the record's order is not that header's.
 mod at {
     /// A word the guest writes in its ask, which goes back as it came.
     pub const BUILD_STAMP: usize = 0x004;
+    /// The device's registry path, a string of bytes ending in zero.
+    pub const DEVICE_REGISTRY_PATH: usize = 0x008;
     pub const PRODUCT_FAMILY: usize = 0x208;
     pub const PCH_FAMILY: usize = 0x20C;
     pub const DISPLAY_CORE: usize = 0x210;
@@ -220,6 +234,8 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     put_word(&mut record, at::DEVICE_ID, platform.device_id);
     put_word(&mut record, at::REVISION, platform.revision);
 
+    let path = format!("{MACHINE_ROOT}{DEVICE_KEY}");
+    record[at::DEVICE_REGISTRY_PATH..at::DEVICE_REGISTRY_PATH + path.len()].copy_from_slice(path.as_bytes());
     put_dword(&mut record, at::TIMESTAMP_FREQUENCY, facts.timestamp_hz);
     put_dword(&mut record, at::GT_TIMESTAMP_FREQUENCY, facts.timestamp_hz);
     put_dword(&mut record, at::MIN_RENDER_FREQUENCY, facts.render_mhz.0);
@@ -583,8 +599,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_registry_path_is_a_gap_left_empty() {
-        assert!(build(&facts())[0x8..0x208].iter().all(|&byte| byte == 0));
+    fn the_registry_path_names_the_device_key_and_ends_in_zero() {
+        let record = build(&facts());
+        let field = &record[at::DEVICE_REGISTRY_PATH..at::PRODUCT_FAMILY];
+        let end = field.iter().position(|&byte| byte == 0).unwrap();
+        assert_eq!(&field[..end], br"\REGISTRY\MACHINE\SOFTWARE\Guesthouse\Intel adapter");
+        assert!(field[end..].iter().all(|&byte| byte == 0));
     }
 
     #[test]

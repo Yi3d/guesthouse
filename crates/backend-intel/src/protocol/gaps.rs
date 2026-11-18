@@ -5,9 +5,8 @@
 //! where. The log names every one at start, so a tester's log says what the guest was not told.
 
 /// The parts of the record always left at zero, in words for the log.
-pub const RECORD: [&str; 19] = [
+pub const RECORD: [&str; 18] = [
     "the kernel driver's interface version (the record's first dword)",
-    "the device's registry path",
     "the display IP version",
     "the media IP version",
     "the platform word between the display and render IP versions",
