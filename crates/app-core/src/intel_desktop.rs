@@ -12,14 +12,18 @@
 //! run folder. See [`guesthouse_daemon::desktop_note`].
 
 use crate::context::Context;
+use crate::gpu_maker::GpuMaker;
 use crate::machine::Machine;
 use crate::updates::VERSION;
-use guesthouse_backend_intel::stage::Desktop;
+use guesthouse_backend_intel::stage::{Desktop, RUN_VARIABLE};
 use guesthouse_daemon::desktop_note::read_note;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 
 const FALLBACK_FILE: &str = "intel-software-desktop";
+/// Kept while the app has the Intel render device switched off in the guest, with why.
+const DEVICE_OFF_FILE: &str = "intel-device-off";
 /// The second line of the file: whether a person had asked for the hardware desktop that failed.
 const ASKED: &str = "asked";
 const BY_DEFAULT: &str = "default";
@@ -70,6 +74,41 @@ fn pick(asked: Option<Desktop>, default: Desktop, fell_back: Option<bool>) -> De
         (None, Some(_)) => Desktop::Software,
         (None, None) => default,
     }
+}
+
+/// Where the app notes that it switched the Intel render device off in the guest.
+pub fn device_off_file(context: &Context, machine: &Machine) -> PathBuf {
+    machine.folder(context).join(DEVICE_OFF_FILE)
+}
+
+/// Whether the Intel render device is switched off in the guest on `desktop`. On the software
+/// desktop the compositor takes it for what it draws, and refused Intel's driver it keeps asking
+/// and draws nothing. With the device off, it draws in software on the basic display. A person
+/// who asks for the software desktop on a real card whose work runs keeps the device, for that
+/// work, and the screen stays black.
+pub fn switches_device_off(
+    desktop: Desktop,
+    asked: Option<Desktop>,
+    recorded_card: bool,
+    run: Option<&OsStr>,
+) -> bool {
+    if desktop.has_display_driver() {
+        return false;
+    }
+    let listening = run.is_some_and(|word| word == "0" || word == "listen");
+    let work_on_the_card = asked == Some(Desktop::Software) && !recorded_card && !listening;
+    !work_on_the_card
+}
+
+/// [`switches_device_off`] for this start of an Intel machine.
+pub fn device_off_for_start(context: &Context, machine: &Machine) -> bool {
+    machine.windows_maker() == Some(GpuMaker::Intel)
+        && switches_device_off(
+            for_start(context, machine),
+            Desktop::asked_in_environment(),
+            context.recorded_intel_card.is_some(),
+            std::env::var_os(RUN_VARIABLE).as_deref(),
+        )
 }
 
 /// The desktop for this start in this process: the software desktop if the daemon gave it, and
@@ -183,5 +222,17 @@ mod tests {
         fall_back(&context, &machine, "the compositor kept crashing").unwrap();
         let kept = fallback(&context, &machine).unwrap();
         assert_eq!((kept.build.as_str(), kept.reason.as_str()), (VERSION, "the compositor kept crashing"));
+    }
+
+    #[test]
+    fn the_device_goes_off_on_the_software_desktop_unless_a_person_asked_for_work_on_a_card() {
+        let (soft, hard) = (Desktop::Software, Desktop::Hardware);
+        let listen = Some(OsStr::new("listen"));
+        assert!(!switches_device_off(hard, Some(hard), false, None), "the hardware desktop keeps it");
+        assert!(switches_device_off(soft, None, false, None), "fallen back or by default");
+        assert!(switches_device_off(soft, Some(hard), true, None), "the daemon gave the software desktop");
+        assert!(!switches_device_off(soft, Some(soft), false, None), "asked, with work on the card");
+        assert!(switches_device_off(soft, Some(soft), true, None), "a recorded card runs nothing");
+        assert!(switches_device_off(soft, Some(soft), false, listen), "nothing runs when listening");
     }
 }

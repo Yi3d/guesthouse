@@ -69,6 +69,7 @@ pub fn collect(context: &Context, machine: &Machine, found: &mut Collection) {
     found.add_file_if_there("machine/amd-fallback", &linux::amd::fallback_file(context, machine));
     found
         .add_file_if_there("machine/intel-software-desktop", &intel_desktop::fallback_file(context, machine));
+    found.add_file_if_there("machine/intel-device-off", &intel_desktop::device_off_file(context, machine));
 }
 
 /// The settings with each private field marked as left out, so it's still clear whether it was set.

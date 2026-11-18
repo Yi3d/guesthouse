@@ -15,6 +15,7 @@ mod identity;
 mod identity_restart;
 mod identity_switch;
 mod install;
+mod intel_device;
 mod intel_files;
 mod own_linux;
 mod ubuntu;
@@ -201,6 +202,7 @@ fn start_gpu_vm(task: &mut Task) -> Result<PciIdentity> {
 
 /// The guest has answered, so this takes it from there to a desktop someone can use.
 fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
+    intel_device::switch_back_on(task, shown)?;
     // A guest left running without its GPU stays as it came up, for the reports it's kept for.
     if get_gpu_ready_on_this_desktop(task)? != Gpu::Working {
         return Ok(());
@@ -211,6 +213,7 @@ fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
             return Ok(());
         }
     }
+    intel_device::switch_off_for_software_desktop(task, shown)?;
     set_up_desktop(task)?;
     if let Some(why) = hardware_desktop::no_picture(task) {
         return start_again_on_software_desktop(task, &why).map(|_| ());
