@@ -659,6 +659,8 @@ fn an_intel_machines_driver_is_taken_out_and_kept_out_in_the_software_desktop() 
     rig.machine.use_windows_card(crate::gpu_maker::GpuMaker::Intel, "0000:03:00.0");
     fake_package(&rig.scratch, "build 1");
     rig.say_this_build_is_in("build 1");
+    std::fs::create_dir_all(rig.machine.folder(&rig.context)).unwrap();
+    crate::intel_desktop::fall_back(&rig.context, &rig.machine, "a test of the software desktop").unwrap();
     let state = rig.run(boot_display);
     assert_eq!(guest.asked_for("take it out"), 1);
     assert_eq!(state.driver, Driver::Absent);

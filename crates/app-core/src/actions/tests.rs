@@ -242,12 +242,19 @@ fn a_guest_with_no_gpu_fails_the_start_says_so_and_turns_off() {
     assert_eq!(host.said(), ["start gpu", "stop 30"]);
 }
 
+/// The software desktop for this build, as after a fallback: the hardware desktop is the default.
+fn on_the_software_desktop(context: &Context, vm: &Machine) {
+    fs::create_dir_all(vm.folder(context)).unwrap();
+    crate::intel_desktop::fall_back(context, vm, "a test of the software desktop").unwrap();
+}
+
 #[test]
 fn an_intel_guest_with_no_gpu_is_left_running_and_says_why() {
     let scratch = Scratch::new();
     let mut context = plain_task_context(&scratch);
     let mut vm = guest_saying(&mut context, "gpu working 0\n");
     vm.use_windows_card(GpuMaker::Intel, "0000:03:00.0");
+    on_the_software_desktop(&context, &vm);
     fs::write(context.run_folder(None).join(crate::daemon::OUTPUT_FILE), "ERROR no xe engine\n").unwrap();
     let host = RecordingHost::default();
     let mut task = Task::new(&context, &host, "start", vm);
@@ -265,6 +272,7 @@ fn an_intel_guest_shown_intels_number_keeps_it_after_a_failed_check() {
     let mut context = plain_task_context(&scratch);
     let mut vm = guest_saying(&mut context, "gpu working 0\n");
     vm.use_windows_card(GpuMaker::Intel, "0000:03:00.0");
+    on_the_software_desktop(&context, &vm);
     let package_vendor = crate::gpu_identity::INTEL_RENDER.vendor;
     let state = IdentityState { shown: Shown::Maker, package_vendor, ..IdentityState::default() };
     write_state(&context, &vm, &state).unwrap();

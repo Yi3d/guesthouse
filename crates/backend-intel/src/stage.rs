@@ -1,7 +1,9 @@
-//! What a guest on an Intel card gets at this test stage, where nothing runs on the card. Every part
-//! of it follows one switch, [`Desktop`]: the drivers each program is given, the compositor's, and
-//! whether the Guesthouse display driver may be in the guest. The day the backend runs work, the
-//! stage's desktop becomes [`Desktop::Hardware`] and the rest follows.
+//! What a guest on an Intel card gets. Every part of it follows one switch, [`Desktop`]: the drivers
+//! each program is given, the compositor's, and whether the Guesthouse display driver may be in the
+//! guest. A real card's guest is given the hardware desktop unless someone asks otherwise; where the
+//! stage doesn't run everything it is given the software desktop instead, with the reason
+//! ([`Desktop::at_stage`]), and the app falls back by itself when the hardware desktop doesn't come
+//! up. A recorded card keeps the software desktop.
 //!
 //! In the software desktop, Direct3D 9, 10 and 11 programs are refused Intel's drivers and draw in
 //! software. The desktop's compositor is refused Direct3D 12 as well: refused 11, it takes 12, and
@@ -23,9 +25,8 @@ pub const DESKTOP_VARIABLE: &str = "GUESTHOUSE_INTEL_SOFTWARE_DESKTOP";
 const HARDWARE_DESKTOP_VALUE: &str = "0";
 const SOFTWARE_DESKTOP_VALUE: &str = "1";
 
-/// The desktop this stage gives a guest on a real card unless a person asks for the other. The one
-/// line to change when the hardware desktop becomes the default.
-pub const STAGE_DESKTOP: Desktop = Desktop::Software;
+/// The desktop a guest on a real card gets unless a person asks for the other.
+pub const STAGE_DESKTOP: Desktop = Desktop::Hardware;
 
 /// A recorded card stands in for a card in the lab, and nothing can draw on it, so its guests keep
 /// the software desktop unless someone asks.
@@ -300,6 +301,7 @@ mod tests {
     #[test]
     fn a_real_card_gets_the_stages_desktop_and_a_recorded_one_the_software_desktop() {
         assert_eq!(Desktop::default_for(false), STAGE_DESKTOP);
+        assert_eq!(STAGE_DESKTOP, Desktop::Hardware, "the hardware desktop is tried by default");
         assert_eq!(Desktop::default_for(true), Desktop::Software);
     }
     fn every_fallback() -> [Fallback; 8] {

@@ -47,7 +47,9 @@ You can shut the machine down afterwards. If you build from source, `guesthouse-
 
 ## A desktop you can use
 
-At this stage an Intel machine's desktop is drawn in software: the guest is refused Intel's Direct3D 9, 10 and 11 drivers, and the desktop compositor is refused Direct3D 12 too, while other programs' Direct3D 12, OpenCL, Level Zero and Vulkan still come to the card and the log. With those drivers, Windows' desktop compositor starts on the card, crashes as nothing it draws is run, and Windows then stops the card and the basic display with it, which leaves nothing on the screen. The daemon's log says when the desktop is in software. `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=0` in the daemon's environment gives the guest all of Intel's drivers, for an experiment.
+A start tries the hardware desktop: Windows' desktop compositor and Intel's own drivers on the card, with the Guesthouse display driver showing the picture. That needs the guest's work to run on the card (see the next part). Where it doesn't, because the card is not on `xe`, its self-test failed, or work on the card is switched off, the same start gives the software desktop instead and `daemon.out` says why. If the hardware desktop does not come up, the app falls back by itself to the software desktop for that start and the next ones on the same build, and says why in its log and the bug report.
+
+On the software desktop Windows draws in software on its basic display. Intel's render device is switched off in the guest for that start, so programs in the guest have no GPU; the compositor would otherwise keep asking the card for a driver and draw nothing. `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=1` in the daemon's environment asks for the software desktop, and `=0` for the hardware one.
 
 ## Work on the card
 
