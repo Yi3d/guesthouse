@@ -15,7 +15,9 @@
 //! What no card of a generation has confirmed yet is in its [`Generation::guesses`], which the
 //! daemon logs at start.
 
-use crate::protocol::guest_driver::{CardDrivers, XE2_HPG_DRIVERS, XE2_LPG_DRIVERS, XE3_LPG_DRIVERS};
+use crate::protocol::guest_driver::{
+    CardDrivers, XE_HPG_DRIVERS, XE_LPG_DRIVERS, XE2_HPG_DRIVERS, XE2_LPG_DRIVERS, XE3_LPG_DRIVERS,
+};
 use crate::xe_query::IpVersion;
 
 /// One architecture.
@@ -57,6 +59,8 @@ const GT_TYPE_UNDEFINED: u32 = 18;
 const NO_PCH: u32 = 0;
 const NO_PLATFORM_TYPE: u32 = 0;
 
+/// IGFX_XE_HPG_CORE: Alchemist's, and Meteor Lake's and Arrow Lake's, whose Xe LPG is built on it.
+const XE_HPG_CORE: u32 = 0x0C07;
 /// IGFX_XE2_LPG_CORE. gmmlib defines IGFX_XE2_HPG_CORE as the same number.
 const XE2_CORE: u32 = 0x0C09;
 /// IGFX_XE3_CORE.
@@ -70,6 +74,9 @@ const XE3_THREADS_PER_EU: u32 = 10;
 const GUESS_NO_RECORDING: &str = "no card of this generation has been recorded";
 const GUESS_RECORD_LAYOUT: &str =
     "the record's layout and feature bits were read along Lunar Lake's path of the driver";
+const GUESS_BEFORE_XE2: &str =
+    "the feature bits besides Xe2's tiling are Xe2's, and this generation's may differ";
+const GUESS_ON_XE: &str = "xe takes these cards only when told to, and has seldom been run on them";
 
 /// Lunar Lake's graphics, the Arc 130V and 140V: IGFX_LUNARLAKE on IGFX_XE2_LPG_CORE.
 pub const XE2_LPG: Generation = Generation {
@@ -133,7 +140,74 @@ pub const XE3_LPG: Generation = Generation {
     guesses: &[GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT],
 };
 
-const KNOWN: [Generation; 3] = [XE2_LPG, XE2_HPG, XE3_LPG];
+/// Meteor Lake's graphics: IGFX_METEORLAKE on IGFX_XE_HPG_CORE. Its IPs are Arrow Lake's too, so
+/// the id says which a card is, and a card of an id neither lists is refused.
+pub const XE_LPG_METEOR_LAKE: Generation = Generation {
+    name: "Xe LPG (Meteor Lake)",
+    render_ips: &[(12, 70), (12, 71)],
+    devices: &[0x7D40, 0x7D45, 0x7D55, 0x7D60, 0x7DD5],
+    xe_by_default: false,
+    product_family: 1272,
+    pch_family: NO_PCH,
+    display_core: XE_HPG_CORE,
+    render_core: XE_HPG_CORE,
+    platform_type: NO_PLATFORM_TYPE,
+    gt_type: GT_TYPE_UNDEFINED,
+    threads_per_eu: XE_THREADS_PER_EU,
+    xe2_tiling: false,
+    drivers: XE_LPG_DRIVERS,
+    guesses: &[GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT, GUESS_BEFORE_XE2, GUESS_ON_XE],
+};
+
+/// Arrow Lake's graphics: IGFX_ARROWLAKE on IGFX_XE_HPG_CORE. Its H parts are Xe LPG+, 12.74; that
+/// its S and U parts give Meteor Lake's IPs is a guess from compute-runtime having no IP of their own.
+pub const XE_LPG_ARROW_LAKE: Generation = Generation {
+    name: "Xe LPG (Arrow Lake)",
+    render_ips: &[(12, 70), (12, 71), (12, 74)],
+    devices: &[0x7D41, 0x7D51, 0x7D67, 0x7DD1, 0xB640],
+    xe_by_default: false,
+    product_family: 1273,
+    pch_family: NO_PCH,
+    display_core: XE_HPG_CORE,
+    render_core: XE_HPG_CORE,
+    platform_type: NO_PLATFORM_TYPE,
+    gt_type: GT_TYPE_UNDEFINED,
+    threads_per_eu: XE_THREADS_PER_EU,
+    xe2_tiling: false,
+    drivers: XE_LPG_DRIVERS,
+    guesses: &[
+        GUESS_NO_RECORDING,
+        GUESS_RECORD_LAYOUT,
+        GUESS_BEFORE_XE2,
+        GUESS_ON_XE,
+        "the IPs of Arrow Lake's S and U parts",
+    ],
+};
+
+/// Alchemist's graphics, the Arc A-series: IGFX_DG2 on IGFX_XE_HPG_CORE. It is from before GMD_ID,
+/// so xe gives no IP for it, and a card is known by the ids the kernel lists alone.
+pub const XE_HPG: Generation = Generation {
+    name: "Xe HPG (Alchemist)",
+    render_ips: &[],
+    devices: &[
+        0x5690, 0x5691, 0x5692, 0x5693, 0x5694, 0x5695, 0x5696, 0x5697, 0x56A0, 0x56A1, 0x56A2, 0x56A3,
+        0x56A4, 0x56A5, 0x56A6, 0x56B0, 0x56B1, 0x56B2, 0x56B3, 0x56BA, 0x56BB, 0x56BC, 0x56BD, 0x56BE,
+        0x56BF,
+    ],
+    xe_by_default: false,
+    product_family: 1270,
+    pch_family: NO_PCH,
+    display_core: XE_HPG_CORE,
+    render_core: XE_HPG_CORE,
+    platform_type: NO_PLATFORM_TYPE,
+    gt_type: GT_TYPE_UNDEFINED,
+    threads_per_eu: XE_THREADS_PER_EU,
+    xe2_tiling: false,
+    drivers: XE_HPG_DRIVERS,
+    guesses: &[GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT, GUESS_BEFORE_XE2, GUESS_ON_XE],
+};
+
+const KNOWN: [Generation; 6] = [XE2_LPG, XE2_HPG, XE3_LPG, XE_LPG_METEOR_LAKE, XE_LPG_ARROW_LAKE, XE_HPG];
 
 /// Every generation this build has a profile for.
 pub fn known() -> &'static [Generation] {
@@ -146,7 +220,7 @@ pub fn for_card(ip: IpVersion, device: u16) -> Option<&'static Generation> {
     let ip = (ip.major, ip.minor);
     let has_ip = |generation: &&Generation| generation.render_ips.contains(&ip);
     // A platform from before GMD_ID is known by its id alone, as xe gives its IP as 0.0.
-    let before_gmd_id = |generation: &&Generation| generation.render_ips.is_empty() && ip == (0, 0);
+    let before_gmd_id = |generation: &&Generation| generation.render_ips.is_empty();
     let lists_device = |generation: &&Generation| generation.devices.contains(&device);
     let by_both = KNOWN
         .iter()
@@ -198,6 +272,26 @@ mod tests {
         let numbers = (XE3_LPG.product_family, XE3_LPG.render_core, XE3_LPG.threads_per_eu);
         assert_eq!(numbers, (1300, 0x1E00, 10));
         assert_eq!(XE3_LPG.drivers, XE3_LPG_DRIVERS, "with no 32-bit OpenCL, as the INF gives none");
+    }
+
+    #[test]
+    fn meteor_lake_and_arrow_lake_share_ips_and_are_told_apart_by_id() {
+        assert_eq!(for_card(ip(12, 70), 0x7D55), Some(&XE_LPG_METEOR_LAKE));
+        assert_eq!(for_card(ip(12, 70), 0x7D67), Some(&XE_LPG_ARROW_LAKE));
+        assert_eq!(for_card(ip(12, 74), 0x7DD1), Some(&XE_LPG_ARROW_LAKE));
+        assert_eq!(for_card(ip(12, 70), 0x7DFF), None, "an id neither lists");
+        assert_eq!(for_card(ip(12, 74), 0x7DFF), Some(&XE_LPG_ARROW_LAKE), "only Arrow Lake has 12.74");
+        assert_eq!(XE_LPG_METEOR_LAKE.render_core, 0x0C07);
+        let older = [XE_LPG_METEOR_LAKE, XE_LPG_ARROW_LAKE, XE_HPG];
+        assert!(older.iter().all(|generation| !generation.xe2_tiling && !generation.xe_by_default));
+    }
+
+    #[test]
+    fn alchemist_is_known_by_its_id_when_xe_gives_no_ip() {
+        assert_eq!(for_card(IpVersion::default(), 0x56A0), Some(&XE_HPG));
+        assert_eq!(for_card(IpVersion::default(), 0x56C0), None, "the Flex cards, which the package lacks");
+        assert_eq!(for_card(ip(12, 55), 0x56A0), Some(&XE_HPG), "nor by an IP a kernel may yet give");
+        assert_eq!(XE_HPG.drivers, XE_HPG_DRIVERS);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 This doesn't work yet, and none of it has met a guest. It's the first step towards Intel's graphics on Linux's `xe` driver. The cards offered are the ones Intel's Windows driver 32.0.101.9175 covers and `xe` takes by default: Lunar Lake (Arc 130V and 140V), Battlemage (Arc B570, B580 and the Pro cards), and Panther Lake and Wildcat Lake. Only the Arc B580 has been read on a real PC so far; the others are set up from Intel's and the kernel's open tables and are untested. The daemon tells a card's generation from what the card says, so a card of these generations is offered whatever its PCI id.
 
-A card that `i915` drives is not offered: the daemon works through `xe`. The setup check says so and gives the kernel options that hand the card to `xe`.
+Alchemist (the Arc A-series), Meteor Lake and Arrow Lake are known too, but `i915` drives them unless the kernel is told otherwise, and a card that `i915` drives is not offered: the daemon works through `xe`. The setup check says so and gives the kernel options that hand the card to `xe`. `xe` on those cards is newer than `i915` and less tried.
 
 ## What it's meant to do
 

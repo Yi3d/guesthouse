@@ -69,6 +69,21 @@ pub const XE3_LPG_DRIVERS: CardDrivers = CardDrivers {
     opencl_32_bit: false,
 };
 
+/// Meteor Lake's and Arrow Lake's, from the INF for integrated cards.
+pub const XE_LPG_DRIVERS: CardDrivers = CardDrivers {
+    opengl: "igxelpgicd64.dll",
+    opengl_32_bit: "igxelpgicd32.dll",
+    kernel: "igdkmdn64.sys",
+    opencl_32_bit: true,
+};
+/// Alchemist's, the Arc A-series, from the INF for cards with memory of their own.
+pub const XE_HPG_DRIVERS: CardDrivers = CardDrivers {
+    opengl: "igxehpgicd64.dll",
+    opengl_32_bit: "igxehpgicd32.dll",
+    kernel: "igdkmdnd64.sys",
+    opencl_32_bit: true,
+};
+
 /// OpenCL's driver for 32-bit programs, and the value that names it, for the cards that have it.
 pub const OPENCL_32_BIT: &str = "igdrcl32.dll";
 const OPENCL_32_BIT_VALUE: &str = "OpenCLDriverNameWow";
