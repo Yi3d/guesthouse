@@ -14,6 +14,7 @@
 use super::abi::{EngineInstance, Sync};
 use super::batch;
 use super::device::{CpuMap, Xe};
+use super::guest_registers::{self, GuestWrite};
 use super::plan::{self, BufferUse, Placements, Point, pat};
 use crate::card::CardFacts;
 use crate::protocol::partition;
@@ -42,6 +43,8 @@ const STORE_OFFSET: u64 = 0x100;
 const HIGH_STORE_OFFSET: u64 = 0x200;
 const FENCE_OFFSET: u64 = 0x800;
 const COPY_OFFSET: u64 = 0x1_0000;
+/// Where the register reads land in the low host pages, past the copy: two dwords a write.
+const REGISTERS_OFFSET: u64 = 0x2_0000;
 
 /// How long a run that should finish at once is waited for.
 const RUN_PATIENCE: Duration = Duration::from_secs(2);
@@ -622,6 +625,63 @@ impl<'a> Run<'a> {
         result.into()
     }
 
+    /// Sets each register the guest's driver sets from its render batches, as it does, reading
+    /// it just before and just after, and says what became of each write. It fails only when the
+    /// batch doesn't run: what the registers do is for a person to read.
+    fn guest_registers(&mut self) -> Step {
+        let engine = plan::one_engine_per_class(&self.card.engines)
+            .into_iter()
+            .find(|engine| engine.class == Engine::RENDER);
+        let Some(engine) = engine else {
+            return Step::Skip("the card lists no render engine".into());
+        };
+        let Some(vm) = self.vm.filter(|_| self.host_low && self.batch_bound) else {
+            return Step::Skip(
+                "needs the address space, the low host pages and the batch buffer bound".into(),
+            );
+        };
+        let writes = &guest_registers::RENDER_WRITES;
+        let slot = |index: usize| REGISTERS_OFFSET + 8 * index as u64;
+        let mut dwords = Vec::new();
+        for (index, write) in writes.iter().enumerate() {
+            dwords.extend(batch::store_register(write.register, HOST_LOW + slot(index)));
+            dwords.extend(batch::load_register(write.register, write.value));
+            dwords.extend(batch::store_register(write.register, HOST_LOW + slot(index) + 4));
+        }
+        dwords.push(batch::BATCH_END);
+        let result = (|| -> Result<String, String> {
+            let mut host = self.host.as_ref().ok_or("no host pages")?.map();
+            let unread = guest_registers::UNREAD.to_le_bytes().repeat(2 * writes.len());
+            if !host.write(slot(0), &unread) {
+                return Err("the host pages hold no room for the reads".into());
+            }
+            self.write_batch(&dwords)?;
+            let queue = self.run_batch(vm, engine, None)?;
+            if !self.wait_done(RUN_PATIENCE)? {
+                return Err(format!("the batch had not finished after {RUN_PATIENCE:?}"));
+            }
+            match self.xe.queue_banned(queue) {
+                Ok(false) => {}
+                Ok(true) => return Err("xe banned the queue: its job faulted or hung".into()),
+                Err(error) => return Err(failed("asking whether the queue is banned", &error)),
+            }
+            self.close_queue(queue);
+            let mut read = vec![0; unread.len()];
+            if !host.read(slot(0), &mut read) {
+                return Err("the reads could not be read back".into());
+            }
+            let dword =
+                |at: usize| u32::from_le_bytes(read[4 * at..4 * at + 4].try_into().expect("four bytes"));
+            let said: Vec<String> = writes
+                .iter()
+                .enumerate()
+                .map(|(index, write)| describe(write, dword(2 * index), dword(2 * index + 1)))
+                .collect();
+            Ok(said.join(", "))
+        })();
+        result.into()
+    }
+
     fn clock(&mut self) -> Step {
         let Some(engine) = plan::one_engine_per_class(&self.card.engines).first().copied() else {
             return Step::Skip("the card lists no engine".into());
@@ -735,6 +795,17 @@ impl<'a> Run<'a> {
     }
 }
 
+/// One write as the self-test prints it: the register, what was written, what became of it, and
+/// what it read before and after when it could be read.
+fn describe(write: &GuestWrite, before: u32, after: u32) -> String {
+    let outcome = write.outcome(before, after);
+    let (register, value) = (write.register, write.value);
+    match outcome {
+        guest_registers::Outcome::Unreadable => format!("{register:#x}={value:#x} {outcome}"),
+        _ => format!("{register:#x}={value:#x} {outcome} ({before:#x} to {after:#x})"),
+    }
+}
+
 /// Each engine class's job timeout in milliseconds, as xe's sysfs gives it under the card's device
 /// folder: `tile*/gt*/engines/CLASS/job_timeout_ms`.
 fn job_timeouts(device: &Path) -> Vec<String> {
@@ -822,6 +893,7 @@ pub fn run(
     }
     run.step("copy", Run::copy);
     run.step("clock", Run::clock);
+    run.step("guest registers", Run::guest_registers);
     if options.break_steps {
         if confirm_break(input, run.out) {
             run.step("fault", Run::fault);
@@ -915,13 +987,31 @@ mod tests {
     }
 
     #[test]
+    fn each_register_the_guest_sets_is_set_as_it_does_and_read_before_and_after() {
+        let xe = FakeXe::default();
+        let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        assert!(summary.all_passed(), "{said}");
+        let line = said.lines().find(|line| line.starts_with("PASS guest registers")).expect("the step ran");
+        assert!(line.contains("0x7004=0x400040 unreadable"), "a register no batch reaches: {line}");
+        assert_eq!(line.matches("unreadable").count(), guest_registers::RENDER_WRITES.len(), "{line}");
+
+        let xe = FakeXe::default();
+        xe.reach_registers(&[0x7004, 0x221C]);
+        let (_, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        let line = said.lines().find(|line| line.starts_with("PASS guest registers")).expect("the step ran");
+        assert!(line.contains("0x7004=0x400040 took (0x0 to 0x400040)"), "{line}");
+        assert!(line.contains("0x221c=0x1 took (0x0 to 0x1)"), "{line}");
+        assert!(line.contains("0x6204=0x20202020 unreadable"), "{line}");
+    }
+
+    #[test]
     fn a_refused_user_fence_fails_each_engine_step_and_says_what_xe_said() {
         let xe = FakeXe::default();
         xe.fail("exec", libc::EOPNOTSUPP);
         let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
         assert!(said.contains("FAIL engine ccs0: sending the batch:"), "{said}");
         assert!(said.contains("this kernel's xe doesn't support it"), "{said}");
-        assert_eq!(summary.failed, 5, "four engines and the copy: {said}");
+        assert_eq!(summary.failed, 6, "four engines, the copy and the guest registers: {said}");
         assert_eq!(xe.live(), 0);
     }
 
@@ -930,7 +1020,7 @@ mod tests {
         let xe = FakeXe::default();
         xe.fail("exec", libc::EOPNOTSUPP);
         let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
-        let steps = ["engine rcs0", "engine bcs0", "engine vcs0", "engine ccs0", "copy"];
+        let steps = ["engine rcs0", "engine bcs0", "engine vcs0", "engine ccs0", "copy", "guest registers"];
         let mut in_order: Vec<String> = steps.iter().map(|step| (*step).to_owned()).collect();
         in_order.sort_by_key(|step| said.find(&format!("FAIL {step}:")));
         assert_eq!(summary.failed_steps, in_order, "{said}");
@@ -938,9 +1028,9 @@ mod tests {
         assert_eq!(
             needed,
             ["engine rcs0", "engine bcs0", "engine ccs0"],
-            "all but the video engine and copy"
+            "all but the video engine, the copy and the guest registers"
         );
-        assert_eq!(summary.failed_that_work_does_without(), ["engine vcs0", "copy"]);
+        assert_eq!(summary.failed_that_work_does_without(), ["engine vcs0", "copy", "guest registers"]);
     }
 
     #[test]

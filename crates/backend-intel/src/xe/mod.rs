@@ -10,5 +10,6 @@ pub mod batch;
 pub mod device;
 #[cfg(any(test, feature = "lab-fake-card"))]
 pub(crate) mod fake;
+pub mod guest_registers;
 pub mod plan;
 pub mod selftest;
