@@ -53,6 +53,9 @@ mod at {
     pub const SLICE_COUNT: usize = 0xB3C;
     pub const SUBSLICE_COUNT: usize = 0xB40;
     pub const DUAL_SUBSLICE_COUNT: usize = 0xB44;
+    /// TotalVsThreads, then the hull, domain, geometry and pixel (windower range) stages' and
+    /// TotalVsThreads_Pocs, a dword each.
+    pub const STAGE_THREADS: usize = 0xB78;
     pub const MAX_EU_PER_SUBSLICE: usize = 0xB94;
     pub const MAX_SLICES: usize = 0xB98;
     pub const MAX_SUBSLICES: usize = 0xB9C;
@@ -65,11 +68,23 @@ mod at {
     pub const PARTITION: usize = 0x23B8;
     /// KMD_CAPS_INFO, the kernel driver's capability bits.
     pub const KERNEL_DRIVER_CAPS: usize = 0xB18;
+    /// GT_VDBOX_INFO and GT_VEBOX_INFO, inside GT_SYSTEM_INFO and again in the record's own copy of
+    /// them that Intel's Vulkan driver reads.
+    pub const VDBOX_INFO: [usize; 2] = [0x209C, 0x2324];
+    pub const VEBOX_INFO: [usize; 2] = [0x20C0, 0x2348];
     /// A byte that marks the adapter as a virtual machine's.
     pub const FROM_VIRTUAL_MACHINE: usize = 0x2468;
     /// A byte that marks that machine as a secure one.
     pub const SECURE_VIRTUAL_MACHINE: usize = 0x2469;
 }
+
+/// Inside GT_VDBOX_INFO: the enable mask, then the number enabled and the valid flag. The SFC
+/// support bits between stay zero, as nothing here knows them.
+const VDBOX_COUNT: usize = 0x1C;
+const VDBOX_VALID: usize = 0x20;
+/// The same inside GT_VEBOX_INFO.
+const VEBOX_COUNT: usize = 0x14;
+const VEBOX_VALID: usize = 0x18;
 
 /// The workaround entry that is set for an adapter that is a virtual machine's, and its value.
 const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
@@ -132,6 +147,20 @@ pub struct GtSystem {
     pub max_slices: u32,
     pub max_subslices: u32,
     pub max_dual_subslices: u32,
+    /// The threads each 3D stage may have across the GPU, as the card's hwconfig gives them.
+    pub stage_threads: StageThreads,
+}
+
+/// GT_SYSTEM_INFO's thread counts for the 3D stages. A 3D driver sizes its pipeline from these, and
+/// Intel's Vulkan driver offers no graphics queue with them all zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StageThreads {
+    pub vertex: u32,
+    pub hull: u32,
+    pub domain: u32,
+    pub geometry: u32,
+    pub pixel: u32,
+    pub vertex_pocs: u32,
 }
 
 /// Memory as the record describes it, in bytes. An integrated card has none of its own and shares
@@ -159,6 +188,9 @@ pub struct RecordFacts {
     /// The card's compute engines, and whether it has a copy engine.
     pub compute_engines: u32,
     pub copy_engine: bool,
+    /// The video decode and video enhancement engines the card has, a bit for each by its instance.
+    pub video_engines: u32,
+    pub video_enhance_engines: u32,
     /// The bits of GPU address the card has.
     pub address_bits: u64,
 }
@@ -204,6 +236,14 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     ] {
         put_dword(&mut record, field, value);
     }
+    let stages = &gt.stage_threads;
+    for (at, value) in
+        [stages.vertex, stages.hull, stages.domain, stages.geometry, stages.pixel, stages.vertex_pocs]
+            .into_iter()
+            .enumerate()
+    {
+        put_dword(&mut record, at::STAGE_THREADS + at * 4, value);
+    }
 
     shape::write(&mut record, &facts.cores);
     if facts.compute_engines > 0 {
@@ -214,6 +254,16 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     }
 
     put_dword(&mut record, at::KERNEL_DRIVER_CAPS, DRIVER_STORE_ENABLED);
+    for (blocks, mask, count, valid) in [
+        (at::VDBOX_INFO, facts.video_engines, VDBOX_COUNT, VDBOX_VALID),
+        (at::VEBOX_INFO, facts.video_enhance_engines, VEBOX_COUNT, VEBOX_VALID),
+    ] {
+        for block in blocks {
+            put_dword(&mut record, block, mask);
+            put_dword(&mut record, block + count, mask.count_ones());
+            record[block + valid] = 1;
+        }
+    }
     set_features(&mut record, facts);
     let (entry, value) = VIRTUAL_MACHINE_WORKAROUND;
     features::set_workaround(&mut record, entry, value);
@@ -358,6 +408,8 @@ pub(crate) mod tests {
             cores: (0..8).map(|index| Core { slice: 0, index, eu_count: 8, eu_mask: 0xFF }).collect(),
             compute_engines: 1,
             copy_engine: true,
+            video_engines: 0b11,
+            video_enhance_engines: 0b11,
             address_bits: 48,
         }
     }
@@ -390,6 +442,28 @@ pub(crate) mod tests {
         let record = build(&facts());
         assert_eq!(record[at::FROM_VIRTUAL_MACHINE], 1);
         assert_eq!(record[at::SECURE_VIRTUAL_MACHINE], 0);
+    }
+
+    #[test]
+    fn the_video_engines_are_in_both_copies_of_their_blocks() {
+        let record = build(&facts());
+        for block in at::VDBOX_INFO.into_iter().chain(at::VEBOX_INFO) {
+            assert_eq!(dword(&record, block), Some(0b11), "{block:#x}");
+        }
+        assert_eq!(dword(&record, 0x2340), Some(2), "NumberOfVDBoxEnabled");
+        assert_eq!(dword(&record, 0x235C), Some(2), "NumberOfVEBoxEnabled");
+        assert_eq!((record[0x2344], record[0x2360]), (1, 1), "both valid");
+    }
+
+    #[test]
+    fn the_3d_stages_threads_go_where_gt_system_info_has_them() {
+        let threads =
+            StageThreads { vertex: 546, hull: 336, domain: 546, geometry: 312, pixel: 96, vertex_pocs: 0 };
+        let mut facts = facts();
+        facts.gt.stage_threads = threads;
+        let record = build(&facts);
+        let read: Vec<u32> = (0..6).map(|at| dword(&record, 0xB78 + at * 4).unwrap()).collect();
+        assert_eq!(read, [546, 336, 546, 312, 96, 0]);
     }
 
     #[test]

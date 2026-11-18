@@ -10,6 +10,13 @@ pub const MAX_SLICES_SUPPORTED: u32 = 1;
 pub const MAX_DUAL_SUBSLICES_SUPPORTED: u32 = 2;
 pub const MAX_NUM_EU_PER_DSS: u32 = 3;
 pub const NUM_THREADS_PER_EU: u32 = 15;
+/// The threads each 3D stage may have across the GPU.
+pub const TOTAL_VS_THREADS: u32 = 16;
+pub const TOTAL_GS_THREADS: u32 = 17;
+pub const TOTAL_HS_THREADS: u32 = 18;
+pub const TOTAL_DS_THREADS: u32 = 19;
+pub const TOTAL_VS_THREADS_POCS: u32 = 20;
+pub const TOTAL_PS_THREADS: u32 = 21;
 /// A card whose table has no dual subslice keys gives the same two numbers under these, as
 /// subslices. On Xe a subslice and a dual subslice are both the Xe core.
 pub const MAX_SUBSLICE: u32 = 70;

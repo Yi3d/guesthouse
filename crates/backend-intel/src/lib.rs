@@ -48,7 +48,7 @@ use protocol::allocation::Resource;
 use protocol::command_header::Header;
 use protocol::context::Context;
 use protocol::escape::Escape;
-use protocol::record::{GtSystem, IpWord, Memory, Platform, RecordFacts};
+use protocol::record::{GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads};
 use protocol::{gaps, guest_driver, record, shape};
 use std::time::Instant;
 use traffic::{QueryOutcome, Traffic};
@@ -250,6 +250,14 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             max_slices: config(hwconfig::MAX_SLICES_SUPPORTED),
             max_subslices: most_dual_subslices,
             max_dual_subslices: most_dual_subslices,
+            stage_threads: StageThreads {
+                vertex: config(hwconfig::TOTAL_VS_THREADS),
+                hull: config(hwconfig::TOTAL_HS_THREADS),
+                domain: config(hwconfig::TOTAL_DS_THREADS),
+                geometry: config(hwconfig::TOTAL_GS_THREADS),
+                pixel: config(hwconfig::TOTAL_PS_THREADS),
+                vertex_pocs: config(hwconfig::TOTAL_VS_THREADS_POCS),
+            },
         },
         timestamp_hz: card.main_gt().map_or(0, |gt| gt.reference_clock),
         render_mhz: (card.frequencies.lowest.unwrap_or(0), card.frequencies.highest.unwrap_or(0)),
@@ -258,6 +266,8 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         cores,
         compute_engines: card.engines_of(Engine::COMPUTE),
         copy_engine: card.engines_of(Engine::COPY) > 0,
+        video_engines: card.instance_mask(Engine::VIDEO_DECODE),
+        video_enhance_engines: card.instance_mask(Engine::VIDEO_ENHANCE),
         address_bits: card.config.va_bits,
     }
 }

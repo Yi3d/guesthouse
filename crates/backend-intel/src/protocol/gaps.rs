@@ -23,7 +23,7 @@ pub const RECORD: [&str; 19] = [
     "the cache sizes and bank count",
     "the slice array's slots past the ones seen: dual subslices past the sixth in a slice, and the \
      flag that says slices are populated dynamically",
-    "the video, video-enhancement and multi-tile blocks of the GPU's shape",
+    "the video and video-enhancement engines' SFC support bits, and the multi-tile block of the GPU's shape",
     "the GPU address partition's eleventh range, which has no name",
     "the adapter's bus, device and function",
     "the names, counts and flags at the record's end",

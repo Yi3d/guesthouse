@@ -177,6 +177,13 @@ impl CardFacts {
         self.engines.iter().filter(|engine| engine.class == class && engine.gt == main).count() as u32
     }
 
+    /// The engines of a class on any GT, a bit for each by its instance. Video engines are on the
+    /// media GT.
+    pub fn instance_mask(&self, class: u16) -> u32 {
+        let instances = self.engines.iter().filter(|engine| engine.class == class);
+        instances.filter(|engine| engine.instance < 32).fold(0, |mask, engine| mask | 1 << engine.instance)
+    }
+
     /// Which families of engine the card has.
     pub fn engine_families(&self) -> AdapterEngines {
         let has = |class| self.engines.iter().any(|engine| engine.class == class);
