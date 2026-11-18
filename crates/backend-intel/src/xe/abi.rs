@@ -104,6 +104,9 @@ pub const SYNCOBJ_TIMELINE_WAIT: u64 =
 
 /// `DRM_XE_VM_CREATE_FLAG_SCRATCH_PAGE`: unmapped addresses read zero and swallow writes.
 pub const VM_SCRATCH_PAGE: u32 = 1 << 0;
+/// `DRM_XE_VM_CREATE_FLAG_LR_MODE`: work in this VM may run for as long as it likes. Such a VM
+/// takes no sync object signals, only user fences.
+pub const VM_LONG_RUNNING: u32 = 1 << 1;
 
 /// `DRM_XE_GEM_CPU_CACHING_*`.
 pub const CPU_CACHING_WRITE_BACK: u16 = 1;
@@ -479,6 +482,15 @@ mod tests {
         assert_eq!(SYNCOBJ_CREATE, 0xC008_64BF);
         assert_eq!(SYNCOBJ_DESTROY, 0xC008_64C0);
         assert_eq!(SYNCOBJ_TIMELINE_WAIT, 0xC030_64CA);
+    }
+
+    /// The flag values the same C program printed.
+    #[test]
+    fn the_flags_are_the_headers() {
+        assert_eq!((VM_SCRATCH_PAGE, VM_LONG_RUNNING), (0x1, 0x2));
+        assert_eq!((BUFFER_SCANOUT, BUFFER_NEEDS_VISIBLE_VRAM), (0x2, 0x4));
+        assert_eq!((SYNC_SIGNAL, WAIT_FOR_SUBMIT), (0x1, 0x2));
+        assert_eq!(EXPORT_FLAGS, 0x80002, "DRM_CLOEXEC | DRM_RDWR");
     }
 
     /// `sizeof` of each struct, printed from C against the same headers. The numbers above carry

@@ -27,6 +27,13 @@ const BATCH_START: u32 = mi(0x31);
 /// What `get_ppgtt_flag` in `xe_ring_ops.c` adds: the address is in the queue's own VM.
 const BATCH_START_IN_VM: u32 = 1 << 8;
 
+/// `MI_SEMAPHORE_WAIT`, which holds the engine until a value in memory compares as asked. A ring
+/// fed from user mode parks in one where a batch would end.
+const SEMAPHORE_WAIT: u32 = mi(0x1C);
+/// `MI_SEMAPHORE_WAIT | XE_INSTR_NUM_DW(5)`, as the kernel defines it for these cards.
+pub const SEMAPHORE_WAIT_HEADER: u32 = SEMAPHORE_WAIT | (SEMAPHORE_WAIT_DWORDS as u32 - LENGTH_BIAS);
+pub const SEMAPHORE_WAIT_DWORDS: usize = 5;
+
 /// The dwords before an instruction's length field counts, `XE_INSTR_NUM_DW`'s two.
 const LENGTH_BIAS: u32 = 2;
 
@@ -163,7 +170,10 @@ pub enum Ending {
     Ends,
     /// It goes on in another batch at this address, which ends it as far as this one goes.
     Chains(u64),
-    /// Neither: the engine would run on into whatever lies after it.
+    /// It parks in a semaphore wait and never ends by itself: a ring that the guest's driver
+    /// feeds from user mode, writing more work after the wait and then letting it through.
+    Parks,
+    /// None of these: the engine would run on into whatever lies after it.
     RunsOn,
 }
 
@@ -183,6 +193,15 @@ pub fn ending(tail: &[u8]) -> Ending {
         .find(|&at| is(dwords[at], BATCH_START) && padding_from(at + BATCH_START_DWORDS));
     if let Some(at) = chain {
         return Ending::Chains(u64::from(dwords[at + 2]) << 32 | u64::from(dwords[at + 1]));
+    }
+    // The same for a wait, whose data and address dwords can read as anything.
+    let parks = dwords.len().checked_sub(SEMAPHORE_WAIT_DWORDS).is_some_and(|last_start| {
+        (0..=last_start)
+            .rev()
+            .any(|at| is(dwords[at], SEMAPHORE_WAIT) && padding_from(at + SEMAPHORE_WAIT_DWORDS))
+    });
+    if parks {
+        return Ending::Parks;
     }
     match dwords.iter().rfind(|&&dword| !is(dword, NOOP)) {
         Some(&last) if is(last, BATCH_END) => Ending::Ends,
@@ -271,6 +290,24 @@ mod tests {
         let chain = batch_start(0x255_F13C_0000);
         assert_eq!(ending(&tail(&chain)), Ending::Chains(0x255_F13C_0000));
         assert_eq!(ending(&tail(&[chain[0], chain[1], chain[2], NOOP])), Ending::Chains(0x255_F13C_0000));
+    }
+
+    /// `MI_SEMAPHORE_WAIT` in Linux 7.2's `xe_mi_commands.h`: `__MI_INSTR(0x1c) | XE_INSTR_NUM_DW(5)`.
+    #[test]
+    fn a_batch_that_parks_in_a_semaphore_wait_is_a_ring() {
+        assert_eq!(SEMAPHORE_WAIT_HEADER, 0x0E00_0003);
+        // Polling, compare greater or equal: the wait a user-mode ring ends each piece of work with.
+        let wait = [SEMAPHORE_WAIT_HEADER | 1 << 15 | 1 << 12, 1, 0x4000_1000, 0x7F, 0];
+        assert_eq!(ending(&tail(&wait)), Ending::Parks);
+        let mut padded = vec![0x7A00_0004, 0x1234];
+        padded.extend(wait);
+        padded.extend([NOOP, NOOP]);
+        assert_eq!(ending(&tail(&padded)), Ending::Parks);
+        // A wait in the middle of a batch that then ends is an ordinary batch.
+        let mut ends = wait.to_vec();
+        ends.push(BATCH_END);
+        assert_eq!(ending(&tail(&ends)), Ending::Ends);
+        assert_eq!(ending(&tail(&wait[..4])), Ending::RunsOn, "a wait cut short");
     }
 
     #[test]

@@ -65,6 +65,108 @@ impl Desktop {
     }
 }
 
+/// Names what a guest's work is run on: `0` or `listen` keeps everything off the card, as the first
+/// test builds did, `compute` runs compute work only, and unset runs everything this build can.
+pub const RUN_VARIABLE: &str = "GUESTHOUSE_INTEL_RUN_ON_CARD";
+
+/// How much of a guest's work runs on the card. The desktop's compositor is [`Desktop`]'s business:
+/// in the software desktop it is given no driver, so it sends nothing to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Nothing is made on the card and nothing runs: memory is names, and every submission is
+    /// finished unrun. This is all a recorded card can do.
+    Listen,
+    /// Real memory, address spaces and queues, and compute work runs: the submissions whose header
+    /// says OpenCL. The rest are finished unrun.
+    Compute,
+    /// Everything a guest submits runs.
+    Everything,
+}
+
+/// The furthest stage this build has the code for, which is what a guest gets on a card that can
+/// take it unless a person asks for less.
+pub const FURTHEST_STAGE: Stage = Stage::Everything;
+
+/// Why a guest is left at [`Stage::Listen`] when more was asked for, by the layer that refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fallback {
+    /// A person asked for it with [`RUN_VARIABLE`].
+    AskedFor,
+    /// [`RUN_VARIABLE`] holds a word this build doesn't know.
+    UnknownWord(String),
+    /// The card is a recording, so there is nothing to run on.
+    RecordedCard,
+    /// The card's kernel driver isn't xe.
+    NotXe(String),
+    /// The render node couldn't be opened for work.
+    NodeNotOpened(String),
+    /// The host's own test of xe failed this many steps.
+    SelfTestFailed(u32),
+    /// The card's memory regions give nowhere to put a buffer.
+    NoMemoryRegion,
+}
+
+impl std::fmt::Display for Fallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AskedFor => write!(f, "layer=switch: {RUN_VARIABLE} asks for it"),
+            Self::UnknownWord(word) => {
+                write!(f, "layer=switch: {RUN_VARIABLE} is \"{word}\", which this build doesn't know")
+            }
+            Self::RecordedCard => f.write_str("layer=card: it is a recording, with no card behind it"),
+            Self::NotXe(driver) => {
+                write!(f, "layer=host-driver: the card is on {driver}, and work runs through xe only")
+            }
+            Self::NodeNotOpened(error) => write!(f, "layer=render-node: opening it for work failed: {error}"),
+            Self::SelfTestFailed(steps) => {
+                write!(
+                    f,
+                    "layer=host-self-test: {steps} of its steps failed on this card (intel-probe --run shows them)"
+                )
+            }
+            Self::NoMemoryRegion => f.write_str("layer=card-memory: xe named no system memory region"),
+        }
+    }
+}
+
+impl Stage {
+    /// The stage a person asked for with [`RUN_VARIABLE`]'s value, and why it is less than the
+    /// furthest if it is. A word this build doesn't know is never read as "run".
+    pub fn asked(value: Option<&OsStr>) -> (Self, Option<Fallback>) {
+        let Some(value) = value else { return (FURTHEST_STAGE, None) };
+        match value.to_string_lossy().trim().to_ascii_lowercase().as_str() {
+            "0" | "listen" => (Self::Listen, Some(Fallback::AskedFor)),
+            "compute" => (Self::Compute, None),
+            "1" | "everything" => (FURTHEST_STAGE, None),
+            unknown => (Self::Listen, Some(Fallback::UnknownWord(unknown.to_string()))),
+        }
+    }
+
+    /// The stage this process was started with.
+    pub fn from_environment() -> (Self, Option<Fallback>) {
+        Self::asked(std::env::var_os(RUN_VARIABLE).as_deref())
+    }
+
+    /// Whether memory, address spaces and queues are real at this stage.
+    pub fn is_real(self) -> bool {
+        self != Self::Listen
+    }
+
+    /// Whether a submission whose header gives this context type runs on the card. One whose
+    /// header can't be read has none, and runs only where everything does.
+    pub fn runs(self, context_type: Option<u32>) -> bool {
+        match self {
+            Self::Listen => false,
+            Self::Compute => context_type.is_some_and(|kind| COMPUTE_CONTEXT_TYPES.contains(&kind)),
+            Self::Everything => true,
+        }
+    }
+}
+
+/// The header context types that are compute work: 5 is OpenCL. Level Zero's isn't known yet, so
+/// at [`Stage::Compute`] its work is finished unrun.
+pub const COMPUTE_CONTEXT_TYPES: [u32; 1] = [5];
+
 /// Why a driver is withheld.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Withheld {
@@ -108,5 +210,50 @@ mod tests {
         assert_eq!(Desktop::from_value(None), STAGE_DESKTOP);
         assert_eq!(Desktop::from_value(Some(OsStr::new("1"))), Desktop::Software, "as a lab exported it");
         assert_eq!(Desktop::from_value(Some(OsStr::new("0"))), Desktop::Hardware);
+    }
+    #[test]
+    fn with_nothing_asked_a_guest_gets_the_furthest_stage_and_one_word_turns_it_off() {
+        assert_eq!(Stage::asked(None), (FURTHEST_STAGE, None));
+        assert!(FURTHEST_STAGE.is_real());
+        assert_eq!(Stage::asked(Some(OsStr::new("0"))), (Stage::Listen, Some(Fallback::AskedFor)));
+        assert_eq!(Stage::asked(Some(OsStr::new("listen"))), (Stage::Listen, Some(Fallback::AskedFor)));
+        assert_eq!(Stage::asked(Some(OsStr::new("compute"))), (Stage::Compute, None));
+        assert_eq!(Stage::asked(Some(OsStr::new("1"))), (FURTHEST_STAGE, None));
+    }
+
+    #[test]
+    fn a_word_this_build_does_not_know_is_never_read_as_run() {
+        for word in ["", "yes", "desktop-2", "on"] {
+            let (stage, why) = Stage::asked(Some(OsStr::new(word)));
+            assert_eq!(stage, Stage::Listen, "{word}");
+            assert_eq!(why, Some(Fallback::UnknownWord(word.into())));
+        }
+    }
+
+    #[test]
+    fn each_stage_runs_what_its_name_says() {
+        let (opencl, direct3d_12) = (Some(5), Some(7));
+        assert!(!Stage::Listen.runs(opencl) && !Stage::Listen.runs(None));
+        assert!(Stage::Compute.runs(opencl));
+        assert!(!Stage::Compute.runs(direct3d_12) && !Stage::Compute.runs(None));
+        assert!(Stage::Everything.runs(opencl) && Stage::Everything.runs(direct3d_12));
+        assert!(Stage::Everything.runs(None));
+        assert!(!Stage::Listen.is_real() && Stage::Compute.is_real());
+    }
+
+    #[test]
+    fn every_fallback_names_the_layer_that_refused() {
+        for fallback in [
+            Fallback::AskedFor,
+            Fallback::UnknownWord("x".into()),
+            Fallback::RecordedCard,
+            Fallback::NotXe("i915".into()),
+            Fallback::NodeNotOpened("denied".into()),
+            Fallback::SelfTestFailed(2),
+            Fallback::NoMemoryRegion,
+        ] {
+            assert!(fallback.to_string().starts_with("layer="), "{fallback}");
+        }
+        assert!(Fallback::NotXe("i915".into()).to_string().contains("i915"));
     }
 }

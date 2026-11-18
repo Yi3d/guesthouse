@@ -69,6 +69,7 @@ struct Bound {
 
 #[derive(Debug, Default)]
 struct Vm {
+    flags: u32,
     bound: BTreeMap<u64, Bound>,
 }
 
@@ -134,6 +135,8 @@ enum Outcome {
     Fault(u64),
     /// It never ended.
     Hang,
+    /// It parked in a semaphore wait, in a VM where work may run as long as it likes.
+    Parked,
 }
 
 /// The most instructions a batch may run before it counts as hung.
@@ -235,6 +238,9 @@ impl State {
                 if header == batch::BATCH_START_HEADER {
                     return Ok(Some(Self::read_qword(vm, at + 4)?));
                 }
+                if header & !0xFFFF == batch::SEMAPHORE_WAIT_HEADER & !0xFFFF {
+                    return Err(Outcome::Parked);
+                }
                 if header & MEM_COPY_HEADER_MASK == MEM_COPY {
                     let field = |index: u64| Self::read_dword(vm, at + 4 * index).map(|v| u64::from(v) + 1);
                     let (width, rows, pitch) = (field(1)?, field(2)?, field(3)?);
@@ -268,6 +274,14 @@ impl State {
             Some(vm) if !queue.banned => Self::run(vm, run.batch),
             _ => Outcome::Hang,
         };
+        let long_running = vm.is_some_and(|vm| vm.flags & abi::VM_LONG_RUNNING != 0);
+        if outcome == Outcome::Parked {
+            if long_running {
+                return;
+            }
+            // Anywhere else xe's job timeout ends it.
+            outcome = Outcome::Hang;
+        }
         if let (Outcome::Done, Some(vm)) = (outcome, vm) {
             for sync in &run.syncs {
                 if let Sync::UserFence { address, value } = *sync
@@ -292,10 +306,13 @@ impl State {
         }
     }
 
-    /// The kernel's own checks of an exec's syncs.
-    fn check_syncs(&self, syncs: &[Sync]) -> io::Result<()> {
+    /// The kernel's own checks of an exec's or a bind's syncs, in a VM made with `vm_flags`.
+    fn check_syncs(&self, vm_flags: u32, syncs: &[Sync]) -> io::Result<()> {
         let mut fences = 0;
         for sync in syncs {
+            if matches!(sync, Sync::Signal { .. }) && vm_flags & abi::VM_LONG_RUNNING != 0 {
+                return Err(errno(libc::EOPNOTSUPP));
+            }
             match *sync {
                 Sync::After { timeline, point } => {
                     let timeline = self.timelines.get(&timeline).ok_or_else(|| errno(libc::ENOENT))?;
@@ -404,6 +421,18 @@ impl FakeXe {
         self.state().names_faults = names;
     }
 
+    /// The flags a VM was made with.
+    pub fn vm_flags(&self, vm: u32) -> Option<u32> {
+        self.state().vms.get(&vm).map(|vm| vm.flags)
+    }
+
+    /// Bans a queue, as xe does to one whose work it gave up on.
+    pub fn ban(&self, queue: u32) {
+        if let Some(queue) = self.state().queues.get_mut(&queue) {
+            queue.banned = true;
+        }
+    }
+
     /// Whether anything is bound at a GPU address of a VM.
     pub fn is_bound(&self, vm: u32, address: u64) -> bool {
         self.state().vms.get(&vm).is_some_and(|vm| vm.host(address, 1).is_some())
@@ -415,7 +444,7 @@ impl Xe for FakeXe {
         let mut state = self.state();
         state.enter(Call::CreateVm { flags })?;
         let id = state.new_id();
-        state.vms.insert(id, Vm::default());
+        state.vms.insert(id, Vm { flags, bound: BTreeMap::new() });
         Ok(id)
     }
 
@@ -486,7 +515,8 @@ impl Xe for FakeXe {
         };
         let signals = signal.map(|sync| [sync]);
         let signals = signals.as_ref().map_or(&[][..], |sync| &sync[..]);
-        state.check_syncs(signals)?;
+        let flags = state.vms.get(&vm).ok_or_else(|| errno(libc::ENOENT))?.flags;
+        state.check_syncs(flags, signals)?;
         let space = state.vms.get_mut(&vm).ok_or_else(|| errno(libc::ENOENT))?;
         space.clear(op.address, op.length);
         if let Some(host) = host {
@@ -494,6 +524,11 @@ impl Xe for FakeXe {
         }
         state.attach(signals);
         state.finish_signals(signals);
+        if let Some(Sync::UserFence { address, value }) = signal {
+            // SAFETY: a bind's user fence is an address in this process that the caller keeps alive,
+            // which is what the kernel is given too.
+            unsafe { (address as *mut u64).write_volatile(value) };
+        }
         Ok(())
     }
 
@@ -524,10 +559,10 @@ impl Xe for FakeXe {
         let mut state = self.state();
         state.enter(Call::Exec { queue, batch, syncs: syncs.to_vec() })?;
         let found = state.queues.get(&queue).ok_or_else(|| errno(libc::ENOENT))?;
-        if found.banned || !state.vms.contains_key(&found.vm) {
+        let Some(flags) = state.vms.get(&found.vm).map(|vm| vm.flags).filter(|_| !found.banned) else {
             return Err(errno(libc::ECANCELED));
-        }
-        state.check_syncs(syncs)?;
+        };
+        state.check_syncs(flags, syncs)?;
         state.attach(syncs);
         let run = Held { queue, batch, syncs: syncs.to_vec() };
         if state.hold_runs {
@@ -687,6 +722,36 @@ mod tests {
         let after = Sync::After { timeline: binds, point: 1 };
         assert!(invalid(xe.exec(queue, 0x1_0000, &[after, signal])), "nothing attached to wait for");
         assert!(xe.exec(queue, 0x1_0000, &[signal]).is_ok());
+    }
+
+    #[test]
+    fn a_long_running_vm_takes_no_signals_and_lets_a_parked_batch_be() {
+        let mut xe = FakeXe::default();
+        let vm = xe.create_vm(abi::VM_LONG_RUNNING).unwrap();
+        let handle = xe.create_buffer(&buffer()).unwrap();
+        let timeline = xe.create_syncobj().unwrap();
+        let signal = Sync::Signal { timeline, point: 1 };
+        let unsupported =
+            |result: io::Result<()>| result.unwrap_err().raw_os_error() == Some(libc::EOPNOTSUPP);
+        assert!(unsupported(xe.bind(vm, &map(handle, 0x1_0000), Some(signal))));
+        let bound = Box::new(0u64);
+        let fence = Sync::UserFence { address: std::ptr::from_ref(&*bound) as u64, value: 3 };
+        xe.bind(vm, &map(handle, 0x1_0000), Some(fence)).unwrap();
+        // SAFETY: the box is alive, and the stand-in wrote through the same address.
+        assert_eq!(
+            unsafe { std::ptr::from_ref(&*bound).read_volatile() },
+            3,
+            "written once the bind is in place"
+        );
+        let queue = xe.create_queue(vm, EngineInstance { class: 4, instance: 0, gt: 0 }).unwrap();
+        let mut batch_map = xe.map_buffer(handle, 0x1000).unwrap();
+        batch_map.write(0, &batch::bytes(&[batch::SEMAPHORE_WAIT_HEADER, 1, 0x1_0800, 0, 0]));
+        assert!(unsupported(xe.exec(queue, 0x1_0000, &[signal])));
+        xe.exec(queue, 0x1_0000, &[]).unwrap();
+        assert!(!xe.queue_banned(queue).unwrap(), "a ring may park for as long as it likes here");
+        assert_eq!(xe.vm_flags(vm), Some(abi::VM_LONG_RUNNING));
+        xe.ban(queue);
+        assert!(xe.queue_banned(queue).unwrap());
     }
 
     #[test]
