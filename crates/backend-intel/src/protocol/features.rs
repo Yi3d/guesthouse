@@ -60,6 +60,17 @@ pub const GPGPU_MID_BATCH_PREEMPT: Feature = at("FtrGpGpuMidBatchPreempt", WORD_
 pub const GPGPU_THREAD_GROUP_PREEMPT: Feature = at("FtrGpGpuThreadGroupLevelPreempt", WORD_B, 10);
 pub const GPGPU_MID_THREAD_PREEMPT: Feature = at("FtrGpGpuMidThreadLevelPreempt", WORD_B, 11);
 
+/// The 3D pipeline levels Intel's Direct3D 10 and 11 driver reports, from 10_0 up, which have no
+/// names in gmmlib. Its 12_0 and 12_1 come from [`WDDM2_GPU_MMU`]. Direct3D 11 refuses a driver
+/// whose levels have a gap, and with these clear the gap is below 12_0, so no Direct3D 10 or 11
+/// device could be made on the adapter, the desktop's compositor's included.
+pub const PIPELINE_LEVELS: [Feature; 4] = [
+    at("3D pipeline 10_0", WORD_FIRST, 648),
+    at("3D pipeline 10_1", WORD_FIRST, 649),
+    at("3D pipeline 11_0", WORD_FIRST, 651),
+    at("3D pipeline 11_1", WORD_FIRST, 652),
+];
+
 /// The four flags that let the guest compress surfaces. Compression needs the host to set up
 /// memory the same way, which this backend can't yet, so all four stay clear.
 pub const COMPRESSION: [Feature; 4] = [
@@ -143,6 +154,10 @@ mod tests {
             COMPRESSION[1],
             COMPRESSION[2],
             COMPRESSION[3],
+            PIPELINE_LEVELS[0],
+            PIPELINE_LEVELS[1],
+            PIPELINE_LEVELS[2],
+            PIPELINE_LEVELS[3],
         ];
         for (at, one) in all.iter().enumerate() {
             for other in &all[at + 1..] {
@@ -151,6 +166,16 @@ mod tests {
         }
         assert_eq!((HW_SCHEDULING.byte, HW_SCHEDULING.bit), (0x2EC + 6, 1));
         assert_eq!((BLITTER_RING.byte, BLITTER_RING.bit), (0x2B4 + 1, 6));
+    }
+
+    #[test]
+    fn the_pipeline_levels_are_bits_0_1_3_and_4_of_byte_0x305() {
+        let mut record = vec![0u8; 0x400];
+        for level in PIPELINE_LEVELS {
+            set(&mut record, level, true);
+        }
+        assert_eq!(record[0x305], 0x1B);
+        assert_eq!(record.iter().filter(|&&byte| byte != 0).count(), 1);
     }
 
     #[test]

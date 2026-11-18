@@ -368,6 +368,9 @@ fn set_features(record: &mut [u8], facts: &RecordFacts) {
     for (feature, on) in flags {
         features::set(record, feature, on);
     }
+    for level in features::PIPELINE_LEVELS {
+        features::set(record, level, true);
+    }
     for feature in features::COMPRESSION {
         features::set(record, feature, false);
     }
@@ -546,6 +549,13 @@ pub(crate) mod tests {
             assert!(!features::is_set(&record, feature), "{}", feature.name);
         }
         assert!(!summary(&record).compression);
+    }
+
+    #[test]
+    fn direct3d_11_sees_every_pipeline_level_from_10_0_to_12_1_with_no_gap() {
+        let record = build(&facts());
+        assert_eq!(record[0x305] & 0x1B, 0x1B, "10_0, 10_1, 11_0 and 11_1");
+        assert!(features::is_set(&record, features::WDDM2_GPU_MMU), "12_0 and 12_1");
     }
 
     #[test]
