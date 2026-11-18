@@ -47,6 +47,16 @@ You can shut the machine down afterwards. If you build from source, `guesthouse-
 
 At this stage an Intel machine's desktop is drawn in software: the guest is refused Intel's Direct3D 9, 10 and 11 drivers, and the desktop compositor is refused Direct3D 12 too, while other programs' Direct3D 12, OpenCL, Level Zero and Vulkan still come to the card and the log. With those drivers, Windows' desktop compositor starts on the card, crashes as nothing it draws is run, and Windows then stops the card and the basic display with it, which leaves nothing on the screen. The daemon's log says when the desktop is in software. `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=0` in the daemon's environment gives the guest all of Intel's drivers, for an experiment.
 
+## Work on the card
+
+From this build the daemon can run the guest's work on the card through `xe`: real buffers, an address space for each guest program, and a queue behind each of the guest's. It has only run against a stand-in for the driver, never on a real card, so expect it to fail in ways nobody has seen.
+
+At each start the daemon runs the short self-test `intel-probe --run` runs. If any step fails, or the card can't be opened for work, the machine starts as before with nothing run on the card. A line in `daemon.out` starting with `intel stage=` says which it is and, if nothing runs, what refused.
+
+`GUESTHOUSE_INTEL_RUN_ON_CARD=0` in the daemon's environment keeps everything off the card. `GUESTHOUSE_INTEL_RUN_ON_CARD=compute` runs OpenCL work only. A recorded card never runs anything.
+
+A guest program whose work hangs or faults loses its device, as it would on Windows, and the other programs go on. On a card with memory of its own the guest can't take all of it: a quarter of the card, or 1 GiB if that is more, and what your desktop already holds stay out of its reach.
+
 ## intel-probe
 
 `intel-probe` prints what the host's `xe` driver says about your card: its PCI ids, memory, engines, GT and topology, the hardware config table, the GuC and HuC versions and the clocks, then the record a guest would be given. It only asks the driver questions. It makes no buffer or queue, so nothing runs on the card and your desktop isn't touched. A release has it beside `guesthouse-task`, and step 6 runs it for you.

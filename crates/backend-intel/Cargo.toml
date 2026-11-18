@@ -1,6 +1,6 @@
 [package]
 name = "guesthouse-backend-intel"
-description = "The Intel backend: the host's xe driver, read but not yet run on, and the private data Intel's Windows driver sends."
+description = "The Intel backend: the guest's work on the host's xe driver, and the private data Intel's Windows driver sends."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
