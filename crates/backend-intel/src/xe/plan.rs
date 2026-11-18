@@ -143,6 +143,14 @@ pub enum Backing {
 }
 
 impl Backing {
+    /// What the backing is, in a word, for the log.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Buffer { .. } => "a buffer xe made",
+            Self::HostPages { .. } => "the guest's own pages",
+        }
+    }
+
     pub fn size(&self) -> u64 {
         match *self {
             Self::Buffer { size, .. } | Self::HostPages { size, .. } => size,

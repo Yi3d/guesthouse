@@ -287,6 +287,15 @@ impl Rig {
         BATCH_AT
     }
 
+    /// The memory the data block is, mapped at [`Rig::data_address`].
+    pub fn data_memory(&self) -> MemoryId {
+        self.data.0
+    }
+
+    pub fn data_bytes(&self) -> u64 {
+        DATA_BYTES as u64
+    }
+
     pub fn data_address(&self) -> u64 {
         DATA_AT
     }

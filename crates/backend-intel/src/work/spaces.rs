@@ -10,7 +10,7 @@ use super::choices;
 use crate::xe::abi::{BindOp, Sync};
 use crate::xe::plan::{self, BindVerdict};
 use guesthouse_backend::{BackendError, GpuRange, MapRequest, MemoryId, SpaceId, UnmapRequest};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -23,6 +23,22 @@ pub(super) struct Mapping {
     pub offset: u64,
     /// The bind that made it, kept to make it again in the ring's VM.
     op: BindOp,
+}
+
+/// How many changes to a space's mappings are remembered, so that a banned run can be told what
+/// moved under it. The oldest go first.
+pub(super) const CHANGES_KEPT: usize = 128;
+
+/// One change to a space's mappings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Change {
+    /// Counts up with each change to the space, from one.
+    pub number: u64,
+    pub address: u64,
+    pub length: u64,
+    pub now_mapped: bool,
+    /// What lay behind the memory that was mapped or unmapped.
+    pub backing: &'static str,
 }
 
 /// A process's long-running VM.
@@ -53,9 +69,26 @@ pub(super) struct Space {
     pub mappings: BTreeMap<u64, Mapping>,
     /// A queue of this process was banned, or its work was lost: nothing more of it runs.
     pub failed: bool,
+    /// The latest changes to `mappings`, at most [`CHANGES_KEPT`], and how many were ever made.
+    pub changes: VecDeque<Change>,
+    pub changes_made: u64,
 }
 
 impl Space {
+    pub(super) fn note(&mut self, address: u64, length: u64, now_mapped: bool, backing: &'static str) {
+        self.changes_made += 1;
+        if self.changes.len() == CHANGES_KEPT {
+            self.changes.pop_front();
+        }
+        self.changes.push_back(Change { number: self.changes_made, address, length, now_mapped, backing });
+    }
+
+    /// How many bytes lie mapped from an address to the end of its mapping.
+    pub fn mapped_from(&self, address: u64) -> Option<u64> {
+        let (&start, mapping) = self.mappings.range(..=address).next_back()?;
+        (start + mapping.length).checked_sub(address).filter(|&left| left > 0)
+    }
+
     fn overlaps(&self, address: u64, length: u64) -> bool {
         let before = self.mappings.range(..address.saturating_add(length)).next_back();
         before.is_some_and(|(&start, mapping)| start.saturating_add(mapping.length) > address)
@@ -68,6 +101,9 @@ impl Space {
         (end <= start + mapping.length).then_some((mapping.memory, mapping.offset + (address - start)))
     }
 }
+
+/// What the log says of memory that is no longer there to ask.
+const GONE: &str = "memory that has gone";
 
 fn failed(what: &str, error: &io::Error) -> BackendError {
     match plan::bind_verdict(error) {
@@ -101,7 +137,17 @@ impl CardWork {
         let ranges = ranges.to_vec();
         self.spaces.insert(
             space,
-            Space { vm, binds, bind_point: 0, ring: None, ranges, mappings: BTreeMap::new(), failed: false },
+            Space {
+                vm,
+                binds,
+                bind_point: 0,
+                ring: None,
+                ranges,
+                mappings: BTreeMap::new(),
+                failed: false,
+                changes: VecDeque::new(),
+                changes_made: 0,
+            },
         );
         Ok(space)
     }
@@ -159,12 +205,15 @@ impl CardWork {
         if space.overlaps(request.address, request.length) {
             return Err(BackendError::new("these addresses are taken"));
         }
+        let backing = block.backing.kind();
         let op = plan::bind_for(request, &block.backing).map_err(|refused| {
             BackendError::new(format!("a mapping at {:#x}: {refused}", request.address))
         })?;
         self.bind(request.space, &op).map_err(|error| failed("a mapping", &error))?;
         let mapping = Mapping { length: request.length, memory: request.memory, offset: request.offset, op };
-        self.spaces.get_mut(&request.space).expect("found above").mappings.insert(request.address, mapping);
+        let space = self.spaces.get_mut(&request.space).expect("found above");
+        space.mappings.insert(request.address, mapping);
+        space.note(request.address, request.length, true, backing);
         Ok(())
     }
 
@@ -174,9 +223,18 @@ impl CardWork {
         }
         let Some(space) = self.spaces.get_mut(&unmap.space) else { return Ok(()) };
         let end = unmap.address.saturating_add(unmap.length);
-        let had = space.mappings.len();
-        space.mappings.retain(|&start, mapping| start < unmap.address || start + mapping.length > end);
-        if space.mappings.len() == had || unmap.length == 0 {
+        let removed: Vec<(u64, Mapping)> = space
+            .mappings
+            .iter()
+            .filter(|&(&start, mapping)| start >= unmap.address && start + mapping.length <= end)
+            .map(|(&start, &mapping)| (start, mapping))
+            .collect();
+        for (start, mapping) in &removed {
+            space.mappings.remove(start);
+            let backing = self.blocks.get(&mapping.memory).map_or(GONE, |block| block.backing.kind());
+            space.note(*start, mapping.length, false, backing);
+        }
+        if removed.is_empty() || unmap.length == 0 {
             return Ok(());
         }
         self.bind(unmap.space, &plan::unbind_for(unmap)).map_err(|error| failed("an unmapping", &error))
@@ -201,6 +259,8 @@ impl CardWork {
         for unmap in mapped {
             if let Some(space) = self.spaces.get_mut(&unmap.space) {
                 space.mappings.remove(&unmap.address);
+                let backing = self.blocks.get(&memory).map_or(GONE, |block| block.backing.kind());
+                space.note(unmap.address, unmap.length, false, backing);
             }
             if let Err(error) = self.bind(unmap.space, &plan::unbind_for(&unmap)) {
                 log::warn!("intel work: unmapping freed memory at {:#x} failed: {error}", unmap.address);

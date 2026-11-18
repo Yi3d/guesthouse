@@ -17,12 +17,19 @@ use std::time::{Duration, Instant};
 
 /// A run on the card whose end is waited for.
 #[derive(Debug, Clone, Copy)]
-struct Run {
-    /// The point of the queue's timeline xe signals when it ends, however it ends.
-    point: u64,
+pub(super) struct Run {
+    /// The point of the queue's timeline xe signals when it ends, however it ends. Zero for a ring.
+    pub point: u64,
     /// The guest's fence, by guest physical address, and the value this run brings it to.
-    fence: u64,
-    value: u64,
+    pub fence: u64,
+    pub value: u64,
+    /// The batch: its GPU address, its length in bytes, and where it goes on if it chains.
+    pub batch: u64,
+    pub length: u64,
+    pub chain: Option<u64>,
+    /// When it was sent, and how many changes its space's mappings had had by then.
+    pub sent: Option<Instant>,
+    pub changes_before: u64,
 }
 
 #[derive(Debug)]
@@ -31,11 +38,14 @@ pub(super) struct Queue {
     /// The xe queue for batches that end, with the timeline its runs signal.
     ordinary: Option<(u32, u32)>,
     next_point: u64,
-    in_flight: VecDeque<Run>,
+    pub in_flight: VecDeque<Run>,
     /// The xe queue for a ring, in the space's long-running VM, and the last fence value a ring
     /// submission named.
     ring: Option<u32>,
     ring_fence: Option<(u64, u64)>,
+    /// The latest ring submission, and whether its queue's ban has been looked into.
+    ring_run: Option<Run>,
+    ring_banned_seen: bool,
 }
 
 /// Work checked and ready, waiting for its doorbell.
@@ -47,6 +57,24 @@ pub(super) struct Prepared {
     syncs: Vec<Sync>,
     /// `None` for a ring, which signals nothing.
     run: Option<Run>,
+    /// What a ring submission is, for the log if its queue is banned.
+    ring_run: Option<Run>,
+}
+
+/// Why a span of GPU memory couldn't be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadError {
+    NotMapped,
+    Unreadable,
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotMapped => "it isn't inside one mapping",
+            Self::Unreadable => "it can't be read",
+        })
+    }
 }
 
 /// Why a submission is refused and its queue stopped.
@@ -89,7 +117,8 @@ impl std::fmt::Display for Refused {
 
 /// What a submission's batch is, once checked.
 enum Kind {
-    Ends,
+    /// Ends, or chains on at the address.
+    Ends(Option<u64>),
     Ring,
 }
 
@@ -144,7 +173,8 @@ impl CardWork {
         }
         let engine = engines::for_node(&self.engines, work.node).ok_or(Refused::NoEngine(work.node))?;
         let kind = match self.ending(host, work.space, commands)? {
-            Ending::Ends | Ending::Chains(_) => Kind::Ends,
+            Ending::Ends => Kind::Ends(None),
+            Ending::Chains(to) => Kind::Ends(Some(to)),
             Ending::Parks if choices::RINGS == Rings::LongRunning => Kind::Ring,
             Ending::Parks => return Err(Refused::Ring),
             Ending::RunsOn => return Err(Refused::RunsOn { address: commands.address }),
@@ -157,7 +187,20 @@ impl CardWork {
             in_flight: VecDeque::new(),
             ring: None,
             ring_fence: None,
+            ring_run: None,
+            ring_banned_seen: false,
         });
+        let length = u64::from(commands.length) * choices::COMMAND_LENGTH_UNIT;
+        let run_of = |point: u64, chain: Option<u64>| Run {
+            point,
+            fence: work.fence,
+            value: work.fence_value,
+            batch: commands.address,
+            length,
+            chain,
+            sent: None,
+            changes_before: 0,
+        };
         match kind {
             Kind::Ring => {
                 let xe_queue = match queue.ring {
@@ -182,9 +225,10 @@ impl CardWork {
                     batch: commands.address,
                     syncs: Vec::new(),
                     run: None,
+                    ring_run: Some(run_of(0, None)),
                 }))
             }
-            Kind::Ends => {
+            Kind::Ends(chain) => {
                 let (xe_queue, done) = match queue.ordinary {
                     Some(made) => made,
                     None => {
@@ -207,13 +251,14 @@ impl CardWork {
                     && held.holding(work.fence_gpu_address, plan::FENCE_ALIGNMENT).is_some();
                 let fence = fence_mapped.then_some((work.fence_gpu_address, work.fence_value));
                 let syncs = plan::exec_syncs(last_bind, fence, Point { timeline: done, point });
-                let run = Run { point, fence: work.fence, value: work.fence_value };
+                let run = run_of(point, chain);
                 Ok(Some(Prepared {
                     queue: work.queue,
                     xe_queue,
                     batch: commands.address,
                     syncs,
                     run: Some(run),
+                    ring_run: None,
                 }))
             }
         }
@@ -246,23 +291,39 @@ impl CardWork {
         let (address, length) = (commands.address, u64::from(commands.length) * choices::COMMAND_LENGTH_UNIT);
         let not_mapped = Refused::NotMapped { address, length };
         let held = self.spaces.get(&space).ok_or(Refused::SpaceFailed)?;
-        let Some((memory, offset)) = held.holding(address, length).filter(|_| length != 0) else {
+        if held.holding(address, length).is_none() || length == 0 {
             return Err(not_mapped);
-        };
-        let tail_length = (length.min(batch::ENDING_BYTES as u64) & !3) as usize;
-        let skipped = length - tail_length as u64;
-        let mut tail = vec![0u8; tail_length];
+        }
+        let tail_length = length.min(batch::ENDING_BYTES as u64) & !3;
+        let skipped = length - tail_length;
+        let tail =
+            self.read_gpu(host, space, address + skipped, tail_length).map_err(|error| match error {
+                ReadError::NotMapped => Refused::NotMapped { address, length },
+                ReadError::Unreadable => Refused::Unreadable { address: address + skipped },
+            })?;
+        Ok(batch::ending_at(&tail, address + skipped))
+    }
+
+    /// Reads bytes of a space at a GPU address, all of which must lie in one mapping: of a buffer
+    /// through the CPU's view of it, of guest pages through the core.
+    pub(super) fn read_gpu(
+        &mut self,
+        host: &mut dyn HostServices,
+        space: SpaceId,
+        address: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, ReadError> {
+        let held = self.spaces.get(&space).ok_or(ReadError::NotMapped)?;
+        let (memory, offset) = held.holding(address, length).ok_or(ReadError::NotMapped)?;
+        let mut bytes = vec![0u8; usize::try_from(length).map_err(|_| ReadError::Unreadable)?];
         let in_buffer =
             matches!(self.blocks.get(&memory).map(|block| block.backing), Some(Backing::Buffer { .. }));
         let read = if in_buffer {
-            self.cpu_view(memory).is_ok_and(|view| view.read(offset + skipped, &mut tail))
+            self.cpu_view(memory).is_ok_and(|view| view.read(offset, &mut bytes))
         } else {
-            host.read_guest_span(space, address + skipped, &mut tail) == Some(tail_length)
+            host.read_guest_span(space, address, &mut bytes) == Some(bytes.len())
         };
-        if !read {
-            return Err(Refused::Unreadable { address: address + skipped });
-        }
-        Ok(batch::ending_at(&tail, address + skipped))
+        if read { Ok(bytes) } else { Err(ReadError::Unreadable) }
     }
 
     /// Sends prepared work. A refusal for now keeps it for the next ring of the same doorbell.
@@ -281,20 +342,31 @@ impl CardWork {
                 return Ok(Doorbell::NotYet);
             }
         }
+        let attempted = prepared.run.or(prepared.ring_run);
         let sent = self.xe.exec(prepared.xe_queue, prepared.batch, &prepared.syncs);
         match sent.as_ref().map_err(plan::exec_verdict) {
             Ok(()) => {
                 let prepared = self.prepared.remove(&doorbell).expect("found above");
-                if let (Some(run), Some(queue)) = (prepared.run, self.queues.get_mut(&prepared.queue)) {
-                    queue.in_flight.push_back(run);
+                let changes_before = self.spaces.get(&space).map_or(0, |held| held.changes_made);
+                if let Some(queue) = self.queues.get_mut(&prepared.queue) {
+                    let stamped = |run: Run| Run { sent: Some(Instant::now()), changes_before, ..run };
+                    if let Some(run) = prepared.run {
+                        queue.in_flight.push_back(stamped(run));
+                    }
+                    if let Some(run) = prepared.ring_run {
+                        queue.ring_run = Some(stamped(run));
+                        queue.ring_banned_seen = false;
+                    }
                 }
                 Ok(Doorbell::Rung)
             }
             Err(ExecVerdict::NotYet) => Ok(Doorbell::NotYet),
             Err(verdict) => {
                 let error = sent.expect_err("matched as an error");
+                let prepared_queue = self.prepared.get(&doorbell).map_or(0, |prepared| prepared.queue);
                 self.prepared.remove(&doorbell);
                 if verdict == ExecVerdict::Lost {
+                    self.explain_cancel(prepared_queue, space, attempted);
                     self.fail_space(
                         space,
                         "xe cancelled a submission, as it does once a queue is reset or banned",
@@ -321,16 +393,19 @@ impl CardWork {
         self.last_look = Some(now);
         let ids: Vec<u32> = self.queues.keys().copied().collect();
         for id in ids {
-            self.look_at_runs(host, id);
-            self.look_at_ring(host, id);
+            self.look_at_runs(host, id, now);
+            self.look_at_ring(host, id, now);
         }
     }
 
-    fn look_at_runs(&mut self, host: &mut dyn HostServices, id: u32) {
+    fn look_at_runs(&mut self, host: &mut dyn HostServices, id: u32, now: Instant) {
         let Some(queue) = self.queues.get_mut(&id) else { return };
         let Some((xe_queue, done)) = queue.ordinary else { return };
         let space = queue.space;
-        let mut lost = false;
+        // The first run that ended without its fence, which is the one xe gave up on, and how many
+        // after it were lost with it.
+        let mut cut_short: Option<Run> = None;
+        let mut lost_with_it = 0;
         while let Some(run) = queue.in_flight.front().copied() {
             match self.xe.point_reached(done, run.point, Duration::ZERO) {
                 Ok(true) => {}
@@ -341,23 +416,45 @@ impl CardWork {
                 }
             }
             queue.in_flight.pop_front();
-            lost |= stand_in(host, id, run.fence, run.value);
+            if stand_in(host, id, run.fence, run.value) {
+                match cut_short {
+                    None => cut_short = Some(run),
+                    Some(_) => lost_with_it += 1,
+                }
+            }
         }
         // A run that ended without its fence was cut short. Whether the queue was banned for it
         // decides if the process goes on; a question xe won't answer counts as banned, as in Mesa.
-        if lost && self.xe.queue_banned(xe_queue).unwrap_or(true) {
+        if let Some(run) = cut_short
+            && self.xe.queue_banned(xe_queue).unwrap_or(true)
+        {
+            let behind = self.queues.get(&id).map_or(0, |queue| queue.in_flight.len());
+            let lines = self.ban_lines(host, id, &run, lost_with_it, behind, now);
+            for line in lines {
+                log::warn!("{line}");
+            }
             self.fail_space(space, "xe banned one of its queues after a hang or a fault");
         }
     }
 
-    fn look_at_ring(&mut self, host: &mut dyn HostServices, id: u32) {
+    fn look_at_ring(&mut self, host: &mut dyn HostServices, id: u32, now: Instant) {
         let Some(queue) = self.queues.get(&id) else { return };
         let (Some(xe_queue), space) = (queue.ring, queue.space) else { return };
-        if self.space_failed(space) || !self.xe.queue_banned(xe_queue).unwrap_or(false) {
+        if queue.ring_banned_seen || !self.xe.queue_banned(xe_queue).unwrap_or(false) {
             return;
         }
-        if let Some((fence, value)) = queue.ring_fence {
+        let (fence, run) = (queue.ring_fence, queue.ring_run);
+        if let Some(queue) = self.queues.get_mut(&id) {
+            queue.ring_banned_seen = true;
+        }
+        if let Some((fence, value)) = fence {
             stand_in(host, id, fence, value);
+        }
+        if let Some(run) = run {
+            let lines = self.ban_lines(host, id, &run, 0, 0, now);
+            for line in lines {
+                log::warn!("{line}");
+            }
         }
         self.fail_space(space, "xe banned the queue its ring ran on");
     }

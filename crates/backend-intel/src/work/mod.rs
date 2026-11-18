@@ -6,6 +6,7 @@
 //! spaces and their mappings, [`queues`] for submissions and what became of them, and [`copies`]
 //! for pictures on their way out. [`choices`] holds what the card has yet to confirm.
 
+mod bans;
 pub mod cap;
 pub mod choices;
 pub mod copies;
