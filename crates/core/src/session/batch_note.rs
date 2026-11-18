@@ -1,6 +1,6 @@
 //! With verbose logging, a line for each hardware queue submission's batch: its address and length,
-//! the allocation it lies in and what backs that, and its first and last dwords where the host can
-//! read them. It is for bringing up a vendor's real submission path, and says nothing to the guest.
+//! the allocation it lies in and what backs that, and its dwords where the host can read them: all of
+//! a small batch, the first and last few of a big one. It is for bringing up a vendor's real submission path, and says nothing to the guest.
 
 use super::Session;
 use crate::tables::Allocation;
@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Dwords shown from each end of a batch.
 const DWORDS_SHOWN: u64 = 8;
+/// A batch this long or shorter is shown whole: how it ends may be in the middle of it.
+const WHOLE_BATCH: u64 = 1024;
 const DWORD: u64 = 4;
 /// Lines at most for one daemon, so a long verbose run can't fill a disk with them.
 const MOST_LINES: u32 = 4096;
@@ -57,6 +59,17 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         };
         let offset = mapping.first + (address - mapping.address);
         let length = u64::from(length);
+        if length <= WHOLE_BATCH {
+            let whole = self.read_allocation(allocation, offset, length);
+            log::debug!(
+                "batch queue={queue:#x} address={address:#x} length={length} allocation={handle:#x} offset={offset:#x} \
+                 allocation_size={:#x} in={} whole=[{}]",
+                allocation.size,
+                backing(allocation),
+                whole.as_deref().map_or("unreadable".into(), hex_dwords),
+            );
+            return;
+        }
         let shown = DWORDS_SHOWN * DWORD;
         let first = self.read_allocation(allocation, offset, length.min(shown));
         let tail_start = offset + length.saturating_sub(shown);
