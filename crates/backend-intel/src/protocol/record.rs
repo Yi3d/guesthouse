@@ -373,8 +373,8 @@ fn set_features(record: &mut [u8], facts: &RecordFacts) {
     for (feature, on) in flags {
         features::set(record, feature, on);
     }
-    for level in features::PIPELINE_LEVELS {
-        features::set(record, level, true);
+    for feature in features::PIPELINE_LEVELS.into_iter().chain(features::DDI_VERSIONS) {
+        features::set(record, feature, true);
     }
     for feature in features::COMPRESSION {
         features::set(record, feature, false);

@@ -71,6 +71,24 @@ pub const PIPELINE_LEVELS: [Feature; 4] = [
     at("3D pipeline 11_1", WORD_FIRST, 652),
 ];
 
+/// The Direct3D 11 interface versions past 11.0's first two, 0x000B0023 to 0x000B002D, one bit
+/// each, which have no names in gmmlib. Intel's driver offers a version only when its bit is set,
+/// and the newer ones carry the runtime's callbacks for hardware queues, which the driver calls on a
+/// card with hardware scheduling.
+pub const DDI_VERSIONS: [Feature; 11] = [
+    at("D3D11 DDI 0x000B0023", WORD_FIRST, 1413),
+    at("D3D11 DDI 0x000B0024", WORD_FIRST, 1414),
+    at("D3D11 DDI 0x000B0025", WORD_FIRST, 1415),
+    at("D3D11 DDI 0x000B0026", WORD_FIRST, 1416),
+    at("D3D11 DDI 0x000B0027", WORD_FIRST, 1417),
+    at("D3D11 DDI 0x000B0028", WORD_FIRST, 1418),
+    at("D3D11 DDI 0x000B0029", WORD_FIRST, 1419),
+    at("D3D11 DDI 0x000B002A", WORD_FIRST, 1420),
+    at("D3D11 DDI 0x000B002B", WORD_FIRST, 1421),
+    at("D3D11 DDI 0x000B002C", WORD_FIRST, 1422),
+    at("D3D11 DDI 0x000B002D", WORD_FIRST, 1423),
+];
+
 /// The four flags that let the guest compress surfaces. Compression needs the host to set up
 /// memory the same way, which this backend can't yet, so all four stay clear.
 pub const COMPRESSION: [Feature; 4] = [
@@ -166,6 +184,16 @@ mod tests {
         }
         assert_eq!((HW_SCHEDULING.byte, HW_SCHEDULING.bit), (0x2EC + 6, 1));
         assert_eq!((BLITTER_RING.byte, BLITTER_RING.bit), (0x2B4 + 1, 6));
+    }
+
+    #[test]
+    fn the_ddi_versions_are_bits_5_to_15_of_the_dword_at_0x364() {
+        let mut record = vec![0u8; 0x400];
+        for version in DDI_VERSIONS {
+            set(&mut record, version, true);
+        }
+        assert_eq!(dword(&record, 0x364), Some(0xFFE0));
+        assert_eq!(record.iter().filter(|&&byte| byte != 0).count(), 2);
     }
 
     #[test]
