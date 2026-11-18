@@ -1052,4 +1052,13 @@ mod tests {
         );
         assert!(backend.export_memory(from, 0x1000).is_err(), "guest pages are not the card's to export");
     }
+
+    #[test]
+    fn a_new_queues_data_goes_back_as_it_came_with_no_token_written() {
+        let mut backend = IntelBackend::from_card(card::tests::battlemage()).unwrap();
+        let mut data: Vec<u8> = (0..protocol::hw_queue::SIZE as u8).collect();
+        let sent = data.clone();
+        backend.finish_queue_data(0x40, &mut data, 1).unwrap();
+        assert_eq!(data, sent, "the qword at +8 is written only for a native fence, which is never offered");
+    }
 }
