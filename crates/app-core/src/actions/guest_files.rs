@@ -4,9 +4,11 @@
 
 use super::Task;
 use super::desktop::{GUEST_FOLDER, put_guest_file};
+use super::driver_store::HOST_DRIVER_STORE;
 use super::guest_upload::quoted;
 use crate::agent::guest_script;
 use crate::failure::Result;
+use crate::gpu_identity::INTEL_RENDER;
 use crate::log::write_log;
 use crate::setup::guest_driver::INTEL_STORE_FOLDER;
 use crate::setup::guest_files::guest_file_list;
@@ -26,6 +28,11 @@ const MISSING_MARK: &str = "missing ";
 const FAILED_MARK: &str = "FAILED";
 const KEY_SECONDS: u64 = 20;
 const KEY_MARK: &str = "device key set";
+/// Where the display devices' software keys are, each named by its device's driver property.
+const DISPLAY_CLASS_KEYS: &str = r"HKLM:\SYSTEM\CurrentControlSet\Control\Class\";
+/// What the Level Zero loader reads from a display device's software key, and Intel's driver it names.
+const LEVEL_ZERO_VALUE: &str = "LevelZeroDriverPath";
+const LEVEL_ZERO_DRIVER: &str = "ze_intel_gpu64.dll";
 /// Where Windows keeps what a 32-bit program sees as SOFTWARE.
 const SOFTWARE_32: (&str, &str) = (r"SOFTWARE\", r"SOFTWARE\WOW6432Node\");
 const NO_SCRIPT: &str = "Windows lacks some of the driver's files, so a program that looks for them may crash. \
@@ -114,6 +121,10 @@ pub(super) fn place_system_files(task: &mut Task) -> Result<()> {
 /// The registry key the Intel adapter's record names as the device's, with the values Intel's OpenCL
 /// and Level Zero drivers look for in it. Without them they offer no device. Windows shows a 32-bit
 /// program another SOFTWARE key, so the key goes in both.
+///
+/// The Level Zero loader finds its driver another way: it reads LevelZeroDriverPath from the software
+/// key of each display device present, which Intel's INF would have written. In the guest that is the
+/// key Windows made for the render device with Intel's identity, so the path goes there too.
 fn device_key_script() -> String {
     let key_script = |path: &str| {
         let key = quoted(&format!(r"HKLM:\{path}"));
@@ -130,7 +141,16 @@ fn device_key_script() -> String {
         format!("New-Item -Path {key} -Force -ea Stop | Out-Null; {values}")
     };
     let keys = key_script(DEVICE_KEY) + &key_script(&DEVICE_KEY.replacen(SOFTWARE_32.0, SOFTWARE_32.1, 1));
-    format!("try {{ {keys}'{KEY_MARK}' }} catch {{ \"$_\" }}")
+    let level_zero = format!(
+        "Get-PnpDevice -PresentOnly -Class Display -ea Stop | Where-Object {{ $_.HardwareID -like {} }} | \
+         ForEach-Object {{ $key = {} + (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_Driver -ea Stop).Data; \
+         New-ItemProperty -Path $key -Name {} -PropertyType String -Value {} -Force -ea Stop | Out-Null }}; ",
+        quoted(&INTEL_RENDER.windows_pattern()),
+        quoted(DISPLAY_CLASS_KEYS),
+        quoted(LEVEL_ZERO_VALUE),
+        quoted(&format!(r"{HOST_DRIVER_STORE}\{INTEL_STORE_FOLDER}\{LEVEL_ZERO_DRIVER}")),
+    );
+    format!("try {{ {keys}{level_zero}'{KEY_MARK}' }} catch {{ \"$_\" }}")
 }
 
 /// Windows is up by now, so a key that doesn't take is said and doesn't stop the machine.
@@ -180,5 +200,9 @@ mod tests {
         );
         assert!(script.contains("-Name 'OpenCLDriverName' -PropertyType String -Value 'igdrcl64.dll'"));
         assert!(script.contains(&format!("'{KEY_MARK}' }}")), "the mark comes only after the writes");
+        assert!(script.contains(r"-like 'PCI\VEN_8086&DEV_CFFE*'"), "{script}");
+        assert!(script.contains(
+            r"-Name 'LevelZeroDriverPath' -PropertyType String -Value 'C:\Windows\System32\HostDriverStore\FileRepository\iigd_dch.inf_amd64_gpupv\ze_intel_gpu64.dll'"
+        ));
     }
 }
