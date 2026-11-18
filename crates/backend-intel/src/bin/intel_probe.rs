@@ -34,6 +34,27 @@ fn main() -> ExitCode {
             address = Some(argument);
         }
     }
+    // A lab run stands in for its card with a recording, and the probe tells what it says, as the
+    // daemon uses it: see `recording`.
+    if let Some(file) = recording::recorded_card_file() {
+        let card = match std::fs::read_to_string(&file)
+            .map_err(|error| error.to_string())
+            .and_then(|text| recording::read(&text).map_err(|bad| bad.to_string()))
+        {
+            Ok(card) => card,
+            Err(why) => {
+                eprintln!("The recorded card in {} can't be read: {why}", file.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        println!(
+            "recorded card   {} (no card is read: {})",
+            file.display(),
+            recording::RECORDED_CARD_VARIABLE
+        );
+        print_card(&file, &card);
+        return ExitCode::SUCCESS;
+    }
     let Some(node) = ioctl::intel_render_node(address.as_deref()) else {
         eprintln!("No Intel card on the {XE_DRIVER} driver was found.");
         for (name, driver) in ioctl::intel_nodes_in(Path::new("/sys/class/drm")) {
