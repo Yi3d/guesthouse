@@ -48,7 +48,7 @@ use protocol::allocation::Resource;
 use protocol::command_header::Header;
 use protocol::context::Context;
 use protocol::escape::Escape;
-use protocol::record::{GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads};
+use protocol::record::{EngineMaxima, GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads};
 use protocol::{gaps, guest_driver, record, shape};
 use std::time::Instant;
 use traffic::{QueryOutcome, Traffic};
@@ -100,7 +100,7 @@ impl IntelBackend {
         let bar_size = if reachable > 0 { reachable } else { video_memory };
         let facts = AdapterFacts {
             card: PciCard { vendor: INTEL_VENDOR, device: card.pci.device, revision: card.pci.revision },
-            name: format!("Intel GPU {:#06x}", card.pci.device),
+            name: adapter_name(&card),
             video_memory,
             gtt_memory: 0,
             bar_size,
@@ -211,6 +211,11 @@ fn recorded_card(file: &std::path::Path, address: Option<&str>) -> Result<CardFa
     Ok(card)
 }
 
+/// The adapter's name, as the guest's programs see it in the adapter's description and the record.
+fn adapter_name(card: &CardFacts) -> String {
+    format!("Intel GPU {:#06x}", card.pci.device)
+}
+
 /// What the record is built from: the card where it can say, and the generation where it can't.
 fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> RecordFacts {
     let ip = |gt: Option<&Gt>| {
@@ -259,8 +264,20 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
                 pixel: config(hwconfig::TOTAL_PS_THREADS),
                 vertex_pocs: config(hwconfig::TOTAL_VS_THREADS_POCS),
             },
+            // The hwconfig's most, or what the xe driver lists where the table doesn't say.
+            engine_maxima: {
+                let most = |key, class| card.hwconfig.value(key).unwrap_or_else(|| card.engines_of(class));
+                EngineMaxima {
+                    render: most(hwconfig::MAX_RCS, Engine::RENDER),
+                    compute: most(hwconfig::MAX_CCS, Engine::COMPUTE),
+                    video: most(hwconfig::MAX_VCS, Engine::VIDEO_DECODE),
+                    video_enhance: most(hwconfig::MAX_VECS, Engine::VIDEO_ENHANCE),
+                    copy: most(hwconfig::MAX_COPY_CS, Engine::COPY),
+                }
+            },
         },
         timestamp_hz: card.main_gt().map_or(0, |gt| gt.reference_clock),
+        adapter_name: adapter_name(card),
         render_mhz: (card.frequencies.lowest.unwrap_or(0), card.frequencies.highest.unwrap_or(0)),
         memory: Memory { dedicated: card.card_memory(), system_shared: shared, system_video: 0 },
         local_memory: card.config.has_vram(),

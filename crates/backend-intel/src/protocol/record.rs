@@ -34,6 +34,8 @@ const LINKED_ADAPTERS: u32 = 1;
 pub const DEVICE_KEY: &str = r"SOFTWARE\Guesthouse\Intel adapter";
 /// The values the drivers look for in [`DEVICE_KEY`], as text.
 pub const DEVICE_KEY_VALUES: [(&str, &str); 1] = [("OpenCLDriverName", "igdrcl64.dll")];
+/// The bytes of the adapter's name field, its ending zero included.
+const ADAPTER_NAME_SIZE: usize = 250;
 /// How the kernel driver's path starts, which Intel's drivers cut off before opening the key.
 const MACHINE_ROOT: &str = r"\REGISTRY\MACHINE\";
 
@@ -61,6 +63,9 @@ mod at {
     pub const DEDICATED_VIDEO_MEMORY: usize = 0x9F4;
     pub const SYSTEM_SHARED_MEMORY: usize = 0x9FC;
     pub const SYSTEM_VIDEO_MEMORY: usize = 0xA04;
+    /// A string of [`ADAPTER_NAME_SIZE`] bytes, ending in zero. Intel's Vulkan driver copies it into
+    /// its physical device's name.
+    pub const ADAPTER_NAME: usize = 0xA1C;
     /// GT_SYSTEM_INFO.
     pub const EU_COUNT: usize = 0xB34;
     pub const THREAD_COUNT: usize = 0xB38;
@@ -70,6 +75,11 @@ mod at {
     /// TotalVsThreads, then the hull, domain, geometry and pixel (windower range) stages' and
     /// TotalVsThreads_Pocs, a dword each.
     pub const STAGE_THREADS: usize = 0xB78;
+    /// The most render, compute, video, video-enhancement and copy engines, a dword each. Only the
+    /// fourth has an open name, MaxVECS. The order is the hwconfig keys' for the same five, which
+    /// puts MaxVECS fourth too, and Intel's Vulkan driver reads the first for its graphics queues
+    /// and the last for its transfer queues.
+    pub const ENGINE_MAXIMA: usize = 0x21A0;
     pub const MAX_EU_PER_SUBSLICE: usize = 0xB94;
     pub const MAX_SLICES: usize = 0xB98;
     pub const MAX_SUBSLICES: usize = 0xB9C;
@@ -170,6 +180,19 @@ pub struct GtSystem {
     pub threads_per_eu: u32,
     /// The threads each 3D stage may have across the GPU, as the card's hwconfig gives them.
     pub stage_threads: StageThreads,
+    pub engine_maxima: EngineMaxima,
+}
+
+/// The most engines of each kind the card can have, near GT_SYSTEM_INFO's end. Intel's Vulkan driver
+/// counts its graphics queues from the render count, and with it at zero offered compute and video
+/// queues alone. It reads the copy count for its transfer queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EngineMaxima {
+    pub render: u32,
+    pub compute: u32,
+    pub video: u32,
+    pub video_enhance: u32,
+    pub copy: u32,
 }
 
 /// GT_SYSTEM_INFO's thread counts for the 3D stages. A 3D driver sizes its pipeline from these, and
@@ -200,6 +223,8 @@ pub struct RecordFacts {
     pub gt: GtSystem,
     /// The GPU timestamp's frequency, in Hz.
     pub timestamp_hz: u32,
+    /// The adapter's name, which Intel's Vulkan driver copies for its device name.
+    pub adapter_name: String,
     /// The render clock's least and most, in MHz.
     pub render_mhz: (u32, u32),
     pub memory: Memory,
@@ -237,6 +262,9 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     let path = format!("{MACHINE_ROOT}{DEVICE_KEY}");
     record[at::DEVICE_REGISTRY_PATH..at::DEVICE_REGISTRY_PATH + path.len()].copy_from_slice(path.as_bytes());
     put_dword(&mut record, at::TIMESTAMP_FREQUENCY, facts.timestamp_hz);
+    let name = facts.adapter_name.as_bytes();
+    let name = &name[..name.len().min(ADAPTER_NAME_SIZE - 1)];
+    record[at::ADAPTER_NAME..at::ADAPTER_NAME + name.len()].copy_from_slice(name);
     put_dword(&mut record, at::GT_TIMESTAMP_FREQUENCY, facts.timestamp_hz);
     put_dword(&mut record, at::MIN_RENDER_FREQUENCY, facts.render_mhz.0);
     put_dword(&mut record, at::MAX_RENDER_FREQUENCY, facts.render_mhz.1);
@@ -260,6 +288,12 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
         (at::THREADS_PER_EU, gt.threads_per_eu),
     ] {
         put_dword(&mut record, field, value);
+    }
+    let most = &gt.engine_maxima;
+    for (at, value) in
+        [most.render, most.compute, most.video, most.video_enhance, most.copy].into_iter().enumerate()
+    {
+        put_dword(&mut record, at::ENGINE_MAXIMA + at * 4, value);
     }
     let stages = &gt.stage_threads;
     for (at, value) in
@@ -430,9 +464,11 @@ pub(crate) mod tests {
                 thread_count: 512,
                 dual_subslice_count: 8,
                 threads_per_eu: 8,
+                engine_maxima: EngineMaxima { render: 1, compute: 2, video: 2, video_enhance: 2, copy: 1 },
                 ..GtSystem::default()
             },
             timestamp_hz: 19_200_000,
+            adapter_name: "Intel GPU 0x64a0".to_owned(),
             render_mhz: (400, 2050),
             memory: Memory { system_shared: 16 << 30, ..Memory::default() },
             local_memory: false,
@@ -583,6 +619,11 @@ pub(crate) mod tests {
         assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY + 4), Some(0), "a 32-bit field");
         assert_eq!(dword(&record, at::GT_TIMESTAMP_FREQUENCY), Some(19_200_000));
         assert_eq!(dword(&record, at::THREADS_PER_EU), Some(8));
+        let name = &record[at::ADAPTER_NAME..at::ADAPTER_NAME + ADAPTER_NAME_SIZE];
+        assert_eq!(&name[..17], b"Intel GPU 0x64a0\0");
+        assert_eq!(dword(&record, at::ENGINE_MAXIMA), Some(1), "render");
+        assert_eq!(dword(&record, 0x21AC), Some(2), "MaxVECS, where compute-runtime's tokens put it");
+        assert_eq!(dword(&record, at::ENGINE_MAXIMA + 16), Some(1), "copy");
         assert_eq!(dword(&record, at::MIN_RENDER_FREQUENCY), Some(400));
         assert_eq!(dword(&record, at::MAX_RENDER_FREQUENCY), Some(2050));
         assert_eq!(dword(&record, at::NUMBER_OF_EUS), Some(64));

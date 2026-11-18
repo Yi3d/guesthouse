@@ -17,6 +17,12 @@ pub const TOTAL_HS_THREADS: u32 = 18;
 pub const TOTAL_DS_THREADS: u32 = 19;
 pub const TOTAL_VS_THREADS_POCS: u32 = 20;
 pub const TOTAL_PS_THREADS: u32 = 21;
+/// The most render, compute, video decode, video enhancement and copy engines, in that order.
+pub const MAX_RCS: u32 = 23;
+pub const MAX_CCS: u32 = 24;
+pub const MAX_VCS: u32 = 25;
+pub const MAX_VECS: u32 = 26;
+pub const MAX_COPY_CS: u32 = 27;
 /// A card whose table has no dual subslice keys gives the same two numbers under these, as
 /// subslices. On Xe a subslice and a dual subslice are both the Xe core.
 pub const MAX_SUBSLICE: u32 = 70;
