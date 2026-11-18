@@ -71,7 +71,8 @@ struct Bytes {
     file: OwnedFd,
     start: *mut u8,
     length: usize,
-    /// Counts up as buffers are made, so the newest can be told apart.
+    /// Counts up as buffers are made, so the lab's card can tell the newest apart.
+    #[cfg_attr(not(feature = "lab-fake-card"), allow(dead_code))]
     serial: u64,
 }
 
