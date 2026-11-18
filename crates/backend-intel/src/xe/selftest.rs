@@ -541,6 +541,20 @@ impl<'a> Run<'a> {
             if !self.wait_done(RUN_PATIENCE)? {
                 return Err(format!("the batch had not finished after {RUN_PATIENCE:?}"));
             }
+            // The wait ends when the job does, faulted or not, so a ban is asked about first: a
+            // faulted job then reads as one, not as a fence that wasn't written.
+            match self.xe.queue_banned(queue) {
+                Ok(false) => {}
+                Ok(true) => {
+                    let name =
+                        Engine { class: engine.class, instance: engine.instance, gt: engine.gt }.class_name();
+                    return Err(format!(
+                        "xe banned the queue on {name}{}: its job faulted or hung",
+                        engine.instance
+                    ));
+                }
+                Err(error) => return Err(failed("asking whether the queue is banned", &error)),
+            }
             let host = self.host.as_ref().ok_or("no host pages")?.map();
             let fence = read_qword(&host, FENCE_OFFSET);
             if fence != Some(fence_value) {
@@ -563,11 +577,6 @@ impl<'a> Run<'a> {
                         found.unwrap_or(0)
                     ));
                 }
-            }
-            match self.xe.queue_banned(queue) {
-                Ok(false) => {}
-                Ok(true) => return Err("xe banned the queue".into()),
-                Err(error) => return Err(failed("asking whether the queue is banned", &error)),
             }
             self.close_queue(queue);
             Ok(format!("{} stores and the fence at {fence_at:#x}", stores.len()))
@@ -932,6 +941,19 @@ mod tests {
             "all but the video engine and copy"
         );
         assert_eq!(summary.failed_that_work_does_without(), ["engine vcs0", "copy"]);
+    }
+
+    #[test]
+    fn a_job_that_faulted_is_reported_as_banned_with_its_engine_and_not_as_an_unwritten_fence() {
+        let xe = FakeXe::default();
+        xe.fault_runs();
+        let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        for engine in ["rcs0", "bcs0", "ccs0"] {
+            let line = said.lines().find(|line| line.contains(&format!("FAIL engine {engine}:"))).unwrap();
+            assert!(line.contains(&format!("xe banned the queue on {engine}: its job faulted")), "{line}");
+            assert!(!line.contains("did not write the fence"), "{line}");
+        }
+        assert!(summary.failed_that_work_needs().contains(&"engine ccs0".to_owned()), "the step still fails");
     }
 
     #[test]

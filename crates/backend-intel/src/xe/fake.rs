@@ -232,6 +232,8 @@ struct State {
     fail_at: HashMap<usize, i32>,
     fail_named: HashMap<&'static str, i32>,
     hold_runs: bool,
+    /// Every run faults at its batch: see [`FakeXe::fault_runs`].
+    fault_runs: bool,
     held: Vec<Held>,
     faults: Vec<u64>,
     clock_reads: u64,
@@ -374,6 +376,7 @@ impl State {
         let Some(queue) = self.queues.get(&run.queue) else { return };
         let vm = self.vms.get(&queue.vm);
         let mut outcome = match vm {
+            Some(_) if self.fault_runs => Outcome::Fault(run.batch),
             Some(vm) if !queue.banned => Self::run(vm, run.batch),
             _ => Outcome::Hang,
         };
@@ -526,6 +529,12 @@ impl FakeXe {
     /// [`FakeXe::release_runs`].
     pub fn hold_runs(&self) {
         self.state().hold_runs = true;
+    }
+
+    /// Has every run from now on fault at its batch, unrun, as a job a card gives up on: the queue
+    /// banned, the timeline signalled all the same, the fence unwritten.
+    pub fn fault_runs(&self) {
+        self.state().fault_runs = true;
     }
 
     pub fn release_runs(&self) {
