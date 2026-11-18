@@ -133,7 +133,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let one = [handle];
         let queues = self.context_queues.get(&handle).map_or(&one[..], Vec::as_slice);
         queues.iter().filter_map(|queue| self.queues.get(queue)).all(|queue| {
-            let live = queue.last_fence.is_some() && !queue.failed;
+            let live = queue.last_fence.is_some() && !queue.failed && !queue.stays;
             !live || visit(queue)
         })
     }
@@ -396,7 +396,18 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         match self.backend.ring_doorbell(queue, doorbell) {
             Ok(Doorbell::Rung) => {
                 self.timings.mark(Stage::Rung);
+                if let Some(record) = self.queues.get_mut(&queue) {
+                    record.stays = false;
+                }
                 self.pending.push(Pending::Watch { queue, fence, value, rung: Instant::now() });
+            }
+            // Work that runs until the guest ends it reaches its fence only then. A watch would
+            // call that a hang, and take a healthy program off the GPU.
+            Ok(Doorbell::RungToStay) => {
+                self.timings.mark(Stage::Rung);
+                if let Some(record) = self.queues.get_mut(&queue) {
+                    record.stays = true;
+                }
             }
             Ok(Doorbell::NotYet) => return false,
             Err(error) => {

@@ -319,6 +319,9 @@ pub enum WorkStart {
 pub enum Doorbell {
     /// The work is on its way to the GPU.
     Rung,
+    /// The work is on the GPU and runs until the guest ends it, as a ring fed from user mode does.
+    /// Its fence comes only then, so it is neither waited for nor a sign of a hang.
+    RungToStay,
     /// The driver refused it for now. Nothing changed, and the same doorbell should be rung again.
     NotYet,
 }

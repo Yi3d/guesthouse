@@ -215,15 +215,29 @@ impl CardWork {
                         made
                     }
                 };
-                // The ring writes the queue's fence itself as it goes. A fence written by xe when
-                // the ring at last stops would bring it back to this old value, so none is asked.
+                // The queue's fence is due when the ring ends, which is when the guest's driver
+                // stops it and waits for this value. The ring itself writes only a fence of the
+                // driver's own. So the card is asked to write this one after the batch, if it is
+                // mapped and aligned as xe wants. A long-running VM signals nothing else.
+                let held = self.spaces.get(&space).ok_or(Refused::SpaceFailed)?;
+                let fence_mapped = work.fence_gpu_address.is_multiple_of(plan::FENCE_ALIGNMENT)
+                    && held.holding(work.fence_gpu_address, plan::FENCE_ALIGNMENT).is_some();
+                let syncs = if fence_mapped {
+                    vec![Sync::UserFence { address: work.fence_gpu_address, value: work.fence_value }]
+                } else {
+                    log::warn!(
+                        "intel work: queue {:#x}'s fence is not mapped, so nothing will say when its ring ends",
+                        work.queue
+                    );
+                    Vec::new()
+                };
                 let queue = self.queues.get_mut(&work.queue).expect("made above");
                 queue.ring_fence = Some((work.fence, work.fence_value));
                 Ok(Some(Prepared {
                     queue: work.queue,
                     xe_queue,
                     batch: commands.address,
-                    syncs: Vec::new(),
+                    syncs,
                     run: None,
                     ring_run: Some(run_of(0, None)),
                 }))
@@ -356,6 +370,7 @@ impl CardWork {
                     if let Some(run) = prepared.ring_run {
                         queue.ring_run = Some(stamped(run));
                         queue.ring_banned_seen = false;
+                        return Ok(Doorbell::RungToStay);
                     }
                 }
                 Ok(Doorbell::Rung)
@@ -729,14 +744,19 @@ mod tests {
     }
 
     #[test]
-    fn a_ring_runs_on_a_long_running_queue_with_no_fence_and_no_signal() {
+    fn a_ring_runs_on_a_long_running_queue_and_its_fence_is_for_when_it_ends() {
         let mut rig = Rig::new(Stage::Everything);
         ring(&mut rig);
         let work = rig.submission(1, 3);
         let WorkStart::Started { doorbell, .. } = rig.start(&work) else { panic!() };
-        assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::Rung);
+        assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::RungToStay);
         let Some(Call::Exec { queue, syncs, .. }) = rig.xe.calls_named("exec").pop() else { panic!() };
-        assert!(syncs.is_empty(), "the ring writes the fence itself: {syncs:?}");
+        assert_eq!(
+            syncs,
+            [Sync::UserFence { address: rig.fence_gpu_address(), value: 3 }],
+            "the card writes the fence after the batch, and nothing is signalled"
+        );
+        assert_eq!(rig.fence(), 0, "a parked ring has not reached it");
         let Some(Call::CreateQueue { vm, .. }) = rig.xe.calls_named("create_queue").pop() else { panic!() };
         assert_eq!(rig.xe.vm_flags(vm), Some(abi::VM_LONG_RUNNING));
         assert_eq!(rig.data_qword(0x40), 0xBEEF, "the work before the wait ran");
@@ -747,6 +767,18 @@ mod tests {
         rig.poll_later();
         assert_eq!(rig.host.written, [(rig.fence_guest_address(), 3)]);
         assert!(rig.work.space_failed(rig.space));
+    }
+
+    #[test]
+    fn a_ring_whose_fence_is_not_mapped_runs_with_none() {
+        let mut rig = Rig::new(Stage::Everything);
+        ring(&mut rig);
+        let mut work = rig.submission(1, 3);
+        work.fence_gpu_address = 0x8_0000_0000;
+        let WorkStart::Started { doorbell, .. } = rig.start(&work) else { panic!() };
+        assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::RungToStay);
+        let Some(Call::Exec { syncs, .. }) = rig.xe.calls_named("exec").pop() else { panic!() };
+        assert!(syncs.is_empty(), "{syncs:?}");
     }
 
     #[test]

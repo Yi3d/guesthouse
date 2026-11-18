@@ -18,8 +18,9 @@ pub const RING_VM_FLAGS: u32 = abi::VM_LONG_RUNNING;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rings {
     /// It runs on a queue in a long-running address space of the same process, which xe gives no
-    /// job timeout. The ring writes the queue's fence itself, so the card is asked for none, and a
-    /// lost ring is noticed by asking xe whether its queue was banned.
+    /// job timeout. The card is asked to write the queue's fence after the batch, which is when the
+    /// guest's driver has stopped the ring, and a lost ring is noticed by asking xe whether its
+    /// queue was banned.
     LongRunning,
     /// It is refused, and its queue stops. With this, the guest's driver must be kept from making
     /// rings some other way, such as by not offering it the engines it makes them on.

@@ -75,6 +75,8 @@ pub struct Queue {
     pub last_fence: Option<u64>,
     /// The GPU stopped answering on this queue, so nothing waits for it any more.
     pub failed: bool,
+    /// Its last work runs until the guest ends it, so nothing waits for it either.
+    pub stays: bool,
     /// What the GPU has yet to finish, as (fence value, work), oldest first.
     pub backlog: VecDeque<(u64, u32)>,
     /// All the work in `backlog`.
@@ -90,6 +92,7 @@ impl Queue {
             context,
             last_fence: None,
             failed: false,
+            stays: false,
             backlog: VecDeque::new(),
             unfinished: 0,
         }

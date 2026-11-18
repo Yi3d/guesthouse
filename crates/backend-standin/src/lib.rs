@@ -104,6 +104,8 @@ pub struct StandIn {
     pub busy_starts: u32,
     /// How many doorbells to come are refused for now, as a driver refusing a submission call.
     pub refused_rings: u32,
+    /// Work rung in runs until the guest ends it.
+    pub work_stays: bool,
     /// The commands the last submission named, as the core passed them on.
     pub last_commands: Option<CommandBuffer>,
     /// Stands in for a backend whose display driver slots may lie in the guest's own pages.
@@ -184,6 +186,7 @@ impl StandIn {
             work_patience: None,
             busy_starts: 0,
             refused_rings: 0,
+            work_stays: false,
             last_commands: None,
             slots_in_guest_pages: false,
         }
@@ -506,7 +509,7 @@ impl Backend for StandIn {
             return Ok(Doorbell::NotYet);
         }
         self.doorbells.push((queue, doorbell));
-        Ok(Doorbell::Rung)
+        Ok(if self.work_stays { Doorbell::RungToStay } else { Doorbell::Rung })
     }
 
     fn close_queue(&mut self, queue: u32) {
