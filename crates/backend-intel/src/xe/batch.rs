@@ -194,19 +194,40 @@ pub fn ending(tail: &[u8]) -> Ending {
     if let Some(at) = chain {
         return Ending::Chains(u64::from(dwords[at + 2]) << 32 | u64::from(dwords[at + 1]));
     }
-    // The same for a wait, whose data and address dwords can read as anything.
+    let last = dwords.iter().rposition(|&dword| !is(dword, NOOP));
+    // An end instruction ends the batch, unless it sits where a wait would keep its data or its
+    // address: those two dwords can hold anything, and the dwords after them can't hold this.
+    if let Some(last) = last
+        && dwords[last] == BATCH_END
+    {
+        let in_a_wait = WAIT_OPERANDS_THAT_CAN_BE_ANYTHING
+            .into_iter()
+            .any(|back| last.checked_sub(back).is_some_and(|at| is_wait(dwords[at])));
+        if !in_a_wait {
+            return Ending::Ends;
+        }
+    }
+    // A wait with nothing but padding after its five dwords: a ring, parked.
     let parks = dwords.len().checked_sub(SEMAPHORE_WAIT_DWORDS).is_some_and(|last_start| {
-        (0..=last_start)
-            .rev()
-            .any(|at| is(dwords[at], SEMAPHORE_WAIT) && padding_from(at + SEMAPHORE_WAIT_DWORDS))
+        (0..=last_start).rev().any(|at| is_wait(dwords[at]) && padding_from(at + SEMAPHORE_WAIT_DWORDS))
     });
     if parks {
         return Ending::Parks;
     }
-    match dwords.iter().rfind(|&&dword| !is(dword, NOOP)) {
-        Some(&last) if is(last, BATCH_END) => Ending::Ends,
+    match last {
+        Some(last) if is(dwords[last], BATCH_END) => Ending::Ends,
         _ => Ending::RunsOn,
     }
+}
+
+/// How far after a wait's header its data and its address's low half lie.
+const WAIT_OPERANDS_THAT_CAN_BE_ANYTHING: [usize; 2] = [1, 2];
+
+/// Whether a dword is a semaphore wait's header: the opcode, and the length the instruction has
+/// on these cards, whatever its mode bits say.
+fn is_wait(dword: u32) -> bool {
+    const LENGTH_MASK: u32 = 0xFF;
+    is(dword, SEMAPHORE_WAIT) && dword & LENGTH_MASK == SEMAPHORE_WAIT_HEADER & LENGTH_MASK
 }
 
 /// How many bytes of a batch's end [`ending`] wants: room for a chain and some padding after it.
@@ -308,6 +329,30 @@ mod tests {
         ends.push(BATCH_END);
         assert_eq!(ending(&tail(&ends)), Ending::Ends);
         assert_eq!(ending(&tail(&wait[..4])), Ending::RunsOn, "a wait cut short");
+    }
+
+    #[test]
+    fn a_dword_that_reads_as_a_wait_before_an_end_does_not_make_a_batch_a_ring() {
+        // An address or a value that happens to have a wait's opcode and length, with the end
+        // where a wait's last two dwords would be: those can't hold an end instruction.
+        let looks_like_a_wait = SEMAPHORE_WAIT_HEADER | 0x2000;
+        assert_eq!(ending(&tail(&[looks_like_a_wait, 1, 2, 3, BATCH_END])), Ending::Ends);
+        assert_eq!(ending(&tail(&[looks_like_a_wait, 1, 2, BATCH_END])), Ending::Ends);
+        assert_eq!(ending(&tail(&[looks_like_a_wait, 1, 2, BATCH_END, NOOP, NOOP])), Ending::Ends);
+        assert_eq!(ending(&tail(&[looks_like_a_wait, 1, 2, 3, BATCH_END, NOOP])), Ending::Ends);
+        // The opcode alone, with another length, is no wait at all.
+        assert_eq!(ending(&tail(&[0x0E00_2000, BATCH_END, NOOP, NOOP, NOOP])), Ending::Ends);
+        assert_eq!(ending(&tail(&[0x0E00_2000, 1, 2, 3, 4])), Ending::RunsOn);
+    }
+
+    #[test]
+    fn a_ring_whose_semaphore_lies_at_an_address_that_reads_as_an_end_is_still_a_ring() {
+        // The semaphore at GPU address 0x0500_0000, which as a dword is the end instruction.
+        let wait = [SEMAPHORE_WAIT_HEADER | 1 << 15 | 1 << 12, 1, BATCH_END, 0, 0];
+        assert_eq!(ending(&tail(&wait)), Ending::Parks);
+        // And waiting for the value 0x0500_0000.
+        let wait = [SEMAPHORE_WAIT_HEADER | 1 << 15 | 1 << 12, BATCH_END, 0, 0, 0];
+        assert_eq!(ending(&tail(&wait)), Ending::Parks);
     }
 
     #[test]
