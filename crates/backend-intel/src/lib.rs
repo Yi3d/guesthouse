@@ -862,8 +862,7 @@ mod tests {
 
     #[test]
     fn a_failed_step_work_needs_keeps_work_off_the_card_and_is_named() {
-        for step in ["vm", "buffers", "userptr", "binds", "copy", "engine rcs0", "engine ccs0", "engine bcs0"]
-        {
+        for step in ["vm", "buffers", "userptr", "binds", "engine rcs0", "engine ccs0", "engine bcs0"] {
             let verdict = self_test_verdict(&summary_with(&["clock", step]));
             assert_eq!(verdict, Err(Fallback::SelfTestFailed(vec![step.to_owned()])), "{step}");
         }
@@ -872,12 +871,12 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_video_engine_clock_or_cleanup_lets_work_run() {
-        for step in ["engine vcs0", "engine vecs0", "clock", "cleanup"] {
+    fn a_failed_video_engine_copy_clock_or_cleanup_lets_work_run() {
+        for step in ["engine vcs0", "engine vecs0", "copy", "clock", "cleanup"] {
             assert_eq!(self_test_verdict(&summary_with(&[step])), Ok(()), "{step}");
         }
         assert_eq!(
-            self_test_verdict(&summary_with(&["engine vcs0", "engine vecs0", "clock", "cleanup"])),
+            self_test_verdict(&summary_with(&["engine vcs0", "engine vecs0", "copy", "clock", "cleanup"])),
             Ok(())
         );
         assert_eq!(self_test_verdict(&summary_with(&[])), Ok(()));

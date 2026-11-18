@@ -91,10 +91,11 @@ impl Summary {
 /// serve the guest's video work, which can fail alone.
 const ENGINES_WORK_NEEDS: [&str; 3] = ["engine rcs", "engine ccs", "engine bcs"];
 
-/// The other steps the guest's work needs: an address space, buffers, host pages, binds, and a
-/// copy on the copy engine. The clock reading and the cleanup aren't among them, nor the break
-/// steps.
-const STEPS_WORK_NEEDS: [&str; 5] = ["vm", "buffers", "userptr", "binds", "copy"];
+/// The other steps the guest's work needs: an address space, buffers, host pages and binds. The
+/// clock reading and the cleanup aren't among them, nor the break steps, nor `copy`: nothing on the
+/// work path sends its hand-written copy instruction (frame copies are the CPU's), so its failure
+/// is a warning only.
+const STEPS_WORK_NEEDS: [&str; 4] = ["vm", "buffers", "userptr", "binds"];
 
 /// Whether a failure of `step` keeps the guest's work off the card.
 pub fn work_needs(step: &str) -> bool {
@@ -925,20 +926,30 @@ mod tests {
         in_order.sort_by_key(|step| said.find(&format!("FAIL {step}:")));
         assert_eq!(summary.failed_steps, in_order, "{said}");
         let needed = summary.failed_that_work_needs();
-        assert_eq!(needed.len(), 4, "all but the video engine: {needed:?}");
-        assert!(!needed.contains(&"engine vcs0".to_owned()));
-        assert_eq!(summary.failed_that_work_does_without(), ["engine vcs0"]);
+        assert_eq!(
+            needed,
+            ["engine rcs0", "engine bcs0", "engine ccs0"],
+            "all but the video engine and copy"
+        );
+        assert_eq!(summary.failed_that_work_does_without(), ["engine vcs0", "copy"]);
     }
 
     #[test]
     fn work_needs_the_memory_and_the_render_compute_and_copy_engines_only() {
-        for step in ["vm", "buffers", "userptr", "binds", "copy", "engine rcs0", "engine ccs0", "engine bcs0"]
-        {
+        for step in ["vm", "buffers", "userptr", "binds", "engine rcs0", "engine ccs0", "engine bcs0"] {
             assert!(work_needs(step), "{step}");
         }
-        for step in
-            ["open", "engine vcs0", "engine vcs1", "engine vecs0", "clock", "cleanup", "fault", "hang"]
-        {
+        for step in [
+            "open",
+            "engine vcs0",
+            "engine vcs1",
+            "engine vecs0",
+            "copy",
+            "clock",
+            "cleanup",
+            "fault",
+            "hang",
+        ] {
             assert!(!work_needs(step), "{step}");
         }
     }

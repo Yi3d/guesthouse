@@ -73,7 +73,7 @@ When the hardware desktop fails, the app keeps that start's daemon log as `intel
 
 From this build the daemon can run the guest's work on the card through `xe`: real buffers, an address space for each guest program, and a queue behind each of the guest's. It has only run against a stand-in for the driver, never on a real card, so expect it to fail in ways nobody has seen.
 
-At each start the daemon runs the short self-test `intel-probe --run` runs. If a step the guest's work needs fails (the address space, buffers, host pages, binds, the render, compute or copy engine, or the copy), or the card can't be opened for work, the machine starts as before with nothing run on the card. A failed video engine step, clock reading or cleanup is a warning in `daemon.out`, and work runs all the same. A line in `daemon.out` starting with `intel stage=` says which it is and, if nothing runs, what refused.
+At each start the daemon runs the short self-test `intel-probe --run` runs. If a step the guest's work needs fails (the address space, buffers, host pages, binds, the render, compute or copy engine), or the card can't be opened for work, the machine starts as before with nothing run on the card. A failed video engine step, copy instruction, clock reading or cleanup is a warning in `daemon.out`, and work runs all the same. A line in `daemon.out` starting with `intel stage=` says which it is and, if nothing runs, what refused.
 
 `GUESTHOUSE_INTEL_RUN_ON_CARD=0` in the environment the app or `guesthouse-vm` starts the machine from keeps everything off the card. The daemon and the app both read it there, so set it where the machine is started. `GUESTHOUSE_INTEL_RUN_ON_CARD=compute` runs OpenCL work only. A recorded card never runs anything.
 
