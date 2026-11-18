@@ -35,11 +35,10 @@ pub const COMMAND_LENGTH_UNIT: u64 = 1;
 /// offers, so the qword stays as the guest sent it.
 pub const WRITES_QUEUE_TOKEN: bool = false;
 
-/// Register state Intel's Windows kernel driver sets for every context that xe's own context image
-/// may not have. Nothing is done about any of it: a wrong picture or a slow kernel on a real card
-/// is to be read against this list first.
-pub const MAY_DIFFER_FROM_WINDOWS: [&str; 4] = [
-    "register 0x5584 bit 5, set for every context on Windows and unnamed in xe",
+/// Context state a Windows guest's batches may expect that xe's own context image may not have.
+/// Nothing is done about any of it: a wrong picture or a slow kernel on a real card is to be read
+/// against this list first.
+pub const MAY_DIFFER_FROM_WINDOWS: [&str; 3] = [
     "the Windows driver's workarounds for this stepping, which xe may not match",
     "the tiled-resource translation table, which xe never turns on; the record leaves its two feature bits clear",
     "the cache-policy table: the guest's indexes mean what Windows programs, and xe programs its own",
