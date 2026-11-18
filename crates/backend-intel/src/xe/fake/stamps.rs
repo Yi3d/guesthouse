@@ -30,8 +30,11 @@ const SEARCHES: u32 = 16;
 pub(super) struct Stamps {
     /// Searches left, by VM.
     searches: HashMap<u32, u32>,
-    /// Generations already copied, by VM.
-    copied: HashSet<(u32, u32)>,
+    /// Stamps already copied, by VM and where they were. A driver that starts over numbers its
+    /// generations from one again, so a generation alone can't say a stamp is new.
+    copied: HashSet<(u32, u64, [u8; STAMP_BYTES])>,
+    /// Buffers stamped here, by their serial. Their stamps are copies, never the guest's own.
+    stamped: HashSet<u64>,
 }
 
 /// Whether a buffer is big enough to be a slot.
@@ -59,9 +62,9 @@ impl Stamps {
         let Some(left) = self.searches.get_mut(&vm_id).filter(|left| **left > 0) else { return };
         *left -= 1;
         let last = *left == 0;
-        let found: Vec<Found> = stamps_in(vm)
+        let found: Vec<Found> = stamps_in(vm, &self.stamped)
             .into_iter()
-            .filter(|stamp| !self.copied.contains(&(vm_id, stamp.generation)))
+            .filter(|stamp| !self.copied.contains(&(vm_id, stamp.at, stamp.bytes)))
             .collect();
         let Some(generation) = found.iter().map(|stamp| stamp.generation).max() else {
             if last {
@@ -97,7 +100,8 @@ impl Stamps {
             // VM holds it.
             unsafe { std::ptr::copy_nonoverlapping(stamp.bytes.as_ptr(), target.start, STAMP_BYTES) };
         }
-        self.copied.insert((vm_id, generation));
+        self.stamped.extend(targets.iter().map(|target| target.serial));
+        self.copied.extend(slots.values().map(|stamp| (vm_id, stamp.at, stamp.bytes)));
         // Until the VM is given large buffers again, nothing more is looked for.
         self.searches.remove(&vm_id);
         let first = slots.values().next().map_or(0, |stamp| stamp.at);
@@ -111,11 +115,12 @@ impl Stamps {
     }
 }
 
-/// Every stamp in the VM's memory, at any 4-byte boundary.
-fn stamps_in(vm: &Vm) -> Vec<Found> {
+/// Every stamp in the VM's memory, at any 4-byte boundary, but for the buffers stamped here.
+fn stamps_in(vm: &Vm, stamped: &HashSet<u64>) -> Vec<Found> {
     let mut found = Vec::new();
     for (&start, bound) in &vm.bound {
-        if bound.length > LARGEST_SEARCHED || (bound.length as usize) < STAMP_BYTES {
+        let copy = bound.buffer.as_ref().is_some_and(|bytes| stamped.contains(&bytes.serial));
+        if copy || bound.length > LARGEST_SEARCHED || (bound.length as usize) < STAMP_BYTES {
             continue;
         }
         // SAFETY: a binding's host bytes stay mapped while the VM holds it.
@@ -229,5 +234,40 @@ mod tests {
             assert_eq!(start_of(&mut xe, handle, 0x23_0000), None);
         }
         let _ = batch;
+    }
+
+    #[test]
+    fn a_driver_that_starts_over_at_generation_one_gets_its_new_slots_stamped() {
+        const BIGGER: u64 = 0x7f_0000;
+        let mut xe = FakeXe::lab();
+        xe.stop_running();
+        let vm = xe.create_vm(0).unwrap();
+        let old: Vec<u32> = (0..2).map(|i| buffer(&mut xe, vm, SLOT, 0x2000_0000 + i * 0x100_0000)).collect();
+        let upload = buffer(&mut xe, vm, 0x1000, 0x3000_0000);
+        let queue = xe.create_queue(vm, abi::EngineInstance { class: 0, instance: 0, gt: 0 }).unwrap();
+        let mut map = xe.map_buffer(upload, 0x1000).unwrap();
+        for slot in 0..2 {
+            map.write(
+                0x40 + 0x10 * slot,
+                &as_the_driver_sends::stamp(Stamp { generation: 1, slot: slot as u32 }),
+            );
+        }
+        xe.exec(queue, 0x3000_0000, &[]).unwrap();
+        assert_eq!(start_of(&mut xe, old[1], SLOT), Some(Stamp { generation: 1, slot: 1 }));
+
+        let new: Vec<u32> =
+            (0..2).map(|i| buffer(&mut xe, vm, BIGGER, 0x4000_0000 + i * 0x100_0000)).collect();
+        xe.exec(queue, 0x3000_0000, &[]).unwrap();
+        assert_eq!(start_of(&mut xe, new[0], BIGGER), None, "the old stamps were copied already");
+        for slot in 0..2 {
+            map.write(
+                0x200 + 0x10 * slot,
+                &as_the_driver_sends::stamp(Stamp { generation: 1, slot: slot as u32 }),
+            );
+        }
+        xe.exec(queue, 0x3000_0000, &[]).unwrap();
+        for (slot, &handle) in new.iter().enumerate() {
+            assert_eq!(start_of(&mut xe, handle, BIGGER), Some(Stamp { generation: 1, slot: slot as u32 }));
+        }
     }
 }
