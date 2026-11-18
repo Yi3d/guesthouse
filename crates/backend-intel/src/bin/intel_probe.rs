@@ -1,16 +1,22 @@
-//! `intel-probe [PCI_ADDRESS] [--record FILE]`: what the host's xe driver says about an Intel card,
-//! in a form to paste into an issue.
+//! `intel-probe [PCI_ADDRESS] [--record FILE] [--run [--break]]`: what the host's xe driver says
+//! about an Intel card, in a form to paste into an issue.
 //!
-//! It reads sysfs and asks xe its read-only device queries, and nothing else: no address space,
-//! buffer or queue is made, so nothing runs on the card and the desktop is not touched. With no
-//! address it takes the first Intel card on xe. `--record FILE` also writes the facts to FILE as a
-//! recording, which a lab's daemon can stand in for the card with (see `recording`).
+//! By itself it reads sysfs and asks xe its read-only device queries, and nothing else: no address
+//! space, buffer or queue is made, so nothing runs on the card and the desktop is not touched. With
+//! no address it takes the first Intel card on xe. `--record FILE` also writes the facts to FILE as
+//! a recording, which a lab's daemon can stand in for the card with (see `recording`).
+//!
+//! `--run` then runs the host's self-test on the card: a few tiny buffers and batches of its own,
+//! freed at the end, with a PASS or FAIL line for each step (see `xe::selftest`). `--break` adds
+//! the two steps that make a fault and a hang on purpose, and asks for a typed yes first.
 
 use guesthouse_backend_intel::IntelBackend;
 use guesthouse_backend_intel::card::CardFacts;
 use guesthouse_backend_intel::ioctl::{self, INTEL_VENDOR, XE_DRIVER};
 use guesthouse_backend_intel::protocol::record;
 use guesthouse_backend_intel::recording;
+use guesthouse_backend_intel::xe::device::XeCard;
+use guesthouse_backend_intel::xe::selftest;
 use guesthouse_backend_intel::xe_query::{FirmwareVersion, Gt, MemoryRegion};
 use std::path::Path;
 use std::process::ExitCode;
@@ -19,12 +25,19 @@ const MIB: u64 = 1 << 20;
 const RECORD_WORDS_PER_LINE: usize = 6;
 
 const RECORD_OPTION: &str = "--record";
+const RUN_OPTION: &str = "--run";
+const BREAK_OPTION: &str = "--break";
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
     let (mut address, mut record_to) = (None, None);
+    let (mut run, mut break_steps) = (false, false);
     while let Some(argument) = arguments.next() {
-        if argument == RECORD_OPTION {
+        if argument == RUN_OPTION {
+            run = true;
+        } else if argument == BREAK_OPTION {
+            break_steps = true;
+        } else if argument == RECORD_OPTION {
             let Some(file) = arguments.next() else {
                 eprintln!("{RECORD_OPTION} needs the file to write the recording to.");
                 return ExitCode::FAILURE;
@@ -34,9 +47,17 @@ fn main() -> ExitCode {
             address = Some(argument);
         }
     }
+    if break_steps && !run {
+        eprintln!("{BREAK_OPTION} only goes with {RUN_OPTION}.");
+        return ExitCode::FAILURE;
+    }
     // A lab run stands in for its card with a recording, and the probe tells what it says, as the
     // daemon uses it: see `recording`.
     if let Some(file) = recording::recorded_card_file() {
+        if run {
+            eprintln!("{}", selftest::recorded_card_refusal(&file));
+            return ExitCode::FAILURE;
+        }
         let card = match std::fs::read_to_string(&file)
             .map_err(|error| error.to_string())
             .and_then(|text| recording::read(&text).map_err(|bad| bad.to_string()))
@@ -78,7 +99,27 @@ fn main() -> ExitCode {
         }
         println!("recorded        {file}");
     }
+    if run {
+        return run_self_test(&node, &card, break_steps);
+    }
     ExitCode::SUCCESS
+}
+
+/// The self-test on the card just read. See `xe::selftest`.
+fn run_self_test(node: &ioctl::RenderNode, card: &CardFacts, break_steps: bool) -> ExitCode {
+    println!();
+    println!("self-test       a few tiny buffers and batches on this card, freed at the end");
+    let mut xe = match XeCard::open(&node.device_file) {
+        Ok(xe) => xe,
+        Err(error) => {
+            eprintln!("Opening {} for the self-test failed: {error}", node.device_file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let options = selftest::Options { break_steps };
+    let (mut input, mut out) = (std::io::stdin().lock(), std::io::stdout().lock());
+    let summary = selftest::run(&mut xe, card, Some(&node.sysfs), options, &mut input, &mut out);
+    if summary.all_passed() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
 fn or_unknown(text: &Option<String>) -> &str {

@@ -57,6 +57,10 @@ cargo run --release -p guesthouse-backend-intel --bin intel-probe
 
 Give it a PCI address, like `0000:00:02.0`, if you have more than one Intel card. If you have one of these cards, or another Intel card on `xe`, and want to help, open an issue with its output.
 
+`intel-probe --run` goes one step further and runs a short self-test on the card, with no guest. It makes an address space, three 64 KiB buffers and 2 MiB of shared memory, runs one tiny batch on each engine class and one copy, reads the engine clock, and frees everything. Each step prints `PASS`, `FAIL` with what the kernel said, or `SKIP`. It takes a few seconds and doesn't touch what your desktop has on the card.
+
+`intel-probe --run --break` adds two steps that break things on purpose, to see the driver recover: a batch that writes where nothing is mapped, and a batch that never ends. They can freeze a desktop on the same card for a moment, or worse if the driver can't recover, so they only run after you type `yes`. Leave them out unless you are asked for them.
+
 ## A recorded card
 
 `intel-probe --record card.txt` also writes what it read to `card.txt`, a plain text file with one fact a line. That file can stand in for the card on a PC that doesn't have it, so a run of Intel's driver in a guest can be tried in a lab instead of on your PC. It holds the card's ids, memory sizes, engines, topology, hardware config table, firmware versions and clocks, and the PCI address and kernel version it was read on. Nothing else about your PC.

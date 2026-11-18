@@ -1,0 +1,742 @@
+//! A stand-in for xe, for tests: it records every call, can fail any of them, keeps the kernel's
+//! rules that a wrong plan would break, and runs the few instructions [`super::batch`] writes, so
+//! a test can see a fence written and a value stored without a card.
+//!
+//! What it does on a fault or a hang is what the design expects of xe, not something seen on a
+//! card: the queue is banned, its timeline still signals, and the user fence is left unwritten.
+
+use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync};
+use super::batch;
+use super::device::{CpuMap, EngineCycles, Xe};
+use std::collections::{BTreeMap, HashMap};
+use std::io;
+use std::os::fd::OwnedFd;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+/// A call the stand-in was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Call {
+    CreateVm { flags: u32 },
+    DestroyVm(u32),
+    CreateBuffer(NewBuffer),
+    CloseBuffer(u32),
+    MapBuffer(u32),
+    ExportBuffer(u32),
+    Bind { vm: u32, op: BindOp, signal: Option<Sync> },
+    CreateQueue { vm: u32, engine: EngineInstance },
+    DestroyQueue(u32),
+    QueueBanned(u32),
+    Exec { queue: u32, batch: u64, syncs: Vec<Sync> },
+    CreateSyncobj,
+    DestroySyncobj(u32),
+    PointReached { syncobj: u32, point: u64 },
+    EngineCycles(EngineInstance),
+    NamesFaults,
+}
+
+impl Call {
+    /// The method's name, for failing calls by kind.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::CreateVm { .. } => "create_vm",
+            Self::DestroyVm(_) => "destroy_vm",
+            Self::CreateBuffer(_) => "create_buffer",
+            Self::CloseBuffer(_) => "close_buffer",
+            Self::MapBuffer(_) => "map_buffer",
+            Self::ExportBuffer(_) => "export_buffer",
+            Self::Bind { .. } => "bind",
+            Self::CreateQueue { .. } => "create_queue",
+            Self::DestroyQueue(_) => "destroy_queue",
+            Self::QueueBanned(_) => "queue_banned",
+            Self::Exec { .. } => "exec",
+            Self::CreateSyncobj => "create_syncobj",
+            Self::DestroySyncobj(_) => "destroy_syncobj",
+            Self::PointReached { .. } => "point_reached",
+            Self::EngineCycles(_) => "engine_cycles",
+            Self::NamesFaults => "names_faults",
+        }
+    }
+}
+
+/// What is bound at a range of a VM's addresses.
+#[derive(Debug, Clone, Copy)]
+struct Bound {
+    length: u64,
+    /// Where the first byte is in this process.
+    host: *mut u8,
+}
+
+#[derive(Debug, Default)]
+struct Vm {
+    bound: BTreeMap<u64, Bound>,
+}
+
+impl Vm {
+    /// The host address of `length` bytes at a GPU address, if one binding holds them all.
+    fn host(&self, address: u64, length: u64) -> Option<*mut u8> {
+        let (&start, bound) = self.bound.range(..=address).next_back()?;
+        let end = address.checked_add(length)?;
+        // SAFETY: the offset is inside the binding, which was checked against its memory when made.
+        (end <= start + bound.length).then(|| unsafe { bound.host.add((address - start) as usize) })
+    }
+
+    /// Takes a range out of the bindings, keeping what lies to either side of it.
+    fn clear(&mut self, address: u64, length: u64) {
+        let end = address.saturating_add(length);
+        let touched: Vec<u64> = self
+            .bound
+            .range(..end)
+            .filter(|(start, bound)| **start + bound.length > address)
+            .map(|(start, _)| *start)
+            .collect();
+        for start in touched {
+            let bound = self.bound.remove(&start).expect("just listed");
+            if start < address {
+                self.bound.insert(start, Bound { length: address - start, host: bound.host });
+            }
+            if start + bound.length > end {
+                // SAFETY: still inside the same binding.
+                let host = unsafe { bound.host.add((end - start) as usize) };
+                self.bound.insert(end, Bound { length: start + bound.length - end, host });
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Queue {
+    vm: u32,
+    banned: bool,
+}
+
+/// A timeline of points, each attached when work that will signal it is taken, and reached when
+/// that work ends.
+#[derive(Debug, Default)]
+struct Timeline {
+    attached: u64,
+    reached: u64,
+}
+
+/// A run taken and not yet let through, while a test holds runs back.
+#[derive(Debug)]
+struct Held {
+    queue: u32,
+    batch: u64,
+    syncs: Vec<Sync>,
+}
+
+/// How a batch came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Done,
+    /// It touched an address nothing is bound at.
+    Fault(u64),
+    /// It never ended.
+    Hang,
+}
+
+/// The most instructions a batch may run before it counts as hung.
+const MOST_INSTRUCTIONS: usize = 4096;
+/// The cycles the stand-in's engine clock gains between two reads, and the nanoseconds its CPU
+/// clock does. Their ratio is a 19.2 MHz counter.
+const CYCLES_PER_READ: u64 = 19_200;
+const NANOSECONDS_PER_READ: u64 = 1_000_000;
+
+#[derive(Debug, Default)]
+struct State {
+    calls: Vec<Call>,
+    next_id: u32,
+    vms: HashMap<u32, Vm>,
+    buffers: HashMap<u32, Box<[u8]>>,
+    /// The bytes of closed buffers, kept so a map made earlier stays good, as a real one does.
+    closed: Vec<Box<[u8]>>,
+    queues: HashMap<u32, Queue>,
+    timelines: HashMap<u32, Timeline>,
+    fail_at: HashMap<usize, i32>,
+    fail_named: HashMap<&'static str, i32>,
+    hold_runs: bool,
+    held: Vec<Held>,
+    faults: Vec<u64>,
+    clock_reads: u64,
+    names_faults: bool,
+}
+
+// SAFETY: the raw pointers are into buffers the state owns, or into host memory a test lent and
+// keeps alive; nothing here is tied to a thread.
+unsafe impl Send for State {}
+
+fn errno(code: i32) -> io::Error {
+    io::Error::from_raw_os_error(code)
+}
+
+impl State {
+    /// Records a call, and fails it if a test asked for that.
+    fn enter(&mut self, call: Call) -> io::Result<()> {
+        let index = self.calls.len();
+        let name = call.name();
+        self.calls.push(call);
+        match self.fail_at.get(&index).or_else(|| self.fail_named.get(name)) {
+            Some(&code) => Err(errno(code)),
+            None => Ok(()),
+        }
+    }
+
+    fn new_id(&mut self) -> u32 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    fn read_dword(vm: &Vm, address: u64) -> Result<u32, Outcome> {
+        let host = vm.host(address, 4).ok_or(Outcome::Fault(address))?;
+        // SAFETY: `host` resolved to four bytes inside a binding.
+        Ok(u32::from_le(unsafe { host.cast::<u32>().read_unaligned() }))
+    }
+
+    fn read_qword(vm: &Vm, address: u64) -> Result<u64, Outcome> {
+        Ok(u64::from(Self::read_dword(vm, address)?) | u64::from(Self::read_dword(vm, address + 4)?) << 32)
+    }
+
+    fn store(vm: &Vm, address: u64, value: u64) -> Result<(), Outcome> {
+        let host = vm.host(address, 8).ok_or(Outcome::Fault(address))?;
+        // SAFETY: `host` resolved to eight bytes inside a binding.
+        unsafe { host.cast::<u64>().write_unaligned(value.to_le()) };
+        Ok(())
+    }
+
+    fn copy(vm: &Vm, source: u64, target: u64, bytes: u64) -> Result<(), Outcome> {
+        let from = vm.host(source, bytes).ok_or(Outcome::Fault(source))?;
+        let to = vm.host(target, bytes).ok_or(Outcome::Fault(target))?;
+        // SAFETY: both resolved to `bytes` bytes inside bindings, which may be the same memory.
+        unsafe { std::ptr::copy(from, to, bytes as usize) };
+        Ok(())
+    }
+
+    /// Runs the instructions this backend writes. Anything else ends the batch quietly.
+    fn run(vm: &Vm, batch: u64) -> Outcome {
+        const MEM_COPY_HEADER_MASK: u32 = 0xFFC0_0000;
+        const MEM_COPY: u32 = 0x5680_0000;
+        const PAGES: u32 = 1 << 19;
+        const MATRIX: u32 = 1 << 17;
+        let mut at = batch;
+        for _ in 0..MOST_INSTRUCTIONS {
+            let step = (|| -> Result<Option<u64>, Outcome> {
+                let header = Self::read_dword(vm, at)?;
+                if header == batch::BATCH_END {
+                    return Ok(None);
+                }
+                if header == batch::NOOP {
+                    return Ok(Some(at + 4));
+                }
+                if header == batch::STORE_QWORD_HEADER {
+                    Self::store(vm, Self::read_qword(vm, at + 4)?, Self::read_qword(vm, at + 12)?)?;
+                    return Ok(Some(at + 4 * batch::STORE_QWORD_DWORDS as u64));
+                }
+                if header == batch::BATCH_START_HEADER {
+                    return Ok(Some(Self::read_qword(vm, at + 4)?));
+                }
+                if header & MEM_COPY_HEADER_MASK == MEM_COPY {
+                    let field = |index: u64| Self::read_dword(vm, at + 4 * index).map(|v| u64::from(v) + 1);
+                    let (width, rows, pitch) = (field(1)?, field(2)?, field(3)?);
+                    let (source, target) = (Self::read_qword(vm, at + 20)?, Self::read_qword(vm, at + 28)?);
+                    if header & MATRIX != 0 {
+                        for row in 0..rows {
+                            Self::copy(vm, source + row * pitch, target + row * pitch, width)?;
+                        }
+                    } else {
+                        let bytes = if header & PAGES != 0 { width * batch::MEM_COPY_PAGE } else { width };
+                        Self::copy(vm, source, target, bytes)?;
+                    }
+                    return Ok(Some(at + 4 * batch::MEM_COPY_DWORDS as u64));
+                }
+                Ok(None)
+            })();
+            match step {
+                Ok(Some(next)) => at = next,
+                Ok(None) => return Outcome::Done,
+                Err(outcome) => return outcome,
+            }
+        }
+        Outcome::Hang
+    }
+
+    /// Lets a taken run through: the batch, then the fence, then the signals.
+    fn finish(&mut self, run: Held) {
+        let Some(queue) = self.queues.get(&run.queue) else { return };
+        let vm = self.vms.get(&queue.vm);
+        let mut outcome = match vm {
+            Some(vm) if !queue.banned => Self::run(vm, run.batch),
+            _ => Outcome::Hang,
+        };
+        if let (Outcome::Done, Some(vm)) = (outcome, vm) {
+            for sync in &run.syncs {
+                if let Sync::UserFence { address, value } = *sync
+                    && let Err(fault) = Self::store(vm, address, value)
+                {
+                    outcome = fault;
+                }
+            }
+        }
+        if outcome != Outcome::Done {
+            self.queues.get_mut(&run.queue).expect("found above").banned = true;
+            if let Outcome::Fault(address) = outcome {
+                self.faults.push(address);
+            }
+        }
+        for sync in &run.syncs {
+            if let Sync::Signal { timeline, point } = *sync
+                && let Some(timeline) = self.timelines.get_mut(&timeline)
+            {
+                timeline.reached = timeline.reached.max(point);
+            }
+        }
+    }
+
+    /// The kernel's own checks of an exec's syncs.
+    fn check_syncs(&self, syncs: &[Sync]) -> io::Result<()> {
+        let mut fences = 0;
+        for sync in syncs {
+            match *sync {
+                Sync::After { timeline, point } => {
+                    let timeline = self.timelines.get(&timeline).ok_or_else(|| errno(libc::ENOENT))?;
+                    if timeline.attached < point {
+                        return Err(errno(libc::EINVAL));
+                    }
+                }
+                Sync::Signal { timeline, .. } => {
+                    self.timelines.get(&timeline).ok_or_else(|| errno(libc::ENOENT))?;
+                }
+                Sync::UserFence { address, .. } => {
+                    fences += 1;
+                    if !address.is_multiple_of(8) || fences > 1 {
+                        return Err(errno(libc::EINVAL));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn attach(&mut self, syncs: &[Sync]) {
+        for sync in syncs {
+            if let Sync::Signal { timeline, point } = *sync
+                && let Some(timeline) = self.timelines.get_mut(&timeline)
+            {
+                timeline.attached = timeline.attached.max(point);
+            }
+        }
+    }
+}
+
+/// See the module documentation. Clones share one state, so a test keeps one and gives the other
+/// away.
+#[derive(Debug, Clone, Default)]
+pub struct FakeXe(Arc<Mutex<State>>);
+
+impl FakeXe {
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn calls(&self) -> Vec<Call> {
+        self.state().calls.clone()
+    }
+
+    /// The calls of one kind, by the method's name.
+    pub fn calls_named(&self, name: &str) -> Vec<Call> {
+        self.state().calls.iter().filter(|call| call.name() == name).cloned().collect()
+    }
+
+    /// Fails the call with this index, counted from the first call ever made.
+    pub fn fail_call(&self, index: usize, code: i32) {
+        self.state().fail_at.insert(index, code);
+    }
+
+    /// Fails every call of one kind from now on, until [`FakeXe::heal`].
+    pub fn fail(&self, name: &'static str, code: i32) {
+        self.state().fail_named.insert(name, code);
+    }
+
+    pub fn heal(&self) {
+        let mut state = self.state();
+        state.fail_named.clear();
+        state.fail_at.clear();
+    }
+
+    /// VMs, buffers, queues and sync objects made and not yet destroyed.
+    pub fn live(&self) -> usize {
+        let state = self.state();
+        state.vms.len() + state.buffers.len() + state.queues.len() + state.timelines.len()
+    }
+
+    /// Holds runs back from now on: an exec is taken, and nothing of it happens until
+    /// [`FakeXe::release_runs`].
+    pub fn hold_runs(&self) {
+        self.state().hold_runs = true;
+    }
+
+    pub fn release_runs(&self) {
+        let mut state = self.state();
+        state.hold_runs = false;
+        for run in std::mem::take(&mut state.held) {
+            state.finish(run);
+        }
+    }
+
+    /// Ends the held runs as xe ends a hung one: the queue banned, the timeline signalled, the
+    /// fence unwritten.
+    pub fn lose_held_runs(&self) {
+        let mut state = self.state();
+        for run in std::mem::take(&mut state.held) {
+            if let Some(queue) = state.queues.get_mut(&run.queue) {
+                queue.banned = true;
+            }
+            state.finish(run);
+        }
+    }
+
+    /// The addresses batches faulted at.
+    pub fn faults(&self) -> Vec<u64> {
+        self.state().faults.clone()
+    }
+
+    pub fn set_names_faults(&self, names: bool) {
+        self.state().names_faults = names;
+    }
+
+    /// Whether anything is bound at a GPU address of a VM.
+    pub fn is_bound(&self, vm: u32, address: u64) -> bool {
+        self.state().vms.get(&vm).is_some_and(|vm| vm.host(address, 1).is_some())
+    }
+}
+
+impl Xe for FakeXe {
+    fn create_vm(&mut self, flags: u32) -> io::Result<u32> {
+        let mut state = self.state();
+        state.enter(Call::CreateVm { flags })?;
+        let id = state.new_id();
+        state.vms.insert(id, Vm::default());
+        Ok(id)
+    }
+
+    fn destroy_vm(&mut self, vm: u32) -> io::Result<()> {
+        let mut state = self.state();
+        state.enter(Call::DestroyVm(vm))?;
+        state.vms.remove(&vm).map(drop).ok_or_else(|| errno(libc::ENOENT))
+    }
+
+    fn create_buffer(&mut self, buffer: &NewBuffer) -> io::Result<u32> {
+        let mut state = self.state();
+        state.enter(Call::CreateBuffer(*buffer))?;
+        if buffer.size == 0 || buffer.placement == 0 || !buffer.size.is_multiple_of(0x1000) {
+            return Err(errno(libc::EINVAL));
+        }
+        let id = state.new_id();
+        state.buffers.insert(id, vec![0; buffer.size as usize].into_boxed_slice());
+        Ok(id)
+    }
+
+    fn close_buffer(&mut self, handle: u32) -> io::Result<()> {
+        let mut state = self.state();
+        state.enter(Call::CloseBuffer(handle))?;
+        let bytes = state.buffers.remove(&handle).ok_or_else(|| errno(libc::ENOENT))?;
+        state.closed.push(bytes);
+        Ok(())
+    }
+
+    fn map_buffer(&mut self, handle: u32, size: u64) -> io::Result<CpuMap> {
+        let mut state = self.state();
+        state.enter(Call::MapBuffer(handle))?;
+        let bytes = state.buffers.get_mut(&handle).ok_or_else(|| errno(libc::ENOENT))?;
+        if size as usize > bytes.len() {
+            return Err(errno(libc::EINVAL));
+        }
+        // SAFETY: the boxed bytes never move and are kept until the stand-in itself goes, in
+        // `closed` once the buffer is closed.
+        Ok(unsafe { CpuMap::borrowed(bytes.as_mut_ptr(), size as usize) })
+    }
+
+    fn export_buffer(&mut self, handle: u32) -> io::Result<OwnedFd> {
+        let mut state = self.state();
+        state.enter(Call::ExportBuffer(handle))?;
+        state.buffers.get(&handle).ok_or_else(|| errno(libc::ENOENT))?;
+        Ok(std::fs::File::open("/dev/null")?.into())
+    }
+
+    fn bind(&mut self, vm: u32, op: &BindOp, signal: Option<Sync>) -> io::Result<()> {
+        let mut state = self.state();
+        state.enter(Call::Bind { vm, op: *op, signal })?;
+        let aligned = [op.address, op.length].iter().all(|value| value.is_multiple_of(0x1000));
+        if !aligned || op.length == 0 {
+            return Err(errno(libc::EINVAL));
+        }
+        let host = match op.op {
+            abi::BIND_MAP => {
+                let bytes = state.buffers.get_mut(&op.buffer).ok_or_else(|| errno(libc::ENOENT))?;
+                let end = op.offset_or_host_address.checked_add(op.length);
+                if end.is_none_or(|end| end > bytes.len() as u64) {
+                    return Err(errno(libc::EINVAL));
+                }
+                // SAFETY: the offset was just checked against the buffer.
+                Some(unsafe { bytes.as_mut_ptr().add(op.offset_or_host_address as usize) })
+            }
+            abi::BIND_MAP_USERPTR => Some(op.offset_or_host_address as *mut u8),
+            abi::BIND_UNMAP => None,
+            _ => return Err(errno(libc::EINVAL)),
+        };
+        let signals = signal.map(|sync| [sync]);
+        let signals = signals.as_ref().map_or(&[][..], |sync| &sync[..]);
+        state.check_syncs(signals)?;
+        let space = state.vms.get_mut(&vm).ok_or_else(|| errno(libc::ENOENT))?;
+        space.clear(op.address, op.length);
+        if let Some(host) = host {
+            space.bound.insert(op.address, Bound { length: op.length, host });
+        }
+        state.attach(signals);
+        state.finish_signals(signals);
+        Ok(())
+    }
+
+    fn create_queue(&mut self, vm: u32, engine: EngineInstance) -> io::Result<u32> {
+        let mut state = self.state();
+        state.enter(Call::CreateQueue { vm, engine })?;
+        if !state.vms.contains_key(&vm) {
+            return Err(errno(libc::ENOENT));
+        }
+        let id = state.new_id();
+        state.queues.insert(id, Queue { vm, banned: false });
+        Ok(id)
+    }
+
+    fn destroy_queue(&mut self, queue: u32) -> io::Result<()> {
+        let mut state = self.state();
+        state.enter(Call::DestroyQueue(queue))?;
+        state.queues.remove(&queue).map(drop).ok_or_else(|| errno(libc::ENOENT))
+    }
+
+    fn queue_banned(&mut self, queue: u32) -> io::Result<bool> {
+        let mut state = self.state();
+        state.enter(Call::QueueBanned(queue))?;
+        state.queues.get(&queue).map(|queue| queue.banned).ok_or_else(|| errno(libc::ENOENT))
+    }
+
+    fn exec(&mut self, queue: u32, batch: u64, syncs: &[Sync]) -> io::Result<()> {
+        let mut state = self.state();
+        state.enter(Call::Exec { queue, batch, syncs: syncs.to_vec() })?;
+        let found = state.queues.get(&queue).ok_or_else(|| errno(libc::ENOENT))?;
+        if found.banned || !state.vms.contains_key(&found.vm) {
+            return Err(errno(libc::ECANCELED));
+        }
+        state.check_syncs(syncs)?;
+        state.attach(syncs);
+        let run = Held { queue, batch, syncs: syncs.to_vec() };
+        if state.hold_runs {
+            state.held.push(run);
+        } else {
+            state.finish(run);
+        }
+        Ok(())
+    }
+
+    fn create_syncobj(&mut self) -> io::Result<u32> {
+        let mut state = self.state();
+        state.enter(Call::CreateSyncobj)?;
+        let id = state.new_id();
+        state.timelines.insert(id, Timeline::default());
+        Ok(id)
+    }
+
+    fn destroy_syncobj(&mut self, syncobj: u32) -> io::Result<()> {
+        let mut state = self.state();
+        state.enter(Call::DestroySyncobj(syncobj))?;
+        state.timelines.remove(&syncobj).map(drop).ok_or_else(|| errno(libc::ENOENT))
+    }
+
+    fn point_reached(&mut self, syncobj: u32, point: u64, _patience: Duration) -> io::Result<bool> {
+        let mut state = self.state();
+        state.enter(Call::PointReached { syncobj, point })?;
+        let timeline = state.timelines.get(&syncobj).ok_or_else(|| errno(libc::ENOENT))?;
+        Ok(timeline.reached >= point)
+    }
+
+    fn engine_cycles(&mut self, engine: EngineInstance) -> io::Result<EngineCycles> {
+        let mut state = self.state();
+        state.enter(Call::EngineCycles(engine))?;
+        state.clock_reads += 1;
+        Ok(EngineCycles {
+            cycles: state.clock_reads * CYCLES_PER_READ,
+            width: 64,
+            cpu_nanoseconds: state.clock_reads * NANOSECONDS_PER_READ,
+        })
+    }
+
+    fn names_faults(&mut self) -> bool {
+        let mut state = self.state();
+        let _ = state.enter(Call::NamesFaults);
+        state.names_faults
+    }
+}
+
+impl State {
+    /// A bind is in place as soon as the stand-in has taken it, so its point is reached at once.
+    fn finish_signals(&mut self, syncs: &[Sync]) {
+        for sync in syncs {
+            if let Sync::Signal { timeline, point } = *sync
+                && let Some(timeline) = self.timelines.get_mut(&timeline)
+            {
+                timeline.reached = timeline.reached.max(point);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xe::plan::pat;
+
+    fn buffer() -> NewBuffer {
+        NewBuffer { size: 0x1000, placement: 1, flags: 0, cpu_caching: abi::CPU_CACHING_WRITE_BACK }
+    }
+
+    fn map(buffer: u32, address: u64) -> BindOp {
+        BindOp {
+            op: abi::BIND_MAP,
+            buffer,
+            offset_or_host_address: 0,
+            length: 0x1000,
+            address,
+            pat_index: pat::CARD,
+        }
+    }
+
+    /// A VM with a batch buffer at 0x10000 and a data buffer at 0x20000, and a queue in it.
+    fn rig() -> (FakeXe, u32, u32, CpuMap, CpuMap) {
+        let mut xe = FakeXe::default();
+        let vm = xe.create_vm(0).unwrap();
+        let (batch, data) = (xe.create_buffer(&buffer()).unwrap(), xe.create_buffer(&buffer()).unwrap());
+        xe.bind(vm, &map(batch, 0x1_0000), None).unwrap();
+        xe.bind(vm, &map(data, 0x2_0000), None).unwrap();
+        let engine = EngineInstance { class: 0, instance: 0, gt: 0 };
+        let queue = xe.create_queue(vm, engine).unwrap();
+        let (batch_map, data_map) =
+            (xe.map_buffer(batch, 0x1000).unwrap(), xe.map_buffer(data, 0x1000).unwrap());
+        (xe, vm, queue, batch_map, data_map)
+    }
+
+    fn qword_at(map: &CpuMap, offset: u64) -> u64 {
+        let mut bytes = [0; 8];
+        assert!(map.read(offset, &mut bytes));
+        u64::from_le_bytes(bytes)
+    }
+
+    #[test]
+    fn a_batch_of_stores_runs_and_the_fence_is_written_after_it() {
+        let (mut xe, _, queue, mut batch_map, data_map) = rig();
+        let mut dwords = batch::store_qword(0x2_0010, 0xAABB).to_vec();
+        dwords.push(batch::BATCH_END);
+        batch_map.write(0, &batch::bytes(&dwords));
+        let done = xe.create_syncobj().unwrap();
+        let syncs =
+            [Sync::UserFence { address: 0x2_0100, value: 7 }, Sync::Signal { timeline: done, point: 1 }];
+        xe.exec(queue, 0x1_0000, &syncs).unwrap();
+        assert_eq!((qword_at(&data_map, 0x10), qword_at(&data_map, 0x100)), (0xAABB, 7));
+        assert!(xe.point_reached(done, 1, Duration::ZERO).unwrap());
+        assert!(!xe.queue_banned(queue).unwrap());
+    }
+
+    #[test]
+    fn a_store_to_an_unbound_address_bans_the_queue_and_leaves_the_fence() {
+        let (mut xe, _, queue, mut batch_map, data_map) = rig();
+        let mut dwords = batch::store_qword(0x9_0000, 1).to_vec();
+        dwords.push(batch::BATCH_END);
+        batch_map.write(0, &batch::bytes(&dwords));
+        let done = xe.create_syncobj().unwrap();
+        let syncs =
+            [Sync::UserFence { address: 0x2_0100, value: 7 }, Sync::Signal { timeline: done, point: 1 }];
+        xe.exec(queue, 0x1_0000, &syncs).unwrap();
+        assert_eq!(qword_at(&data_map, 0x100), 0, "the fence was never written");
+        assert!(xe.point_reached(done, 1, Duration::ZERO).unwrap(), "the run still ended");
+        assert!(xe.queue_banned(queue).unwrap());
+        assert_eq!(xe.faults(), [0x9_0000]);
+        let refused = xe.exec(queue, 0x1_0000, &syncs[1..]).unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(libc::ECANCELED));
+    }
+
+    #[test]
+    fn a_batch_that_jumps_to_itself_is_a_hang() {
+        let (mut xe, _, queue, mut batch_map, _) = rig();
+        batch_map.write(0, &batch::bytes(&batch::batch_start(0x1_0000)));
+        let done = xe.create_syncobj().unwrap();
+        xe.exec(queue, 0x1_0000, &[Sync::Signal { timeline: done, point: 1 }]).unwrap();
+        assert!(xe.queue_banned(queue).unwrap());
+        assert!(xe.faults().is_empty());
+    }
+
+    #[test]
+    fn the_kernels_rules_for_syncs_are_kept() {
+        let (mut xe, _, queue, mut batch_map, _) = rig();
+        batch_map.write(0, &batch::bytes(&[batch::BATCH_END]));
+        let done = xe.create_syncobj().unwrap();
+        let signal = Sync::Signal { timeline: done, point: 1 };
+        let invalid = |result: io::Result<()>| result.unwrap_err().raw_os_error() == Some(libc::EINVAL);
+        let fence = |address| Sync::UserFence { address, value: 1 };
+        assert!(invalid(xe.exec(queue, 0x1_0000, &[fence(0x2_0004), signal])), "not 8-byte aligned");
+        assert!(invalid(xe.exec(queue, 0x1_0000, &[fence(0x2_0000), fence(0x2_0008), signal])), "two");
+        let binds = xe.create_syncobj().unwrap();
+        let after = Sync::After { timeline: binds, point: 1 };
+        assert!(invalid(xe.exec(queue, 0x1_0000, &[after, signal])), "nothing attached to wait for");
+        assert!(xe.exec(queue, 0x1_0000, &[signal]).is_ok());
+    }
+
+    #[test]
+    fn held_runs_do_nothing_until_they_are_let_through_or_lost() {
+        let (mut xe, _, queue, mut batch_map, data_map) = rig();
+        batch_map.write(0, &batch::bytes(&[batch::BATCH_END]));
+        let done = xe.create_syncobj().unwrap();
+        let syncs = |point| {
+            [Sync::UserFence { address: 0x2_0000, value: point }, Sync::Signal { timeline: done, point }]
+        };
+        xe.hold_runs();
+        xe.exec(queue, 0x1_0000, &syncs(1)).unwrap();
+        assert!(!xe.point_reached(done, 1, Duration::ZERO).unwrap());
+        xe.release_runs();
+        assert!(xe.point_reached(done, 1, Duration::ZERO).unwrap());
+        assert_eq!(qword_at(&data_map, 0), 1);
+        xe.hold_runs();
+        xe.exec(queue, 0x1_0000, &syncs(2)).unwrap();
+        xe.lose_held_runs();
+        assert!(xe.point_reached(done, 2, Duration::ZERO).unwrap());
+        assert_eq!(qword_at(&data_map, 0), 1, "a lost run writes no fence");
+        assert!(xe.queue_banned(queue).unwrap());
+    }
+
+    #[test]
+    fn an_unbind_takes_only_its_own_range() {
+        let mut xe = FakeXe::default();
+        let vm = xe.create_vm(0).unwrap();
+        let big = NewBuffer { size: 0x3000, ..buffer() };
+        let handle = xe.create_buffer(&big).unwrap();
+        xe.bind(vm, &BindOp { length: 0x3000, ..map(handle, 0x1_0000) }, None).unwrap();
+        let unbind = BindOp { op: abi::BIND_UNMAP, buffer: 0, ..map(0, 0x1_1000) };
+        xe.bind(vm, &unbind, None).unwrap();
+        assert!(xe.is_bound(vm, 0x1_0000) && !xe.is_bound(vm, 0x1_1000) && xe.is_bound(vm, 0x1_2000));
+    }
+
+    #[test]
+    fn any_call_can_be_failed_and_everything_made_is_counted() {
+        let mut xe = FakeXe::default();
+        xe.fail_call(1, libc::ENOMEM);
+        let vm = xe.create_vm(0).unwrap();
+        assert_eq!(xe.create_buffer(&buffer()).unwrap_err().raw_os_error(), Some(libc::ENOMEM));
+        let handle = xe.create_buffer(&buffer()).unwrap();
+        assert_eq!(xe.live(), 2);
+        xe.fail("close_buffer", libc::EBUSY);
+        assert!(xe.close_buffer(handle).is_err());
+        xe.heal();
+        xe.close_buffer(handle).unwrap();
+        xe.destroy_vm(vm).unwrap();
+        assert_eq!(xe.live(), 0);
+        assert_eq!(xe.calls_named("create_buffer").len(), 2);
+    }
+}

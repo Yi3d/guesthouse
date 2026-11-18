@@ -91,6 +91,16 @@ pub fn ours() -> [Range; RANGES] {
     ranges
 }
 
+/// The Standard heap, where most of a guest's allocations are mapped.
+pub fn standard() -> Range {
+    ours()[index::STANDARD]
+}
+
+/// The first of the 32-bit heaps.
+pub fn first_heap_32() -> Range {
+    ours()[index::HEAP_32]
+}
+
 pub fn write(block: &mut [u8], ranges: &[Range; RANGES]) {
     for (at, range) in ranges.iter().enumerate() {
         put_qword(block, at * RANGE_SIZE, range.base);
