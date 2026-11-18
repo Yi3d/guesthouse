@@ -67,6 +67,8 @@ What a start gives, by the two switches, whether the machine fell back from the 
 | any | any | any | real, but not on `xe` or its self-test failed | software, drawn | off | none |
 | any | any | any | recorded | software, drawn | off | none |
 
+When the hardware desktop fails, the app keeps that start's daemon log as `intel-hardware-desktop-daemon.out` beside the fallback in the machine's folder, and a bug report takes both. A big log is cut to its start, its warnings and its end.
+
 ## Work on the card
 
 From this build the daemon can run the guest's work on the card through `xe`: real buffers, an address space for each guest program, and a queue behind each of the guest's. It has only run against a stand-in for the driver, never on a real card, so expect it to fail in ways nobody has seen.

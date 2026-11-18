@@ -70,6 +70,10 @@ pub fn collect(context: &Context, machine: &Machine, found: &mut Collection) {
     found
         .add_file_if_there("machine/intel-software-desktop", &intel_desktop::fallback_file(context, machine));
     found.add_file_if_there("machine/intel-device-off", &intel_desktop::device_off_file(context, machine));
+    found.add_file_if_there(
+        "machine/intel-hardware-desktop-daemon.out",
+        &intel_desktop::hardware_log_file(context, machine),
+    );
 }
 
 /// The settings with each private field marked as left out, so it's still clear whether it was set.
@@ -92,6 +96,22 @@ fn without_private_fields(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_intel_machines_fallback_and_its_failed_hardware_desktops_log_go_in() {
+        let scratch = crate::testing::Scratch::new();
+        let context = crate::testing::scratch_context(&scratch);
+        let machine = Machine::new("arc", "Arc", "/m/disk.qcow2", "");
+        fs::create_dir_all(machine.folder(&context)).unwrap();
+        intel_desktop::fall_back(&context, &machine, "no ring for the display driver").unwrap();
+        fs::write(intel_desktop::hardware_log_file(&context, &machine), "WARN  [    7.814] intel work\n")
+            .unwrap();
+        let mut found = Collection::default();
+        collect(&context, &machine, &mut found);
+        let names: Vec<&str> = found.names().collect();
+        assert!(names.contains(&"machine/intel-software-desktop"), "{names:?}");
+        assert!(names.contains(&"machine/intel-hardware-desktop-daemon.out"), "{names:?}");
+    }
 
     #[test]
     fn the_users_own_fields_are_left_out() {

@@ -19,9 +19,15 @@ use guesthouse_backend_intel::stage::{Desktop, LISTENING_NOTE_START, RUN_VARIABL
 use guesthouse_daemon::desktop_note::read_note;
 use std::ffi::OsStr;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
 
 const FALLBACK_FILE: &str = "intel-software-desktop";
+const HARDWARE_LOG_FILE: &str = "intel-hardware-desktop-daemon.out";
+/// How much of a big log's start, warnings and end [`bounded_log`] keeps: at most 12 MiB in all.
+const LOG_START_BYTES: u64 = 2 << 20;
+const LOG_WARNING_BYTES: u64 = 2 << 20;
+const LOG_END_BYTES: u64 = 8 << 20;
 /// Kept while the app has the Intel render device switched off in the guest, with why.
 const DEVICE_OFF_FILE: &str = "intel-device-off";
 /// The second line of the file: whether a person had asked for the hardware desktop that failed.
@@ -125,6 +131,67 @@ pub fn for_start(context: &Context, machine: &Machine) -> Desktop {
         return Desktop::Software;
     }
     chosen(context, machine, Desktop::asked_in_environment())
+}
+
+/// Where the daemon's log of the last hardware desktop that failed is kept, beside the fallback. The
+/// run folder's log is replaced at each start and goes at each reboot, and a report needs the failed
+/// start's: its self-test, its stage, the first layer that refused and its last submissions.
+pub fn hardware_log_file(context: &Context, machine: &Machine) -> PathBuf {
+    machine.folder(context).join(HARDWARE_LOG_FILE)
+}
+
+/// Keeps this start's daemon log as the failed hardware desktop's, cut to [`bounded_log`]'s size.
+pub fn keep_hardware_log(context: &Context, machine: &Machine) -> std::io::Result<()> {
+    let log = bounded_log(&context.run_folder(None).join(crate::daemon::OUTPUT_FILE))?;
+    fs::write(hardware_log_file(context, machine), log)
+}
+
+/// The log whole if it's small. A bigger one, as a verbose log is, keeps its start, which has the
+/// self-test and the stage, every warning and error line after that (the layers that refused), and
+/// its end, which has the last submissions, with what was left out said where it was.
+fn bounded_log(path: &Path) -> std::io::Result<Vec<u8>> {
+    let size = fs::metadata(path)?.len();
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut kept = Vec::new();
+    if size <= LOG_START_BYTES + LOG_END_BYTES {
+        reader.read_to_end(&mut kept)?;
+        return Ok(kept);
+    }
+    let end_starts = size - LOG_END_BYTES;
+    let (mut at, mut warnings, mut left_out) = (0u64, 0u64, 0u64);
+    let mut line = Vec::new();
+    while at < end_starts {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)? as u64;
+        if read == 0 {
+            break;
+        }
+        if at < LOG_START_BYTES {
+            kept.extend_from_slice(&line);
+        } else if worth_keeping(&line) && warnings + read <= LOG_WARNING_BYTES {
+            if warnings == 0 {
+                kept.extend_from_slice(
+                    b"[... from here only warnings and errors, up to the log's end ...]\n",
+                );
+            }
+            warnings += read;
+            kept.extend_from_slice(&line);
+        } else {
+            left_out += read;
+        }
+        at += read;
+    }
+    kept.extend_from_slice(
+        format!("[... {left_out} bytes of other lines left out; the log's end follows ...]\n").as_bytes(),
+    );
+    reader.read_to_end(&mut kept)?;
+    Ok(kept)
+}
+
+fn worth_keeping(line: &[u8]) -> bool {
+    line.starts_with(b"WARN")
+        || line.starts_with(b"ERROR")
+        || line.windows(12).any(|bytes| bytes == b"intel stage=")
 }
 
 /// Why this start's daemon gave the software desktop though the hardware one was asked, if it did.
@@ -255,6 +322,47 @@ mod tests {
         assert!(switches_device_off(soft, None, false, compute, listens));
         let compute_note = Some("stage=Compute: GUESTHOUSE_INTEL_RUN_ON_CARD=compute runs compute work only");
         assert!(!switches_device_off(soft, None, false, compute, compute_note));
+    }
+
+    #[test]
+    fn a_failed_hardware_desktops_log_is_kept_whole_or_cut_to_its_start_warnings_and_end() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let machine = machine(&context);
+        fs::create_dir_all(context.run_folder(None)).unwrap();
+        let log = context.run_folder(None).join(crate::daemon::OUTPUT_FILE);
+        let kept = || fs::read_to_string(hardware_log_file(&context, &machine)).unwrap();
+        let small = "INFO  [    0.000] intel stage=Everything: the guest's work runs on the card\n";
+        fs::write(&log, small).unwrap();
+        keep_hardware_log(&context, &machine).unwrap();
+        assert_eq!(kept(), small);
+
+        let filler = "INFO  [    1.000] intel SubmitToHardwareQueue queue=0x40021a40 answer=started\n";
+        let mut text = String::from("INFO  [    0.000] intel self-test step 1 of 13: PASS\n");
+        text.push_str(small);
+        while (text.len() as u64) < LOG_START_BYTES + 1 {
+            text.push_str(filler);
+        }
+        let refused =
+            "WARN  [    7.814] intel work: queue 0x40014700 stops: its batch neither ends nor parks\n";
+        text.push_str(refused);
+        while (text.len() as u64) < LOG_START_BYTES + 2 * LOG_END_BYTES {
+            text.push_str(filler);
+        }
+        let last = "INFO  [  277.000] intel SubmitToHardwareQueue queue=0x4000a1c0 answer=started\n";
+        text.push_str(last);
+        fs::write(&log, &text).unwrap();
+        keep_hardware_log(&context, &machine).unwrap();
+        let kept = kept();
+        assert!(
+            kept.len() as u64 <= LOG_START_BYTES + LOG_WARNING_BYTES + LOG_END_BYTES + 4096,
+            "{}",
+            kept.len()
+        );
+        assert!(kept.starts_with("INFO  [    0.000] intel self-test step 1 of 13: PASS\n"));
+        assert!(kept.contains(small) && kept.contains(refused), "the stage and the layer that refused");
+        assert!(kept.contains("bytes of other lines left out"));
+        assert!(kept.ends_with(last), "the last submissions");
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

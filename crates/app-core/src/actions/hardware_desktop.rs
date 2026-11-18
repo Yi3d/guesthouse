@@ -195,6 +195,10 @@ pub(super) fn fall_back_and_stop(task: &mut Task, why: &str) -> Result<String> {
             "hardware desktop: Windows did not shut down in time, so the VM was turned off",
         )?;
     }
+    // The next start replaces the daemon's log, and a report needs this one's.
+    if let Err(error) = intel_desktop::keep_hardware_log(task.context, &task.machine) {
+        write_log(task.context, &format!("hardware desktop: its daemon log could not be kept: {error}"))?;
+    }
     Ok(told(why))
 }
 
