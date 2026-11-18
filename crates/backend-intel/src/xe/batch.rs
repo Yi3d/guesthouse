@@ -48,6 +48,13 @@ pub const BATCH_START_HEADER: u32 =
     BATCH_START | BATCH_START_IN_VM | (BATCH_START_DWORDS as u32 - LENGTH_BIAS);
 pub const BATCH_START_DWORDS: usize = 3;
 
+/// `MI_LOAD_REGISTER_IMM | MI_LRI_NUM_REGS(1)`: one register set to a value.
+pub const LOAD_REGISTER_HEADER: u32 = mi(0x22) | (LOAD_REGISTER_DWORDS as u32 - LENGTH_BIAS);
+pub const LOAD_REGISTER_DWORDS: usize = 3;
+/// `MI_STORE_REGISTER_MEM | XE_INSTR_NUM_DW(4)`: a register's 32 bits to an address in the VM.
+pub const STORE_REGISTER_HEADER: u32 = mi(0x24) | (STORE_REGISTER_DWORDS as u32 - LENGTH_BIAS);
+pub const STORE_REGISTER_DWORDS: usize = 4;
+
 /// `MEM_COPY_CMD`, which every Xe2 card has (`has_mem_copy_instr` in `xe_pci.c`).
 const MEM_COPY: u32 = 2 << 29 | 0x5A << 22;
 /// `MEM_COPY_PAGE_COPY_MODE`: the width counts 256-byte pages.
@@ -74,6 +81,17 @@ fn address_dwords(address: u64) -> [u32; 2] {
 pub fn store_qword(address: u64, value: u64) -> [u32; STORE_QWORD_DWORDS] {
     let [low, high] = address_dwords(address);
     [STORE_QWORD_HEADER, low, high, value as u32, (value >> 32) as u32]
+}
+
+/// Sets a register, named by its offset in the card's register space.
+pub fn load_register(register: u32, value: u32) -> [u32; LOAD_REGISTER_DWORDS] {
+    [LOAD_REGISTER_HEADER, register, value]
+}
+
+/// Writes a register's 32 bits at a GPU address.
+pub fn store_register(register: u32, address: u64) -> [u32; STORE_REGISTER_DWORDS] {
+    let [low, high] = address_dwords(address);
+    [STORE_REGISTER_HEADER, register, low, high]
 }
 
 /// Goes on at another address in the same VM.
@@ -349,6 +367,16 @@ mod tests {
             [0x1020_0003, 0xFFE0_0008, 0x7FFF, 0x5566_7788, 0x1122_3344]
         );
         assert_eq!(batch_start(0x1_4000_2000), [0x1880_0101, 0x4000_2000, 1]);
+    }
+
+    /// `MI_LOAD_REGISTER_IMM | MI_LRI_NUM_REGS(1)` is `0x22 << 23 | (2 * 1 + 1 - 2)`, and
+    /// `MI_STORE_REGISTER_MEM | XE_INSTR_NUM_DW(4)` is `0x24 << 23 | 2`; neither asks for the
+    /// kernel's global table. The guest's own batches set a register with the same first dword.
+    #[test]
+    fn a_register_is_set_and_read_back_with_the_kernels_instructions() {
+        assert_eq!(load_register(0x7004, 0x0040_0040), [0x1100_0001, 0x7004, 0x0040_0040]);
+        assert_eq!(store_register(0x7004, 0x7FFF_FFE0_0400), [0x1200_0002, 0x7004, 0xFFE0_0400, 0x7FFF]);
+        assert_eq!(STORE_REGISTER_HEADER & STORE_IN_GLOBAL_TABLE, 0);
     }
 
     /// `emit_mem_copy` in `xe_migrate.c` for a whole number of 256-byte pages: `MEM_COPY_CMD |

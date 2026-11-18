@@ -15,7 +15,7 @@ use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync, VmFault};
 use super::batch;
 use super::device::{CpuMap, EngineCycles, Xe};
 use super::plan::pat;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -246,6 +246,16 @@ struct State {
     entered: usize,
     /// The lab's card: see [`FakeXe::lab`].
     lab: Option<Lab>,
+    registers: Registers,
+}
+
+/// The registers a batch may set and read. On a card a batch reaches only the registers the kernel
+/// lets user work reach, and any other is neither set nor read, so the memory a read names keeps
+/// what it held.
+#[derive(Debug, Default)]
+struct Registers {
+    reachable: HashSet<u32>,
+    values: HashMap<u32, u32>,
 }
 
 /// What the lab's card does differently, and what it has noticed.
@@ -306,6 +316,13 @@ impl State {
         Ok(u64::from(Self::read_dword(vm, address)?) | u64::from(Self::read_dword(vm, address + 4)?) << 32)
     }
 
+    fn store_dword(vm: &Vm, address: u64, value: u32) -> Result<(), Outcome> {
+        let host = vm.host(address, 4).ok_or(Outcome::Fault(address))?;
+        // SAFETY: `host` resolved to four bytes inside a binding.
+        unsafe { host.cast::<u32>().write_unaligned(value.to_le()) };
+        Ok(())
+    }
+
     fn store(vm: &Vm, address: u64, value: u64) -> Result<(), Outcome> {
         let host = vm.host(address, 8).ok_or(Outcome::Fault(address))?;
         // SAFETY: `host` resolved to eight bytes inside a binding.
@@ -322,7 +339,7 @@ impl State {
     }
 
     /// Runs the instructions this backend writes. Anything else ends the batch quietly.
-    fn run(vm: &Vm, batch: u64) -> Outcome {
+    fn run(vm: &Vm, registers: &mut Registers, batch: u64) -> Outcome {
         const MEM_COPY_HEADER_MASK: u32 = 0xFFC0_0000;
         const MEM_COPY: u32 = 0x5680_0000;
         const PAGES: u32 = 1 << 19;
@@ -340,6 +357,21 @@ impl State {
                 if header == batch::STORE_QWORD_HEADER {
                     Self::store(vm, Self::read_qword(vm, at + 4)?, Self::read_qword(vm, at + 12)?)?;
                     return Ok(Some(at + 4 * batch::STORE_QWORD_DWORDS as u64));
+                }
+                if header == batch::LOAD_REGISTER_HEADER {
+                    let register = Self::read_dword(vm, at + 4)?;
+                    if registers.reachable.contains(&register) {
+                        registers.values.insert(register, Self::read_dword(vm, at + 8)?);
+                    }
+                    return Ok(Some(at + 4 * batch::LOAD_REGISTER_DWORDS as u64));
+                }
+                if header == batch::STORE_REGISTER_HEADER {
+                    let register = Self::read_dword(vm, at + 4)?;
+                    if registers.reachable.contains(&register) {
+                        let value = registers.values.get(&register).copied().unwrap_or(0);
+                        Self::store_dword(vm, Self::read_qword(vm, at + 8)?, value)?;
+                    }
+                    return Ok(Some(at + 4 * batch::STORE_REGISTER_DWORDS as u64));
                 }
                 if header == batch::BATCH_START_HEADER {
                     return Ok(Some(Self::read_qword(vm, at + 4)?));
@@ -382,7 +414,7 @@ impl State {
         let vm = self.vms.get(&queue.vm);
         let mut outcome = match vm {
             Some(_) if self.fault_runs => Outcome::Fault(run.batch),
-            Some(vm) if !queue.banned => Self::run(vm, run.batch),
+            Some(vm) if !queue.banned => Self::run(vm, &mut self.registers, run.batch),
             _ => Outcome::Hang,
         };
         let long_running = vm.is_some_and(|vm| vm.flags & abi::VM_LONG_RUNNING != 0);
@@ -576,6 +608,12 @@ impl FakeXe {
     /// The addresses batches faulted at.
     pub fn faults(&self) -> Vec<u64> {
         self.state().faults.clone()
+    }
+
+    /// Lets batches set and read `registers`, which hold zero until set. No other register is
+    /// reached.
+    pub fn reach_registers(&self, registers: &[u32]) {
+        self.state().registers.reachable.extend(registers);
     }
 
     pub fn set_names_faults(&self, names: bool) {
