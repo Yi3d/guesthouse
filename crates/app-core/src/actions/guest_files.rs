@@ -26,6 +26,8 @@ const MISSING_MARK: &str = "missing ";
 const FAILED_MARK: &str = "FAILED";
 const KEY_SECONDS: u64 = 20;
 const KEY_MARK: &str = "device key set";
+/// Where Windows keeps what a 32-bit program sees as SOFTWARE.
+const SOFTWARE_32: (&str, &str) = (r"SOFTWARE\", r"SOFTWARE\WOW6432Node\");
 const NO_SCRIPT: &str = "Windows lacks some of the driver's files, so a program that looks for them may crash. \
                          This install has no script to place them.";
 
@@ -110,22 +112,25 @@ pub(super) fn place_system_files(task: &mut Task) -> Result<()> {
 }
 
 /// The registry key the Intel adapter's record names as the device's, with the values Intel's OpenCL
-/// and Level Zero drivers look for in it. Without them they offer no device.
+/// and Level Zero drivers look for in it. Without them they offer no device. Windows shows a 32-bit
+/// program another SOFTWARE key, so the key goes in both.
 fn device_key_script() -> String {
-    let key = quoted(&format!("HKLM:\\{DEVICE_KEY}"));
-    let values: String = DEVICE_KEY_VALUES
-        .iter()
-        .map(|(name, value)| {
-            format!(
-                "New-ItemProperty -Path {key} -Name {} -PropertyType String -Value {} -Force -ea Stop | Out-Null; ",
-                quoted(name),
-                quoted(value)
-            )
-        })
-        .collect();
-    format!(
-        "try {{ New-Item -Path {key} -Force -ea Stop | Out-Null; {values}'{KEY_MARK}' }} catch {{ \"$_\" }}"
-    )
+    let key_script = |path: &str| {
+        let key = quoted(&format!(r"HKLM:\{path}"));
+        let values: String = DEVICE_KEY_VALUES
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "New-ItemProperty -Path {key} -Name {} -PropertyType String -Value {} -Force -ea Stop | Out-Null; ",
+                    quoted(name),
+                    quoted(value)
+                )
+            })
+            .collect();
+        format!("New-Item -Path {key} -Force -ea Stop | Out-Null; {values}")
+    };
+    let keys = key_script(DEVICE_KEY) + &key_script(&DEVICE_KEY.replacen(SOFTWARE_32.0, SOFTWARE_32.1, 1));
+    format!("try {{ {keys}'{KEY_MARK}' }} catch {{ \"$_\" }}")
 }
 
 /// Windows is up by now, so a key that doesn't take is said and doesn't stop the machine.
@@ -170,6 +175,9 @@ mod tests {
     fn the_device_key_script_makes_the_key_and_writes_each_value_as_text() {
         let script = device_key_script();
         assert!(script.contains(r"New-Item -Path 'HKLM:\SOFTWARE\Guesthouse\Intel adapter' -Force"));
+        assert!(
+            script.contains(r"New-Item -Path 'HKLM:\SOFTWARE\WOW6432Node\Guesthouse\Intel adapter' -Force")
+        );
         assert!(script.contains("-Name 'OpenCLDriverName' -PropertyType String -Value 'igdrcl64.dll'"));
         assert!(script.contains(&format!("'{KEY_MARK}' }}")), "the mark comes only after the writes");
     }
