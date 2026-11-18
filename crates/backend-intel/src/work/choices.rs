@@ -1,8 +1,7 @@
 //! The choices about running a guest's work that the card has not yet confirmed, each in one named
 //! place so that changing one is one edit.
 //!
-//! What was read in Intel's Windows driver and in compute-runtime about each is in the private
-//! design notes. Nothing here has run on a card.
+//! Nothing here has run on a card.
 
 use crate::xe::abi;
 
@@ -41,7 +40,7 @@ pub const WRITES_QUEUE_TOKEN: bool = false;
 /// is to be read against this list first.
 pub const MAY_DIFFER_FROM_WINDOWS: [&str; 4] = [
     "register 0x5584 bit 5, set for every context on Windows and unnamed in xe",
-    "the rows of the Windows driver's workaround table for this stepping, which were not read",
+    "the Windows driver's workarounds for this stepping, which xe may not match",
     "the tiled-resource translation table, which xe never turns on; the record leaves its two feature bits clear",
     "the cache-policy table: the guest's indexes mean what Windows programs, and xe programs its own",
 ];
