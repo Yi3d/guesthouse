@@ -20,8 +20,10 @@ const POLL: Duration = Duration::from_secs(15);
 /// How many looks there are at most, for a guest that stops answering.
 const LOOKS: u32 = 16;
 const LOOK_SECONDS: u64 = 30;
-/// More compositor crashes than this since boot is a crash loop.
-const CRASH_LIMIT: u32 = 4;
+/// More compositor crashes than this since boot is a failure. On the card's desktop the compositor
+/// only crashes when it can't make its device there; after a few it settles on software and looks up,
+/// until something makes it try the card again. One is let pass, for a crash that has another cause.
+const CRASH_LIMIT: u32 = 1;
 const MARK: &str = "hardware-desktop:";
 
 /// What the guest says about its desktop since it booted.
@@ -157,10 +159,10 @@ mod tests {
     #[test]
     fn a_stop_a_card_turned_off_or_a_crash_loop_is_a_failure() {
         assert_eq!(look(0, 1, 0).failure(), None);
-        assert_eq!(look(0, 1, CRASH_LIMIT).failure(), None, "a few crashes while it settles");
+        assert_eq!(look(0, 1, CRASH_LIMIT).failure(), None, "one crash with another cause");
         assert!(look(1, 1, 0).failure().unwrap().contains("stopped"));
         assert!(look(0, 0, 0).failure().unwrap().contains("turned the card off"));
-        assert!(look(0, 1, CRASH_LIMIT + 1).failure().unwrap().contains("crashed 5 times"));
+        assert!(look(0, 1, CRASH_LIMIT + 1).failure().unwrap().contains("crashed 2 times"));
     }
 
     #[test]
