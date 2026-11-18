@@ -150,6 +150,17 @@ pub fn lab_keeps_hardware_desktop(value: Option<&OsStr>, recorded_card: bool) ->
     recorded_card && value.is_some_and(|value| value == "1")
 }
 
+/// `1` has the app keep the Intel device on in the guest for work asked on a recorded card, as it
+/// does on a real one. For a lab whose daemon runs the lab card (a build with the `lab-fake-card`
+/// feature); it has no effect on a real card, and a daemon that listens still has the device
+/// switched off by its note.
+pub const LAB_DEVICE_ON_RECORDED_CARD_VARIABLE: &str = "GUESTHOUSE_INTEL_LAB_DEVICE_ON_RECORDED_CARD";
+
+/// Whether a lab asked for [`LAB_DEVICE_ON_RECORDED_CARD_VARIABLE`]'s exception, for a recorded card.
+pub fn lab_keeps_device_on_recorded_card(value: Option<&OsStr>, recorded_card: bool) -> bool {
+    recorded_card && value.is_some_and(|value| value == "1")
+}
+
 /// Names what a guest's work is run on: `0` or `listen` keeps everything off the card, as the first
 /// test builds did, `compute` runs compute work only, and unset runs everything this build can.
 pub const RUN_VARIABLE: &str = "GUESTHOUSE_INTEL_RUN_ON_CARD";
@@ -392,6 +403,15 @@ mod tests {
         assert!(!lab_keeps_hardware_desktop(one, false), "never on a real card");
         assert!(!lab_keeps_hardware_desktop(Some(OsStr::new("yes")), true));
         assert!(!lab_keeps_hardware_desktop(None, true));
+    }
+
+    #[test]
+    fn a_lab_can_keep_the_device_on_for_a_recorded_card_only() {
+        let one = Some(OsStr::new("1"));
+        assert!(lab_keeps_device_on_recorded_card(one, true));
+        assert!(!lab_keeps_device_on_recorded_card(one, false), "never on a real card");
+        assert!(!lab_keeps_device_on_recorded_card(Some(OsStr::new("yes")), true));
+        assert!(!lab_keeps_device_on_recorded_card(None, true));
     }
 
     #[test]

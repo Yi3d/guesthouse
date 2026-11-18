@@ -15,7 +15,10 @@ use crate::context::Context;
 use crate::gpu_maker::GpuMaker;
 use crate::machine::Machine;
 use crate::updates::VERSION;
-use guesthouse_backend_intel::stage::{Desktop, LISTENING_NOTE_START, RUN_VARIABLE, Stage};
+use guesthouse_backend_intel::stage::{
+    Desktop, LAB_DEVICE_ON_RECORDED_CARD_VARIABLE, LISTENING_NOTE_START, RUN_VARIABLE, Stage,
+    lab_keeps_device_on_recorded_card,
+};
 use guesthouse_daemon::desktop_note::read_note;
 use std::ffi::OsStr;
 use std::fs;
@@ -112,13 +115,30 @@ pub fn switches_device_off(
     !(work_runs && work_asked_for)
 }
 
+/// Whether the device step counts this start's card as recorded: a recorded card is, unless a lab
+/// asked for [`LAB_DEVICE_ON_RECORDED_CARD_VARIABLE`]'s exception (`lab`, its value), for a daemon
+/// that runs the lab card.
+fn recorded_for_the_device(recorded_card: bool, lab: Option<&OsStr>) -> bool {
+    recorded_card && !lab_keeps_device_on_recorded_card(lab, recorded_card)
+}
+
+/// Whether a lab has this start's recorded card treated as a real one by the device step.
+pub fn lab_device_on_recorded_card(context: &Context) -> bool {
+    let recorded = context.recorded_intel_card.is_some();
+    recorded
+        && !recorded_for_the_device(
+            recorded,
+            std::env::var_os(LAB_DEVICE_ON_RECORDED_CARD_VARIABLE).as_deref(),
+        )
+}
+
 /// [`switches_device_off`] for this start of an Intel machine.
 pub fn device_off_for_start(context: &Context, machine: &Machine) -> bool {
     machine.windows_maker() == Some(GpuMaker::Intel)
         && switches_device_off(
             for_start(context, machine),
             Desktop::asked_in_environment(),
-            context.recorded_intel_card.is_some(),
+            context.recorded_intel_card.is_some() && !lab_device_on_recorded_card(context),
             std::env::var_os(RUN_VARIABLE).as_deref(),
             given_in_software(context).as_deref(),
         )
@@ -322,6 +342,24 @@ mod tests {
         assert!(switches_device_off(soft, None, false, compute, listens));
         let compute_note = Some("stage=Compute: GUESTHOUSE_INTEL_RUN_ON_CARD=compute runs compute work only");
         assert!(!switches_device_off(soft, None, false, compute, compute_note));
+    }
+
+    #[test]
+    fn a_recorded_card_keeps_the_device_off_unless_a_lab_asks_and_its_daemon_runs_work() {
+        let (soft, compute) = (Desktop::Software, Some(OsStr::new("compute")));
+        let one = Some(OsStr::new("1"));
+        assert!(recorded_for_the_device(true, None), "a packaged build on a recorded card");
+        assert!(recorded_for_the_device(true, Some(OsStr::new("yes"))));
+        assert!(!recorded_for_the_device(false, one), "a real card is a real card");
+        assert!(!recorded_for_the_device(true, one));
+        let off = |lab| switches_device_off(soft, None, recorded_for_the_device(true, lab), compute, None);
+        assert!(off(None), "as today");
+        assert!(!off(one), "a lab's compute ask keeps it, as on a real card");
+        let listens = Some("stage=Listen layer=card: it is a recording");
+        assert!(
+            switches_device_off(soft, None, recorded_for_the_device(true, one), compute, listens),
+            "a daemon without the lab card listens, and the device goes off"
+        );
     }
 
     #[test]

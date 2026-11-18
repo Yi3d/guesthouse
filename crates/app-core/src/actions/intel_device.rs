@@ -7,8 +7,9 @@ use super::Task;
 use crate::failure::Result;
 use crate::gpu_identity::PciIdentity;
 use crate::gpu_maker::GpuMaker;
-use crate::intel_desktop::{device_off_file, device_off_for_start, for_start};
+use crate::intel_desktop::{device_off_file, device_off_for_start, for_start, lab_device_on_recorded_card};
 use crate::log::write_log;
+use guesthouse_backend_intel::stage::LAB_DEVICE_ON_RECORDED_CARD_VARIABLE;
 use std::fs;
 
 const OFF: &str = "Intel device off in the guest: desktop drawn by the basic display, no GPU for programs";
@@ -61,7 +62,14 @@ pub(super) fn switch_off_for_software_desktop(task: &Task, shown: PciIdentity) -
         return Ok(());
     }
     if !device_off_for_start(task.context, &task.machine) {
-        write_log(task.context, LEFT_ON)?;
+        let lab = if lab_device_on_recorded_card(task.context) {
+            format!(
+                " (lab: {LAB_DEVICE_ON_RECORDED_CARD_VARIABLE}=1, the recorded card counted as a real one)"
+            )
+        } else {
+            String::new()
+        };
+        write_log(task.context, &format!("{LEFT_ON}{lab}"))?;
         return Ok(());
     }
     let said = task.ask_guest(&switch_script(shown, false), PATIENCE_SECONDS);
