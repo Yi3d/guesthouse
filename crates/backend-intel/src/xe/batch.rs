@@ -107,9 +107,9 @@ pub fn copy_bytes(
 }
 
 /// Copies `rows` rows of `width` bytes, the rows `pitch` apart at both ends: `emit_mem_copy`'s
-/// matrix copy. The kernel gives one pitch for both ends and nothing read says which of the two
-/// pitch fields is the source's, so rows that are differently far apart at the two ends are
-/// copied one by one with [`copy_bytes`].
+/// matrix copy. Dword 3 is the source's pitch and dword 4 the target's; the kernel gives one pitch
+/// for both, and so does this, so rows that are differently far apart at the two ends are copied
+/// one by one with [`copy_bytes`].
 pub fn copy_rows(
     source: u64,
     target: u64,
@@ -352,8 +352,10 @@ mod tests {
     }
 
     /// `emit_mem_copy` in `xe_migrate.c` for a whole number of 256-byte pages: `MEM_COPY_CMD |
-    /// MEM_COPY_PAGE_COPY_MODE | (10 - 2)`, width in pages less one, then rows and pitches of
-    /// one, source, target, and the uncached entry for both.
+    /// MEM_COPY_PAGE_COPY_MODE | (10 - 2)`, width in pages less one, then source, target, and the
+    /// uncached entry for both. The three dwords between (rows less one and the two pitches less
+    /// one) are 0 here; the kernel writes other values there, which the hardware ignores in page
+    /// mode, as its comment says.
     #[test]
     fn a_copy_of_whole_pages_is_the_kernels_page_copy() {
         let copy = copy_bytes(0x1_4000_0000, 0x7FFF_FFE0_0000, 0x1_0000, XE2_UNCACHED_MOCS).unwrap();
