@@ -119,10 +119,23 @@ fn failed(what: &str, error: &io::Error) -> BackendError {
 }
 
 impl CardWork {
+    /// A VM for a guest process. An xe that refuses the scratch page gives one without it, where
+    /// a read past a buffer's end costs the process its device, which is better than no work.
+    fn create_vm(&mut self) -> io::Result<u32> {
+        match self.xe.create_vm(choices::VM_FLAGS) {
+            Err(error) if plan::bind_verdict(&error) == BindVerdict::Wrong => {
+                log::warn!(
+                    "intel work: xe refused an address space with a scratch page ({error}); made without"
+                );
+                self.xe.create_vm(choices::VM_FLAGS & !crate::xe::abi::VM_SCRATCH_PAGE)
+            }
+            made => made,
+        }
+    }
+
     pub fn create_space(&mut self, ranges: &[GpuRange]) -> Result<SpaceId, BackendError> {
         let vm = self
-            .xe
-            .create_vm(choices::VM_FLAGS)
+            .create_vm()
             .map_err(|error| BackendError::new(format!("xe made no address space: {error}")))?;
         let binds = match self.xe.create_syncobj() {
             Ok(binds) => binds,
@@ -323,14 +336,25 @@ mod tests {
     use guesthouse_backend::GPU_RANGES;
 
     #[test]
-    fn a_space_is_a_vm_with_no_scratch_page_and_goes_whole() {
+    fn a_space_is_a_vm_with_a_scratch_page_and_goes_whole() {
         let (mut work, xe) = testing::work(Stage::Compute);
         let space = work.create_space(&GPU_RANGES).unwrap();
-        assert_eq!(xe.calls()[0], Call::CreateVm { flags: 0 });
+        assert_eq!(xe.calls()[0], Call::CreateVm { flags: abi::VM_SCRATCH_PAGE });
         assert_eq!((work.live_spaces(), xe.live()), (1, 2), "the VM and its bind timeline");
         work.destroy_space(space);
         assert_eq!((work.live_spaces(), xe.live()), (0, 0));
         assert!(work.space_failed(space), "a space that is gone runs nothing");
+    }
+
+    #[test]
+    fn an_xe_that_refuses_the_scratch_page_gives_a_space_without_one() {
+        let (mut work, xe) = testing::work(Stage::Compute);
+        xe.fail_call(xe.calls().len(), libc::EINVAL);
+        work.create_space(&GPU_RANGES).unwrap();
+        let made: Vec<_> =
+            xe.calls().into_iter().filter(|call| matches!(call, Call::CreateVm { .. })).collect();
+        assert_eq!(made, [Call::CreateVm { flags: abi::VM_SCRATCH_PAGE }, Call::CreateVm { flags: 0 }]);
+        assert_eq!(work.live_spaces(), 1);
     }
 
     #[test]

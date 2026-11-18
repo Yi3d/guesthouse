@@ -5,10 +5,11 @@
 
 use crate::xe::abi;
 
-/// The flags a guest process's address space is made with. No scratch page: a batch that touches
-/// an address nothing is mapped at must fault, so its queue is banned and the guest hears its device
-/// is gone, rather than read zeros and go on with wrong results.
-pub const VM_FLAGS: u32 = 0;
+/// The flags a guest process's address space is made with. A scratch page: an address nothing is
+/// mapped at reads zeros and swallows writes. The card reads a little past the end of a buffer it
+/// was given, and without the scratch page such a read faults, xe bans the queue and the guest's
+/// program loses its device, though nothing was wrong with its work.
+pub const VM_FLAGS: u32 = abi::VM_SCRATCH_PAGE;
 /// The flags of the second address space a process gets for work that never ends: see [`Rings`].
 pub const RING_VM_FLAGS: u32 = abi::VM_LONG_RUNNING;
 
