@@ -8,12 +8,16 @@
 //! In this stage nothing runs, so a header never fails a submission: it is read from the front
 //! when there are bytes enough, and the log says how long the data was and what the vendor's kernel
 //! driver would have made of that length. The core passes a hardware queue's data to the end of
-//! the message, so that length can be longer than what the guest meant.
+//! the message, so that length can be longer than what the guest meant: the message is padded to
+//! 8 bytes, and after an odd number of 4-byte allocation handles a header comes with 4 bytes of
+//! padding behind it ([`MESSAGE_PADDING`]). Seen in the lab: 188 bytes on messages of 272.
 
 use super::bytes::{bits, dword, qword, word};
 
 pub const COMPACT_SIZE: usize = 0xB8;
 pub const FULL_SIZE: usize = 0x898;
+/// What may follow a header to the end of its message: see the module documentation.
+pub const MESSAGE_PADDING: usize = 4;
 
 /// Where the compact header's fields are. Names are compute-runtime's, where it has one.
 mod at {
@@ -97,8 +101,8 @@ pub struct Header {
 impl Header {
     pub fn read(data: &[u8]) -> Self {
         let verdict = match data.len() {
-            COMPACT_SIZE => Length::Compact,
-            FULL_SIZE => Length::Full,
+            length if length == COMPACT_SIZE || length == COMPACT_SIZE + MESSAGE_PADDING => Length::Compact,
+            length if length == FULL_SIZE || length == FULL_SIZE + MESSAGE_PADDING => Length::Full,
             _ => Length::Neither,
         };
         let compact = data.get(..COMPACT_SIZE).map(Compact::parse);
@@ -243,7 +247,7 @@ pub(crate) mod tests {
     #[test]
     fn each_length_gets_its_verdict_and_a_long_one_is_still_read_from_the_front() {
         assert_eq!(Header::read(&vec![0; FULL_SIZE]).verdict, Length::Full);
-        for size in [0, 0x18, COMPACT_SIZE - 1, COMPACT_SIZE + 1, FULL_SIZE + 8] {
+        for size in [0, 0x18, COMPACT_SIZE - 1, COMPACT_SIZE + 1, COMPACT_SIZE + 8, FULL_SIZE + 8] {
             assert_eq!(Header::read(&vec![0; size]).verdict, Length::Neither, "{size:#x}");
         }
         let mut longer = compact();
@@ -252,6 +256,16 @@ pub(crate) mod tests {
         assert_eq!((header.verdict, header.length), (Length::Neither, COMPACT_SIZE + 0x40));
         assert_eq!(header.compact.unwrap().context_type, 3);
         assert_eq!(Header::read(&[0; 0x18]).compact, None, "too short to read");
+    }
+
+    #[test]
+    fn a_header_with_the_messages_padding_behind_it_is_still_its_size() {
+        let mut padded = compact();
+        padded.extend_from_slice(&[0; MESSAGE_PADDING]);
+        let header = Header::read(&padded);
+        assert_eq!((header.verdict, header.length), (Length::Compact, 188), "as seen in the lab");
+        assert_eq!(header.compact.unwrap().context_type, 3);
+        assert_eq!(Header::read(&vec![0; FULL_SIZE + MESSAGE_PADDING]).verdict, Length::Full);
     }
 
     #[test]
