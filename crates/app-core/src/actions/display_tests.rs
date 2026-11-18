@@ -652,3 +652,20 @@ fn a_change_made_while_a_restart_is_owed_credits_nothing_either() {
     rig.run(boot_display);
     assert!(!rig.run(apply_settings).shown_frames);
 }
+
+#[test]
+fn an_intel_machines_driver_is_taken_out_and_kept_out_in_the_software_desktop() {
+    let (mut rig, guest) = Rig::new().with(|context| Guest::new(context, "working", INSTALLED, true));
+    rig.machine.use_windows_card(crate::gpu_maker::GpuMaker::Intel, "0000:03:00.0");
+    fake_package(&rig.scratch, "build 1");
+    rig.say_this_build_is_in("build 1");
+    let state = rig.run(boot_display);
+    assert_eq!(guest.asked_for("take it out"), 1);
+    assert_eq!(state.driver, Driver::Absent);
+    assert!(state.reason.contains("drawn in software"), "{}", state.reason);
+    assert!(!state.running.unwrap().on_driver);
+    rig.run(boot_display);
+    rig.run(install_again);
+    assert_eq!(guest.asked_for("sign-and-install"), 0, "not at a start, nor when asked");
+    assert_eq!(guest.asked_for("take it out"), 1, "nothing to take out once it is gone");
+}

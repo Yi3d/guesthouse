@@ -12,10 +12,12 @@ use crate::display::{
 };
 use crate::driver_modes::{DriverModes, SETTINGS_FILE, with_rate};
 use crate::failure::Result;
+use crate::gpu_maker::GpuMaker;
 use crate::log::write_log;
 use crate::machine::REFRESH_RATES;
 use crate::screen_gpu::memory_frames;
 use crate::text::base64_encode;
+use guesthouse_backend_intel::stage::Desktop;
 use guesthouse_daemon::display_note::ScreenNote;
 use guesthouse_daemon::gpu_note::read_note as read_gpu_note;
 use std::fs;
@@ -77,6 +79,8 @@ const NOT_UP: &str =
 const NOT_CONFIRMED: &str = "Windows hasn't confirmed this change with a picture yet.";
 const BLANK_BOOT: &str = "The display driver sent no picture on this boot. If that happens again on the next one, \
                           it's taken out.";
+const KEPT_OFF: &str = "An Intel card's desktop is drawn in software at this stage, and the display driver would \
+                        stop it, so Windows stays on its basic display.";
 const RESTART_OWED: &str = "Windows needs a restart to finish updating the display driver.";
 
 /// Why the screen is being set. A boot can give up on the driver, and a change to a running machine
@@ -247,8 +251,33 @@ fn take_out(task: &Task) -> Result<()> {
     Ok(())
 }
 
-/// Sees that the driver is in, if it can be. `again` is someone asking for another try.
+/// Whether this machine's driver stays out of Windows: an Intel card's, unless the stage gives it the
+/// hardware desktop. Windows would have its compositor draw the driver's display on the card.
+fn kept_off(task: &Task) -> bool {
+    task.machine.windows_maker() == Some(GpuMaker::Intel) && !Desktop::from_environment().has_display_driver()
+}
+
+/// Takes the driver out if Windows has it, and says why it stays out.
+fn keep_off(task: &Task, state: &mut DisplayState) -> Result<()> {
+    task.step("Checking the display driver");
+    match device(task) {
+        Some(Device::Working | Device::Broken) => take_out(task)?,
+        Some(Device::Missing) => {}
+        None => write_log(task.context, "display driver: the agent did not say how the device is")?,
+    }
+    state.driver = Driver::Absent;
+    state.package.clear();
+    state.reason = KEPT_OFF.to_owned();
+    state.running = None;
+    Ok(())
+}
+
+/// Sees that the driver is in, if it can be. `again` is someone asking for another try. A driver kept
+/// off is taken out instead.
 fn make_sure_of_driver(task: &Task, state: &mut DisplayState, again: bool) -> Result<()> {
+    if kept_off(task) {
+        return keep_off(task, state);
+    }
     task.step("Checking the display driver");
     let Some(found) = device(task) else {
         write_log(task.context, "display driver: the agent did not say how the device is")?;
@@ -431,6 +460,9 @@ fn apply(task: &mut Task, state: &mut DisplayState, occasion: Occasion) -> Resul
     let wanted = Wanted::of(task);
     let Wanted { width, height, hz, .. } = wanted;
     task.step(&format!("Setting the display to {width}x{height} at {hz} Hz"));
+    if kept_off(task) {
+        return settle_on_basic(task, state, &wanted);
+    }
     let expected = state.driver == Driver::Installed;
     let Some(mut screen) = tell_windows(task, &wanted, expected, 0)? else {
         return no_word_from_windows(task, state, &wanted, occasion);
