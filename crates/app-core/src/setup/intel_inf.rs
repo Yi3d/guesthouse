@@ -162,8 +162,16 @@ fn windows_folder(sections: &HashMap<String, Vec<&str>>, list: &str) -> Option<&
     }
 }
 
+/// The 64-bit C++ runtime, which the INF keeps in the driver's own folder while it puts the 32-bit one
+/// in SysWOW64. Intel's 64-bit OpenCL loader, which goes in System32, imports it, and a Windows with
+/// no Visual C++ runtime of its own has none there, so the loader couldn't load at all in a lab guest.
+/// The guest gets it in System32 too, and the placing script only copies where Windows lacks a file or
+/// has an older one.
+const RUNTIME_64_LIST: &str = "MSVCP140_VCRUNTIME140";
+const RUNTIME_64_FOLDER: &str = "System32";
+
 /// The loaders and runtime libraries the INF puts in Windows' system folders for this device: the
-/// Vulkan, OpenCL and Level Zero loaders, and the 32-bit C++ runtime the 32-bit drivers load. Each is
+/// Vulkan, OpenCL and Level Zero loaders, and the C++ runtime the drivers load. Each is
 /// the folder, the file in the driver package (`source`) and the name it gets there (`name`), which
 /// differ where the INF renames. Intel's control library, its media libraries and its tools are left
 /// out, as nothing a graphics program does loads them.
@@ -174,7 +182,8 @@ pub fn system_files(inf: &str, device: u32) -> Vec<GuestFile> {
         let skipped = NOT_LOADERS
             .iter()
             .any(|prefix| list.get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix)));
-        let Some(folder) = windows_folder(&sections, list).filter(|_| !skipped) else { continue };
+        let runtime = list.eq_ignore_ascii_case(RUNTIME_64_LIST).then_some(RUNTIME_64_FOLDER);
+        let Some(folder) = runtime.or(windows_folder(&sections, list)).filter(|_| !skipped) else { continue };
         for line in sections.get(&list.to_lowercase()).into_iter().flatten() {
             // The INF's order is the name, then the file to copy if that differs, so empty fields count.
             let mut parts = line.split(',').map(|field| field.trim().trim_matches('"'));
@@ -407,8 +416,27 @@ mod tests {
         for name in ["vulkan-1.dll", "OpenCL.dll", "msvcp140.dll"] {
             assert!(has("SysWOW64", name), "{name} is not in SysWOW64");
         }
-        for name in ["vulkan-1.dll", "OpenCL.dll", "ze_loader.dll"] {
+        for name in ["vulkan-1.dll", "OpenCL.dll", "ze_loader.dll", "msvcp140.dll", "vcruntime140.dll"] {
             assert!(has("System32", name), "{name} is not in System32");
         }
+    }
+
+    #[test]
+    fn the_64_bit_runtime_the_inf_keeps_in_the_driver_folder_also_goes_to_system32() {
+        let inf = fake_inf()
+            .replace("MSDK_w10rs1.copy32\n", "MSDK_w10rs1.copy32, MSVCP140_VCRUNTIME140\n")
+            .replace("[DestinationDirs]\n", "[DestinationDirs]\nMSVCP140_VCRUNTIME140 = 13\n")
+            .replace("[Loaders]\n", "[MSVCP140_VCRUNTIME140]\nmsvcp140.dll\nvcruntime140.dll\n[Loaders]\n");
+        let system = system_files(&inf, DEVICE);
+        for name in ["msvcp140.dll", "vcruntime140.dll"] {
+            assert!(
+                system.iter().any(|file| file.folder == "System32" && file.name == name),
+                "{name}: {system:?}"
+            );
+        }
+        assert!(
+            guest_files(&inf, DEVICE).iter().any(|file| file == "vcruntime140.dll"),
+            "still in the driver folder"
+        );
     }
 }
