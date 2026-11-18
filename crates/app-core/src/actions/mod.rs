@@ -421,20 +421,21 @@ pub fn run_task(
     machine_id: &str,
     arguments: &[String],
 ) -> Result<()> {
-    let machine = match load(context, machine_id) {
-        Ok(machine) => machine,
-        Err(error) => {
-            let record = TaskRecord {
-                action: action.to_owned(),
-                machine: machine_id.to_owned(),
-                pid: 0,
-                step: String::new(),
-                error: error.0.clone(),
-            };
-            let _ = write_task(context, None, &record);
-            return Err(error);
-        }
-    };
+    let machine =
+        match crate::machine::id_from_argument(context, machine_id).and_then(|id| load(context, &id)) {
+            Ok(machine) => machine,
+            Err(error) => {
+                let record = TaskRecord {
+                    action: action.to_owned(),
+                    machine: machine_id.to_owned(),
+                    pid: 0,
+                    step: String::new(),
+                    error: error.0.clone(),
+                };
+                let _ = write_task(context, None, &record);
+                return Err(error);
+            }
+        };
     let mut task = Task::new(context, host, action, machine);
     let lock = if action == "force" { Ok(None) } else { take_lock(context).map(Some) };
     let result = lock.and_then(|_lock| run_action(&mut task, arguments));

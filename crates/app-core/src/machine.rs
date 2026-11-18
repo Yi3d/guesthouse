@@ -536,6 +536,27 @@ fn is_inside(file: &str, folder: &Path) -> bool {
     fs::canonicalize(file).is_ok_and(|real| real.to_string_lossy().starts_with(&inside))
 }
 
+/// The machine a person named: its id, or the path of its folder in the machines folder, which a
+/// person copies from a file manager. Any other path is refused, as the id is the folder's name.
+pub fn id_from_argument(context: &Context, given: &str) -> Result<String> {
+    if !given.contains('/') {
+        return Ok(given.to_owned());
+    }
+    let path = Path::new(given.trim_end_matches('/'));
+    let in_machines = path
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok())
+        .zip(context.paths.machines.canonicalize().ok())
+        .is_some_and(|(parent, machines)| parent == machines);
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some(name) if in_machines && valid_id(name) => Ok(name.to_owned()),
+        _ => Err(Failure(format!(
+            "Give the machine's folder name, the last part of {}/NAME, not a path elsewhere.",
+            context.paths.machines.display()
+        ))),
+    }
+}
+
 pub fn load(context: &Context, id: &str) -> Result<Machine> {
     let path = context.paths.machines.join(id).join(MACHINE_FILE);
     let could_not_read =
@@ -1068,5 +1089,18 @@ mod tests {
         assert!(!machine.window_speed());
         assert_eq!(machine.drives, [Drive { id: "ata-SOME_DISK_SERIAL".into() }]);
         assert_eq!(machine.forwards.len(), 1);
+    }
+
+    #[test]
+    fn a_task_takes_a_machine_by_its_id_or_its_folders_path_and_no_other_path() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        fs::create_dir_all(context.paths.machines.join("windowsarc")).unwrap();
+        let folder = context.paths.machines.join("windowsarc");
+        assert_eq!(id_from_argument(&context, "windowsarc").unwrap(), "windowsarc");
+        assert_eq!(id_from_argument(&context, folder.to_str().unwrap()).unwrap(), "windowsarc");
+        assert_eq!(id_from_argument(&context, &format!("{}/", folder.display())).unwrap(), "windowsarc");
+        let elsewhere = id_from_argument(&context, "/tmp/windowsarc").unwrap_err();
+        assert!(elsewhere.0.contains("folder name"), "{}", elsewhere.0);
     }
 }
