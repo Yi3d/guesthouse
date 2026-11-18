@@ -158,6 +158,13 @@ pub trait Backend: Sized {
         &[]
     }
 
+    /// GPU addresses past [`GPU_RANGES`] where the guest may map at addresses it chose itself, as the
+    /// vendor's driver expects the card's address space to reach them. The host never hands these
+    /// out, so whatever has to stay inside [`GPU_RANGES`], like the host's own mappings, still does.
+    fn guest_placed_gpu_ranges(&self) -> &'static [GpuRange] {
+        &[]
+    }
+
     /// The guest has restarted, with its bus reset. Most of what a backend holds goes with its
     /// messages, so this is only for what has to follow the guest's own start.
     fn guest_restarted(&mut self) {}

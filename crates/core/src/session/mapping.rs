@@ -2,7 +2,7 @@
 
 use super::{Handled, Session, answer_status};
 use crate::deferred::{DeferredAction, FreedAllocation};
-use crate::gpu_addresses::{ADDRESSES_END, ALLOCATION_ALIGN, AddressUse, GpuAddresses, LARGE_ALIGN, Window};
+use crate::gpu_addresses::{ADDRESSES_END, ALLOCATION_ALIGN, AddressUse, LARGE_ALIGN, Window};
 use crate::pending::Pending;
 use crate::tables::Mapping;
 use guesthouse_backend::{Backend, BackendError, GuestMemory, MapRequest, MemoryId, SpaceId, UnmapRequest};
@@ -222,7 +222,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         space: SpaceId,
         handle: u32,
     ) -> Result<(), BackendError> {
-        if !GpuAddresses::in_a_range(address) {
+        if !self.gpu_addresses.guest_may_map(address, length) {
             return Err(BackendError::new("no GPU address range holds this"));
         }
         let gpu_cached = self.allocations[&handle].gpu_cached;

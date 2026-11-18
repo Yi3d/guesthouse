@@ -68,6 +68,9 @@ pub struct GpuAddresses {
     placed: Vec<(u64, u64)>,
     /// (start, end) of what the host took for itself.
     host: Vec<(u64, u64)>,
+    /// Past the ranges, where only the guest may choose addresses. See
+    /// `Backend::guest_placed_gpu_ranges`.
+    guest_only: &'static [GpuRange],
 }
 
 /// Where a request will accept addresses: from `from`, with everything ending by `to`.
@@ -131,7 +134,22 @@ impl GpuAddresses {
             hand_out,
             placed: Vec::new(),
             host: Vec::new(),
+            guest_only: &[],
         }
+    }
+
+    /// Also lets the guest map at addresses it chose in `ranges`, which are never handed out.
+    pub fn with_guest_only(self, ranges: &'static [GpuRange]) -> Self {
+        Self { guest_only: ranges, ..self }
+    }
+
+    /// Whether the guest may map `size` bytes at `address`, an address it chose: in the ranges, or
+    /// wholly in a range only the guest uses.
+    pub fn guest_may_map(&self, address: u64, size: u64) -> bool {
+        let in_guest_only = |range: &GpuRange| {
+            range.contains(address) && address.checked_add(size).is_some_and(|end| end <= range.end)
+        };
+        Self::in_a_range(address) || self.guest_only.iter().any(in_guest_only)
     }
 
     /// Takes `size` bytes: what was given back for this use, or new addresses, moving to the next
@@ -332,6 +350,25 @@ mod tests {
         assert!(!addresses.reaches(far));
         assert_eq!(addresses.find_gap(far, 0x1000, ALLOCATION_ALIGN, &[]), None);
         assert!(addresses.reaches(Window::ANYWHERE));
+    }
+
+    const ABOVE: GpuRange = GpuRange { start: GPU_RANGES[1].end, end: 1 << 47 };
+
+    #[test]
+    fn with_no_guest_only_ranges_the_guest_maps_only_in_the_ranges() {
+        let addresses = GpuAddresses::new();
+        assert!(addresses.guest_may_map(GPU_RANGES[1].start, 0x1000));
+        assert!(!addresses.guest_may_map(0x255_f13c_0000, 0x1000));
+    }
+
+    #[test]
+    fn a_guest_only_range_takes_the_guests_own_addresses_but_none_are_handed_out_there() {
+        let mut addresses = GpuAddresses::new().with_guest_only(std::slice::from_ref(&ABOVE));
+        assert!(addresses.guest_may_map(0x255_f13c_0000, 0x1000));
+        assert!(!addresses.guest_may_map(ABOVE.end - 0x1000, 0x2000), "it ends past the range");
+        assert!(!addresses.guest_may_map(ABOVE.end, 0x1000));
+        assert!(!addresses.reaches(Window { from: ABOVE.start, to: ABOVE.end }));
+        assert!(addresses.take(GPU_RANGES[1].end, ALLOCATION_ALIGN, HOST).is_err());
     }
 
     #[test]

@@ -21,8 +21,9 @@ pub struct GpuRange {
 
 /// The ranges every address space covers. There is a hole around 4 GiB, where real drivers keep
 /// something of their own, and the ranges are big because one process can reserve gigabytes. They
-/// stop at 1 TiB because a ring entry can't reach past it. The core hands addresses out of these,
-/// and a backend may tell the guest's driver about them.
+/// stop at 1 TiB because an NVIDIA ring entry can't reach past it. The core hands addresses out of
+/// these, and a backend may tell the guest's driver about them. A backend whose card reaches further
+/// can let the guest place its own mappings past them, with `Backend::guest_placed_gpu_ranges`.
 pub const GPU_RANGES: [GpuRange; 2] = [
     GpuRange { start: 0x400_0000, end: 0x1_0000_0000 },
     GpuRange { start: 0x1_4000_0000, end: 0x100_0000_0000 },

@@ -216,7 +216,8 @@ pub struct Session<B, M> {
 
 impl<B: Backend, M: GuestMemory> Session<B, M> {
     pub fn new(backend: B, memory: M, config: Config) -> Self {
-        let gpu_addresses = GpuAddresses::keeping_clear(backend.kept_gpu_ranges());
+        let gpu_addresses = GpuAddresses::keeping_clear(backend.kept_gpu_ranges())
+            .with_guest_only(backend.guest_placed_gpu_ranges());
         Self {
             backend,
             memory,
@@ -483,7 +484,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     /// An address space with the fences in it, as every space has.
     fn new_space(&mut self) -> Result<SpaceId, BackendError> {
-        let space = self.backend.create_address_space(&crate::GPU_RANGES)?;
+        // A backend's guest-only ranges are part of each space too, so the guest's own mappings there
+        // have somewhere to go. With none, as for NVIDIA and AMD, a space is the core's ranges alone.
+        let ranges = [&crate::GPU_RANGES[..], self.backend.guest_placed_gpu_ranges()].concat();
+        let space = self.backend.create_address_space(&ranges)?;
         let block = self.fence_block()?;
         self.backend.map(&guesthouse_backend::MapRequest {
             space,

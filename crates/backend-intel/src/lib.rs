@@ -398,6 +398,10 @@ impl Backend for IntelBackend {
     /// Nothing is written back into an allocation's data.
     fn finish_allocation_data(&mut self, _private: &mut [u8], _size: u64) {}
 
+    fn guest_placed_gpu_ranges(&self) -> &'static [GpuRange] {
+        protocol::partition::guest_placed(self.card.config.va_bits)
+    }
+
     fn finish_queue_data(&mut self, queue: u32, private: &mut [u8], serial: u32) -> Result<(), BackendError> {
         self.traffic.queue(queue, serial, private);
         Ok(())

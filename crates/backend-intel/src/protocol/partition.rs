@@ -12,7 +12,7 @@
 //! the core has no addresses at all.
 
 use super::bytes::{put_qword, qword};
-use guesthouse_backend::GPU_RANGES;
+use guesthouse_backend::{GPU_RANGES, GpuRange};
 
 pub const SIZE: usize = 0xB0;
 const RANGES: usize = SIZE / RANGE_SIZE;
@@ -27,6 +27,24 @@ const HEAPS_32: usize = 4;
 /// the device failed. In a lab guest it took 256 MiB ending 1 GiB below TR's top. The size is this
 /// backend's choice, room enough for that, as nothing says how big Intel's own driver makes it.
 const TR_SIZE: u64 = 64 * GIB;
+
+/// The CPU's 47-bit user address space, which Intel's compute driver expects a 48-bit card to mirror.
+const CPU_USER_END: u64 = 1 << 47;
+/// The card address bits that hold [`CPU_USER_END`].
+const SHARED_ADDRESS_BITS: u64 = 48;
+/// From the core's ceiling to the top of the CPU's user addresses.
+const PAST_THE_CORE: [GpuRange; 1] = [GpuRange { start: GPU_RANGES[1].end, end: CPU_USER_END }];
+
+/// Where the guest may place mappings itself past the core's ranges. Intel's 64-bit OpenCL and Level
+/// Zero drivers treat a 48-bit card's addresses as a copy of the process's own: compute-runtime puts
+/// any allocation that has a CPU pointer in its SVM heap, maps it at that same pointer, and stops
+/// when the map is refused. Windows gives 64-bit programs pointers far above the core's 1 TiB, so
+/// this lets them through up to the top of user space. The 1 TiB ceiling is for NVIDIA's ring
+/// entries; nothing on an Intel card points at these with one, and the host still hands out nothing
+/// there. A card with fewer address bits gets nothing past the core.
+pub fn guest_placed(address_bits: u64) -> &'static [GpuRange] {
+    if address_bits >= SHARED_ADDRESS_BITS { &PAST_THE_CORE } else { &[] }
+}
 
 /// The ranges by their place in the block.
 mod index {
@@ -149,5 +167,13 @@ mod tests {
         write(&mut block, &ours());
         assert_eq!(read(&block), ours());
         assert!(Text(ours()).to_string().starts_with("0x"));
+    }
+
+    #[test]
+    fn a_48_bit_card_lets_the_guest_place_mappings_up_to_the_top_of_user_space() {
+        let past = guest_placed(48);
+        assert_eq!(past, [GpuRange { start: GPU_RANGES[1].end, end: 1 << 47 }]);
+        assert!(past[0].contains(0x255_f13c_0000), "a pointer the lab's OpenCL driver mapped at");
+        assert!(guest_placed(40).is_empty());
     }
 }
