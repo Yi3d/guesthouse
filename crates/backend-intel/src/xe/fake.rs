@@ -71,7 +71,11 @@ struct Bytes {
     file: OwnedFd,
     start: *mut u8,
     length: usize,
+    /// Counts up as buffers are made, so the newest can be told apart.
+    serial: u64,
 }
+
+static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Bytes {
     fn new(length: usize) -> io::Result<Self> {
@@ -88,7 +92,8 @@ impl Bytes {
             return Err(io::Error::last_os_error());
         }
         let start = map(&file, length)?;
-        Ok(Self { file, start, length })
+        let serial = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Self { file, start, length, serial })
     }
 }
 
@@ -241,7 +246,13 @@ struct Lab {
     /// Batches and user fences at addresses nothing was bound at: faults on a card.
     unbound_batches: u64,
     unbound_fences: u64,
+    /// The display driver's slot stamps: see [`stamps`].
+    #[cfg(feature = "lab-fake-card")]
+    stamps: stamps::Stamps,
 }
+
+#[cfg(feature = "lab-fake-card")]
+mod stamps;
 
 /// How many of each kind of unbound address the lab's card names in the log.
 #[cfg(feature = "lab-fake-card")]
@@ -642,7 +653,13 @@ impl Xe for FakeXe {
         let space = state.vms.get_mut(&vm).ok_or_else(|| errno(libc::ENOENT))?;
         space.clear(op.address, op.length);
         if let Some((host, buffer)) = host {
+            #[cfg(feature = "lab-fake-card")]
+            let large = buffer.as_ref().is_some_and(|bytes| stamps::may_be_a_slot(bytes));
             space.bound.insert(op.address, Bound { length: op.length, host, buffer });
+            #[cfg(feature = "lab-fake-card")]
+            if large && let Some(lab) = state.lab.as_mut() {
+                lab.stamps.watch(vm);
+            }
         }
         state.attach(signals);
         state.finish_signals(signals);
@@ -742,6 +759,11 @@ impl State {
     fn finish_unrun(&mut self, run: Held) {
         let Some(vm_id) = self.queues.get(&run.queue).map(|queue| queue.vm) else { return };
         let Some(vm) = self.vms.get(&vm_id) else { return };
+        // Before the fence: the core looks for the stamps once it has seen the fence.
+        #[cfg(feature = "lab-fake-card")]
+        if let Some(lab) = self.lab.as_mut() {
+            lab.stamps.copy_any(vm_id, vm);
+        }
         let batch_bound = vm.host(run.batch, 4).is_some();
         if vm.flags & abi::VM_LONG_RUNNING != 0 {
             if !batch_bound {
