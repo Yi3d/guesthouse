@@ -647,17 +647,20 @@ fn a_run_that_ends_is_kept_where_a_reboot_leaves_it() {
 }
 
 #[test]
-fn an_intel_machine_is_given_neither_nvidias_files_nor_amds_and_the_guest_is_not_asked() {
+fn an_intel_machine_is_given_neither_nvidias_files_nor_amds_only_its_device_key() {
     let scratch = Scratch::new();
     let mut context = plain_task_context(&scratch);
-    let agent = Arc::new(ScriptedAgent::answering(&[]));
+    let agent = Arc::new(ScriptedAgent::answering(&["device key set\r\n"]));
     context.agent = agent.clone();
     let mut intel = machine(&context);
     intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+    crate::agent::make_token(&context, &intel).unwrap();
     let host = RecordingHost::default();
     let mut task = Task::new(&context, &host, "start", intel);
     place_files_for_maker(&mut task).unwrap();
-    assert!(agent.requests.lock().unwrap().is_empty(), "nothing was sent to the guest");
+    let asked = agent.requests.lock().unwrap();
+    assert_eq!(asked.len(), 1, "the device key alone");
+    assert!(asked[0].2.contains("OpenCLDriverName"), "{}", asked[0].2);
     assert_eq!(task.error, "");
 }
 
@@ -670,7 +673,13 @@ fn an_intel_machine_is_given_the_loaders_from_the_drivers_list_out_of_intels_sto
     scratch.write("intel-driver/system-files.txt", "System32\tvulkan-1-64.dll\tvulkan-1.dll\n");
     crate::setup::intel::write_intel_setup(&context, &folder, "32.0.101.9175").unwrap();
     scratch.write("program/guest/nv-files.ps1", "copies files");
-    let agent = Arc::new(ScriptedAgent::answering(&["", "missing 1\r\n", "", "copied vulkan-1.dll\r\n"]));
+    let agent = Arc::new(ScriptedAgent::answering(&[
+        "device key set\r\n",
+        "",
+        "missing 1\r\n",
+        "",
+        "copied vulkan-1.dll\r\n",
+    ]));
     context.agent = agent.clone();
     let mut intel = machine(&context);
     intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
@@ -680,6 +689,21 @@ fn an_intel_machine_is_given_the_loaders_from_the_drivers_list_out_of_intels_sto
     place_files_for_maker(&mut task).unwrap();
     assert_eq!(task.error, "");
     let asked = agent.requests.lock().unwrap();
-    assert_eq!(asked.len(), 4, "the list, the count, the script and the run");
-    assert!(asked[3].2.contains("-StoreFolder iigd_dch.inf_amd64_gpupv"), "{}", asked[3].2);
+    assert_eq!(asked.len(), 5, "the device key, the list, the count, the script and the run");
+    assert!(asked[4].2.contains("-StoreFolder iigd_dch.inf_amd64_gpupv"), "{}", asked[4].2);
+}
+
+#[test]
+fn an_intel_device_key_that_does_not_take_is_said_and_the_start_goes_on() {
+    let scratch = Scratch::new();
+    let mut context = plain_task_context(&scratch);
+    let agent = Arc::new(ScriptedAgent::answering(&["Access is denied\r\n"]));
+    context.agent = agent.clone();
+    let mut intel = machine(&context);
+    intel.use_windows_card(GpuMaker::Intel, "0000:00:02.0");
+    crate::agent::make_token(&context, &intel).unwrap();
+    let host = RecordingHost::default();
+    let mut task = Task::new(&context, &host, "start", intel);
+    place_files_for_maker(&mut task).unwrap();
+    assert!(task.error.contains("registry key"), "{}", task.error);
 }

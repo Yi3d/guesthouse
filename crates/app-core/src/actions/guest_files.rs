@@ -4,6 +4,7 @@
 
 use super::Task;
 use super::desktop::{GUEST_FOLDER, put_guest_file};
+use super::guest_upload::quoted;
 use crate::agent::guest_script;
 use crate::failure::Result;
 use crate::log::write_log;
@@ -11,6 +12,7 @@ use crate::setup::guest_driver::INTEL_STORE_FOLDER;
 use crate::setup::guest_files::guest_file_list;
 use crate::setup::intel::{SYSTEM_LIST, intel_driver_folder};
 use crate::text::base64_encode;
+use guesthouse_backend_intel::protocol::record::{DEVICE_KEY, DEVICE_KEY_VALUES};
 use std::fs;
 
 const SCRIPT_NAME: &str = "nv-files.ps1";
@@ -22,6 +24,8 @@ const CHECK_SECONDS: u64 = 20;
 const PLACE_SECONDS: u64 = 110;
 const MISSING_MARK: &str = "missing ";
 const FAILED_MARK: &str = "FAILED";
+const KEY_SECONDS: u64 = 20;
+const KEY_MARK: &str = "device key set";
 const NO_SCRIPT: &str = "Windows lacks some of the driver's files, so a program that looks for them may crash. \
                          This install has no script to place them.";
 
@@ -105,6 +109,38 @@ pub(super) fn place_system_files(task: &mut Task) -> Result<()> {
     }
 }
 
+/// The registry key the Intel adapter's record names as the device's, with the values Intel's OpenCL
+/// and Level Zero drivers look for in it. Without them they offer no device.
+fn device_key_script() -> String {
+    let key = quoted(&format!("HKLM:\\{DEVICE_KEY}"));
+    let values: String = DEVICE_KEY_VALUES
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "New-ItemProperty -Path {key} -Name {} -PropertyType String -Value {} -Force -ea Stop | Out-Null; ",
+                quoted(name),
+                quoted(value)
+            )
+        })
+        .collect();
+    format!(
+        "try {{ New-Item -Path {key} -Force -ea Stop | Out-Null; {values}'{KEY_MARK}' }} catch {{ \"$_\" }}"
+    )
+}
+
+/// Windows is up by now, so a key that doesn't take is said and doesn't stop the machine.
+pub(super) fn write_device_key(task: &mut Task) -> Result<()> {
+    let said = task.ask_guest(&device_key_script(), KEY_SECONDS);
+    if !said.contains(KEY_MARK) {
+        write_log(task.context, &format!("device key: {}", said.trim()))?;
+        task.error =
+            "Intel's compute drivers will find no GPU, as their registry key did not reach Windows. \
+                      The log says why."
+                .to_owned();
+    }
+    Ok(())
+}
+
 fn place_listed_files(task: &mut Task, list: &str, store: Option<&str>) -> Result<()> {
     task.step("Checking the driver's files");
     send_list(task, list);
@@ -124,4 +160,17 @@ fn place_listed_files(task: &mut Task, list: &str, store: Option<&str>) -> Resul
         task.error = "Some of the driver's files did not reach Windows. The log says which.".to_owned();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_device_key_script_makes_the_key_and_writes_each_value_as_text() {
+        let script = device_key_script();
+        assert!(script.contains(r"New-Item -Path 'HKLM:\SOFTWARE\Guesthouse\Intel adapter' -Force"));
+        assert!(script.contains("-Name 'OpenCLDriverName' -PropertyType String -Value 'igdrcl64.dll'"));
+        assert!(script.contains(&format!("'{KEY_MARK}' }}")), "the mark comes only after the writes");
+    }
 }
