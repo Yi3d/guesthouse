@@ -47,7 +47,11 @@ pub(super) struct Ring {
     pub vm: u32,
     /// Where xe writes the number of each bind once it is in place. Such a VM signals no sync
     /// object, so this is how a bind is known to be done.
-    in_place: Box<AtomicU64>,
+    ///
+    /// The word is never freed. xe writes it from a worker of its own some time after the bind
+    /// call returns, and nothing says when the last write has landed, not even the VM's end. A
+    /// word freed with the ring would be written while something else owned its memory.
+    in_place: &'static AtomicU64,
     sent: u64,
 }
 
@@ -198,7 +202,7 @@ impl CardWork {
 
     fn bind_in_ring(xe: &mut dyn crate::xe::device::Xe, ring: &mut Ring, op: &BindOp) -> io::Result<()> {
         let number = ring.sent + 1;
-        let address = std::ptr::from_ref::<AtomicU64>(&ring.in_place) as u64;
+        let address = std::ptr::from_ref::<AtomicU64>(ring.in_place) as u64;
         xe.bind(ring.vm, op, Some(Sync::UserFence { address, value: number }))?;
         ring.sent = number;
         Ok(())
@@ -292,7 +296,7 @@ impl CardWork {
             .xe
             .create_vm(choices::RING_VM_FLAGS)
             .map_err(|error| BackendError::new(format!("xe made no long-running address space: {error}")))?;
-        let mut ring = Ring { vm, in_place: Box::new(AtomicU64::new(0)), sent: 0 };
+        let mut ring = Ring { vm, in_place: Box::leak(Box::new(AtomicU64::new(0))), sent: 0 };
         for mapping in space.mappings.values() {
             if let Err(error) = Self::bind_in_ring(self.xe.as_mut(), &mut ring, &mapping.op) {
                 let _ = self.xe.destroy_vm(vm);
@@ -461,5 +465,27 @@ mod tests {
         assert!(!xe.is_bound(ring, 0x400_0000));
         work.destroy_space(space);
         assert_eq!(xe.live(), 1, "only the buffer is left");
+    }
+
+    #[test]
+    fn a_bind_xe_finishes_after_the_space_is_gone_writes_a_word_that_is_still_there() {
+        let (mut work, xe) = testing::work(Stage::Compute);
+        let space = work.create_space(&GPU_RANGES).unwrap();
+        let (memory, _) = work.allocate(0x1000, BufferUse::Card).unwrap();
+        work.map(&map_request(space, memory, 0x400_0000, 0, 0x1000)).unwrap();
+        work.ring_vm(space).unwrap();
+        let word = xe
+            .calls_named("bind")
+            .into_iter()
+            .find_map(|call| match call {
+                Call::Bind { signal: Some(Sync::UserFence { address, .. }), .. } => Some(address),
+                _ => None,
+            })
+            .expect("the ring's bind names a word");
+        work.destroy_space(space);
+        // SAFETY: the word is never freed, which is what this test is for.
+        let word = unsafe { &*(word as *const AtomicU64) };
+        word.store(7, Ordering::Release);
+        assert_eq!(word.load(Ordering::Acquire), 7);
     }
 }
