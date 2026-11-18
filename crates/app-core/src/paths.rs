@@ -266,9 +266,22 @@ fn program_folder(variables: &Variables, running_from: Option<&Path>) -> PathBuf
     }
     let here = running_from.filter(|folder| folder.join(PROGRAM_MARK).is_dir());
     let user = variables.home().join(USER_PROGRAM);
+    // The app's menu entry names the install by its link, and a VM it starts is known by that
+    // path. A tool run from a terminal out of the same install has to name it the same way.
+    if here.is_some_and(|here| same_folder(here, &user)) {
+        return user;
+    }
     here.map(Path::to_owned)
         .or_else(|| user.join(PROGRAM_MARK).is_dir().then_some(user))
         .unwrap_or_else(|| PathBuf::from(INSTALLED_PROGRAM))
+}
+
+/// Whether two paths lead to one folder, as a link and what it points at do.
+fn same_folder(one: &Path, other: &Path) -> bool {
+    match (one.canonicalize(), other.canonicalize()) {
+        (Ok(one), Ok(other)) => one == other,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +427,21 @@ mod tests {
         let paths = Paths::new(&Variables::of(&[("HOME", "/h")]), Some(&release));
         assert_eq!(paths.guest_files(), release.join("guest"));
         assert!(paths.guest_files_in_program());
+    }
+
+    #[test]
+    fn a_tool_run_out_of_the_users_install_names_it_by_its_link_as_the_app_does() {
+        let scratch = Scratch::new();
+        let version = scratch.path("home/.local/lib/guesthouse/0.6.2");
+        fs::create_dir_all(version.join("guest")).unwrap();
+        let link = scratch.path("home/.local/lib/guesthouse/current");
+        std::os::unix::fs::symlink(&version, &link).unwrap();
+        let home = scratch.path("home").display().to_string();
+        let variables = Variables::of(&[("HOME", &home)]);
+        assert_eq!(program_folder(&variables, Some(&version)), link);
+        let elsewhere = scratch.path("unpacked");
+        fs::create_dir_all(elsewhere.join("guest")).unwrap();
+        assert_eq!(program_folder(&variables, Some(&elsewhere)), elsewhere, "another copy is itself");
     }
 
     #[test]
