@@ -41,7 +41,7 @@ You need one of those cards, Linux with the `xe` driver on it, and a test build 
   result: exit code 0 (0x00000000)
 ```
 
-A line with `->` and no `<-` after it is the call that hung or crashed the process, and `result:` says whether it exited, crashed (an exit code like 0xC0000005) or timed out. The report ends with `api-check done`.
+A line with `->` and no `<-` after it is the call that hung or crashed the process, and `result:` says whether it exited, crashed (an exit code like 0xC0000005) or timed out. The script's part ends with `api-check done` and a summary of the furthest layer each API reached. After it the app adds a line per API from the stage in `daemon.out`: "its work runs on the card", "withheld by stage=..." when the stage finishes its work without running it (its devices are still made, so that is as far as it can get), or "FAILED" when it reached nothing, which the stage doesn't explain. On the software desktop the Direct3D line also says that Direct3D 9, 10 and 11 are refused.
 
 You can shut the machine down afterwards. If you build from source, `guesthouse-task` and `intel-probe` are in `target/release`, and `cargo build --release -p guesthouse-app-core -p guesthouse-daemon --features guesthouse-daemon/intel` makes the daemon.
 
@@ -62,7 +62,7 @@ What a start gives, by the two switches, whether the machine fell back from the 
 | unset | `0` | no, or fell back with nothing set | real | hardware, tried again | on | everything |
 | unset | `0` | fell back, asked | real | software, drawn | off | none |
 | unset | `1` | any | real | software, black | on | Direct3D 12, Vulkan and compute |
-| `compute` | any | any | real | software, black | on | OpenCL only |
+| `compute` | any | any | real | software, black | on | OpenCL's work only |
 | `0`, `listen` or an unknown word | any | any | real | software, drawn | off | none |
 | any | any | any | real, but not on `xe` or its self-test failed | software, drawn | off | none |
 | any | any | any | recorded | software, drawn | off | none |
@@ -75,7 +75,7 @@ From this build the daemon can run the guest's work on the card through `xe`: re
 
 At each start the daemon runs the short self-test `intel-probe --run` runs. If a step the guest's work needs fails (the address space, buffers, host pages, binds, the render, compute or copy engine), or the card can't be opened for work, the machine starts as before with nothing run on the card. A failed video engine step, copy instruction, clock reading or cleanup is a warning in `daemon.out`, and work runs all the same. A line in `daemon.out` starting with `intel stage=` says which it is and, if nothing runs, what refused.
 
-`GUESTHOUSE_INTEL_RUN_ON_CARD=0` in the environment the app or `guesthouse-vm` starts the machine from keeps everything off the card. The daemon and the app both read it there, so set it where the machine is started. `GUESTHOUSE_INTEL_RUN_ON_CARD=compute` runs OpenCL work only. A recorded card never runs anything.
+`GUESTHOUSE_INTEL_RUN_ON_CARD=0` in the environment the app or `guesthouse-vm` starts the machine from keeps everything off the card. The daemon and the app both read it there, so set it where the machine is started. `GUESTHOUSE_INTEL_RUN_ON_CARD=compute` runs OpenCL's work only. Programs still get Intel's Direct3D 12, Vulkan, OpenGL and Level Zero drivers and can make devices, but their work is finished without running, so nothing they draw or compute is real. Level Zero is among them because its work can't be told apart yet. A recorded card never runs anything.
 
 A guest program whose work hangs or faults loses its device, as it would on Windows, and the other programs go on. On a card with memory of its own the guest can't take all of it: a quarter of the card, or 1 GiB if that is more, and what your desktop already holds stay out of its reach.
 

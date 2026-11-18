@@ -10,13 +10,16 @@
 //! own with a time limit, and writes how far each got.
 
 use super::Task;
+use super::api_stage;
 use super::desktop::{GUEST_FOLDER, put_file};
 use super::guest_upload::quoted;
 use crate::daemon::OUTPUT_FILE;
 use crate::failure::{Failure, Result};
 use crate::gpu_maker::GpuMaker;
+use crate::intel_desktop::device_off_file;
 use crate::text::base64_decode;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -37,6 +40,8 @@ const API_STARTED_MARK: &str = "api-check started";
 const API_DONE_MARK: &str = "api-check done";
 /// Seven probes of up to a minute each, and the time to compile them.
 const API_WAIT_MINUTES: u64 = 10;
+/// How much of the daemon's log is read for its stage line, which is near its start.
+const DAEMON_LOG_READ: u64 = 4 << 20;
 const START_SECONDS: u64 = 20;
 const POLL_SECONDS: u64 = 10;
 const POLL_EVERY: Duration = Duration::from_secs(5);
@@ -154,18 +159,34 @@ fn api_check(task: &mut Task) {
     let answer = task.ask_guest(&fetch_script(&guest_api_path(API_FILE)), FETCH_SECONDS);
     match report_from(&answer) {
         Some(report) if finished => {
-            let _ = fs::write(&saved, report);
+            let _ = fs::write(&saved, with_stage(task, report));
         }
         Some(report) => {
             let mut text = format!(
                 "The check had not finished after {API_WAIT_MINUTES} minutes. This is what it wrote.\n"
             )
             .into_bytes();
-            text.extend(report);
+            text.extend(with_stage(task, report));
             let _ = fs::write(&saved, text);
         }
         None => note("its report could not be read back."),
     }
+}
+
+/// The report with each API's verdict at this start's stage after it: see [`api_stage`].
+fn with_stage(task: &Task, mut report: Vec<u8>) -> Vec<u8> {
+    let log = start_of(&task.run_file(OUTPUT_FILE), DAEMON_LOG_READ);
+    let device_off = device_off_file(task.context, &task.machine).exists();
+    let section = api_stage::stage_section(&String::from_utf8_lossy(&report), log.as_deref(), device_off);
+    report.extend_from_slice(section.as_bytes());
+    report
+}
+
+/// The first `bytes` of a file, as text, if it can be read.
+fn start_of(path: &std::path::Path, bytes: u64) -> Option<String> {
+    let mut kept = Vec::new();
+    fs::File::open(path).ok()?.take(bytes).read_to_end(&mut kept).ok()?;
+    Some(String::from_utf8_lossy(&kept).into_owned())
 }
 
 /// Runs the API check for an Intel machine, then dxdiag, and gathers what they and the daemon said.
@@ -315,7 +336,9 @@ echo \"probe of $1\"
             assert!(asked[5].2.contains("dxdiag.exe"), "dxdiag follows the check");
         }
         let gathered = folder.join(GATHERED_FOLDER);
-        assert_eq!(fs::read_to_string(gathered.join(API_FILE)).unwrap(), "the api report\napi-check done");
+        let api = fs::read_to_string(gathered.join(API_FILE)).unwrap();
+        assert!(api.starts_with("the api report\napi-check done"), "{api}");
+        assert!(api.contains("each API at this start's stage") && api.contains("names no stage"), "{api}");
         assert_eq!(fs::read_to_string(gathered.join(REPORT_FILE)).unwrap(), "the report");
         assert_eq!(fs::read_to_string(gathered.join(PROBE_FILE)).unwrap().trim(), "probe of 0000:00:02.0");
         assert_eq!(fs::read_to_string(gathered.join(OUTPUT_FILE)).unwrap(), "the daemon's log");

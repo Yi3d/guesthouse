@@ -3,6 +3,7 @@
 
 mod amd_files;
 mod amd_start;
+mod api_stage;
 mod desktop;
 mod diagnose;
 mod display;
