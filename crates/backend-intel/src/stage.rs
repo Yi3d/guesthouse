@@ -104,6 +104,8 @@ pub enum Fallback {
     SelfTestFailed(u32),
     /// The card's memory regions give nowhere to put a buffer.
     NoMemoryRegion,
+    /// The host's own desktop leaves the guest this many bytes of the card, which is too few.
+    TooLittleMemory(u64),
 }
 
 impl std::fmt::Display for Fallback {
@@ -125,6 +127,11 @@ impl std::fmt::Display for Fallback {
                 )
             }
             Self::NoMemoryRegion => f.write_str("layer=card-memory: xe named no system memory region"),
+            Self::TooLittleMemory(left) => write!(
+                f,
+                "layer=card-memory: only {} MiB of the card is free beside the host's own use and reserve",
+                left >> 20
+            ),
         }
     }
 }
@@ -251,6 +258,7 @@ mod tests {
             Fallback::NodeNotOpened("denied".into()),
             Fallback::SelfTestFailed(2),
             Fallback::NoMemoryRegion,
+            Fallback::TooLittleMemory(1 << 20),
         ] {
             assert!(fallback.to_string().starts_with("layer="), "{fallback}");
         }

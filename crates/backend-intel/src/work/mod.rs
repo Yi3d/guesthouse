@@ -12,6 +12,8 @@ pub mod copies;
 pub mod engines;
 mod memory;
 mod queues;
+#[cfg(test)]
+mod session_tests;
 mod spaces;
 #[cfg(test)]
 pub(crate) mod testing;

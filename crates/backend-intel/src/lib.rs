@@ -24,6 +24,10 @@
 //! - The core describes every node but the first as a copy engine, whatever gmmlib's numbering
 //!   says the node is.
 
+// The shared test helpers name this crate as a test outside it does.
+#[cfg(test)]
+extern crate self as guesthouse_backend_intel;
+
 mod books;
 pub mod card;
 pub mod generation;
@@ -272,6 +276,9 @@ impl IntelBackend {
         }
         let shared = self.card.system_memory() / SHARED_MEMORY_PART;
         let cap = work::cap::video_cap(&self.card.regions, shared);
+        if cap < work::cap::LEAST_FOR_A_GUEST {
+            return Err(Fallback::TooLittleMemory(cap));
+        }
         CardWork::new(xe, &self.card, asked, cap).ok_or(Fallback::NoMemoryRegion)
     }
 }
@@ -1060,5 +1067,20 @@ mod tests {
         let sent = data.clone();
         backend.finish_queue_data(0x40, &mut data, 1).unwrap();
         assert_eq!(data, sent, "the qword at +8 is written only for a native fence, which is never offered");
+    }
+
+    #[test]
+    fn a_card_the_hosts_desktop_has_filled_leaves_the_guest_listening() {
+        let mut busy = card::tests::battlemage();
+        for region in busy.regions.iter_mut().filter(|region| region.class == xe_query::MemoryRegion::VRAM) {
+            region.used = region.total - (3200 << 20);
+        }
+        let mut backend = IntelBackend::from_card(busy).unwrap();
+        let xe = xe::fake::FakeXe::default();
+        let open = || Ok(Box::new(xe.clone()) as Box<dyn Xe + Send>);
+        backend.start_work_on_card(Stage::asked(None), open, None);
+        assert_eq!(backend.stage(), Stage::Listen, "146 MiB past the reserve is no room for a guest");
+        assert_eq!(backend.video_memory_cap(), None);
+        assert_eq!(xe.live(), 0);
     }
 }

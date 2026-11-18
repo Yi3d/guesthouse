@@ -7,6 +7,10 @@ pub const HOST_RESERVE: u64 = 1 << 30;
 /// Or this part of the card, if that is more.
 pub const HOST_RESERVE_PART: u64 = 4;
 
+/// The least video memory a guest is worth starting work on the card for. With less left over, the
+/// guest's first allocations would fail, so it is left listening instead.
+pub const LEAST_FOR_A_GUEST: u64 = 512 << 20;
+
 /// The most a guest may hold. On a card with memory of its own: what the card has, less what was
 /// in use when it was opened, which is the host's desktop, less a reserve for the desktop to grow
 /// into. On a card that only has the system's memory, `shared` is the share already worked out for

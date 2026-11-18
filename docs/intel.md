@@ -4,7 +4,7 @@ This doesn't work yet, and none of it has met a guest. It's the first step towar
 
 ## What it's meant to do
 
-The daemon built with the `intel` feature is meant to answer Intel's Windows driver in the guest well enough for it to load and make its devices, contexts, queues and memory. That's untested. Nothing runs on the card: every bit of work the guest sends comes back as finished without running, so the guest's screen won't show anything drawn by the GPU. The desktop may be black, or stop moving. What this step is for is the log. Every exchange that is Intel's own gets a line in `daemon.out` starting with `intel`, and with `GUESTHOUSE_VERBOSE` set the log holds the whole of each one too, so one run should tell me how far the guest got and where it stopped.
+The daemon built with the `intel` feature is meant to answer Intel's Windows driver in the guest well enough for it to load and make its devices, contexts, queues and memory. That's untested. In the first test builds nothing ran on the card: every bit of work the guest sent came back as finished without running, so the guest's screen showed nothing drawn by the GPU. This build can run it, as "Work on the card" below says, and falls back to running nothing where the card doesn't pass its own test. Either way the log matters most. Every exchange that is Intel's own gets a line in `daemon.out` starting with `intel`, and with `GUESTHOUSE_VERBOSE` set the log holds the whole of each one too, so one run should tell me how far the guest got and where it stopped.
 
 It only takes Intel's driver 32.0.101.9175 in the guest, as the data it passes around changes from one release to the next.
 
