@@ -31,6 +31,7 @@ pub mod stage;
 pub mod sysfs;
 mod traffic;
 mod watch;
+pub mod xe;
 pub mod xe_query;
 
 use books::Books;
