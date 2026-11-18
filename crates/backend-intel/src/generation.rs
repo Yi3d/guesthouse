@@ -47,6 +47,8 @@ pub struct Generation {
     pub threads_per_eu: u32,
     /// Whether the platform tiles as Xe2 and later do (FtrXe2PlusTiling).
     pub xe2_tiling: bool,
+    /// Each slice's URB in KB, for a card whose hwconfig doesn't say.
+    pub urb_kb_per_slice: u32,
     /// The drivers Intel's INF names for these cards alone.
     pub drivers: CardDrivers,
     /// What in this profile no card has confirmed, for the log.
@@ -70,6 +72,13 @@ const XE3_CORE: u32 = 0x1E00;
 const XE_THREADS_PER_EU: u32 = 8;
 const XE3_THREADS_PER_EU: u32 = 10;
 
+/// Each slice's URB in KB on Lunar Lake, Battlemage and Alchemist. The other generations take the
+/// smallest of these.
+const XE2_LPG_URB_KB_PER_SLICE: u32 = 600;
+const XE2_HPG_URB_KB_PER_SLICE: u32 = 768;
+const XE_HPG_URB_KB_PER_SLICE: u32 = 480;
+const GUESS_URB: &str = "the URB size for a card whose hwconfig doesn't give it is Alchemist's";
+
 /// What is unconfirmed in the same way for every generation no card of has been recorded.
 const GUESS_NO_RECORDING: &str = "no card of this generation has been recorded";
 const GUESS_RECORD_LAYOUT: &str =
@@ -92,6 +101,7 @@ pub const XE2_LPG: Generation = Generation {
     gt_type: GT_TYPE_UNDEFINED,
     threads_per_eu: XE_THREADS_PER_EU,
     xe2_tiling: true,
+    urb_kb_per_slice: XE2_LPG_URB_KB_PER_SLICE,
     drivers: XE2_LPG_DRIVERS,
     guesses: &[GUESS_NO_RECORDING],
 };
@@ -114,6 +124,7 @@ pub const XE2_HPG: Generation = Generation {
     gt_type: GT_TYPE_UNDEFINED,
     threads_per_eu: XE_THREADS_PER_EU,
     xe2_tiling: true,
+    urb_kb_per_slice: XE2_HPG_URB_KB_PER_SLICE,
     drivers: XE2_HPG_DRIVERS,
     guesses: &["only G21, the B580, has been recorded: G31's IP 20.2 is compute-runtime's"],
 };
@@ -136,8 +147,9 @@ pub const XE3_LPG: Generation = Generation {
     gt_type: GT_TYPE_UNDEFINED,
     threads_per_eu: XE3_THREADS_PER_EU,
     xe2_tiling: true,
+    urb_kb_per_slice: XE_HPG_URB_KB_PER_SLICE,
     drivers: XE3_LPG_DRIVERS,
-    guesses: &[GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT],
+    guesses: &[GUESS_URB, GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT],
 };
 
 /// Meteor Lake's graphics: IGFX_METEORLAKE on IGFX_XE_HPG_CORE. Its IPs are Arrow Lake's too, so
@@ -155,8 +167,9 @@ pub const XE_LPG_METEOR_LAKE: Generation = Generation {
     gt_type: GT_TYPE_UNDEFINED,
     threads_per_eu: XE_THREADS_PER_EU,
     xe2_tiling: false,
+    urb_kb_per_slice: XE_HPG_URB_KB_PER_SLICE,
     drivers: XE_LPG_DRIVERS,
-    guesses: &[GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT, GUESS_BEFORE_XE2, GUESS_ON_XE],
+    guesses: &[GUESS_URB, GUESS_NO_RECORDING, GUESS_RECORD_LAYOUT, GUESS_BEFORE_XE2, GUESS_ON_XE],
 };
 
 /// Arrow Lake's graphics: IGFX_ARROWLAKE on IGFX_XE_HPG_CORE. Its H parts are Xe LPG+, 12.74; that
@@ -174,8 +187,10 @@ pub const XE_LPG_ARROW_LAKE: Generation = Generation {
     gt_type: GT_TYPE_UNDEFINED,
     threads_per_eu: XE_THREADS_PER_EU,
     xe2_tiling: false,
+    urb_kb_per_slice: XE_HPG_URB_KB_PER_SLICE,
     drivers: XE_LPG_DRIVERS,
     guesses: &[
+        GUESS_URB,
         GUESS_NO_RECORDING,
         GUESS_RECORD_LAYOUT,
         GUESS_BEFORE_XE2,
@@ -203,6 +218,7 @@ pub const XE_HPG: Generation = Generation {
     gt_type: GT_TYPE_UNDEFINED,
     threads_per_eu: XE_THREADS_PER_EU,
     xe2_tiling: false,
+    urb_kb_per_slice: XE_HPG_URB_KB_PER_SLICE,
     drivers: XE_HPG_DRIVERS,
     guesses: &[
         GUESS_NO_RECORDING,

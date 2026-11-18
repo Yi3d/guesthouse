@@ -23,6 +23,21 @@ pub const MAX_CCS: u32 = 24;
 pub const MAX_VCS: u32 = 25;
 pub const MAX_VECS: u32 = 26;
 pub const MAX_COPY_CS: u32 = 27;
+/// The least and most URB entries of each stage, least first.
+pub const MIN_VS_URB_ENTRIES: u32 = 29;
+pub const MAX_VS_URB_ENTRIES: u32 = 30;
+pub const MIN_HS_URB_ENTRIES: u32 = 33;
+pub const MAX_HS_URB_ENTRIES: u32 = 34;
+pub const MIN_GS_URB_ENTRIES: u32 = 35;
+pub const MAX_GS_URB_ENTRIES: u32 = 36;
+pub const MIN_DS_URB_ENTRIES: u32 = 37;
+pub const MAX_DS_URB_ENTRIES: u32 = 38;
+pub const MAX_URB_STARTING_ADDRESS: u32 = 47;
+pub const URB_SIZE_PER_SLICE_IN_KB: u32 = 68;
+pub const MIN_TASK_URB_ENTRIES: u32 = 77;
+pub const MAX_TASK_URB_ENTRIES: u32 = 78;
+pub const MIN_MESH_URB_ENTRIES: u32 = 79;
+pub const MAX_MESH_URB_ENTRIES: u32 = 80;
 /// A card whose table has no dual subslice keys gives the same two numbers under these, as
 /// subslices. On Xe a subslice and a dual subslice are both the Xe core.
 pub const MAX_SUBSLICE: u32 = 70;

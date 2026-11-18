@@ -55,12 +55,15 @@ use guesthouse_backend::{
     RegistryName, RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, Status, UnmapRequest,
     VendorQuery, Work, WorkStart,
 };
+use hwconfig::Hwconfig;
 pub use ioctl::{INTEL_VENDOR, intel_render_node};
 use protocol::allocation::Resource;
 use protocol::command_header::Header;
 use protocol::context::Context;
 use protocol::escape::Escape;
-use protocol::record::{EngineMaxima, GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads};
+use protocol::record::{
+    EngineMaxima, GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads, Urb, UrbEntries,
+};
 use protocol::{gaps, guest_driver, record, shape};
 use stage::{Desktop, Fallback, Stage};
 use std::os::fd::OwnedFd;
@@ -469,6 +472,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         render_mhz: (card.frequencies.lowest.unwrap_or(0), card.frequencies.highest.unwrap_or(0)),
         memory: Memory { dedicated: card.card_memory(), system_shared: shared, system_video: 0 },
         local_memory: card.config.has_vram(),
+        urb: urb(&card.hwconfig, generation, slices),
         cores,
         compute_engines: card.engines_of(Engine::COMPUTE),
         copy_engine: card.engines_of(Engine::COPY) > 0,
@@ -476,6 +480,25 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         video_enhance_engines: card.instance_mask(Engine::VIDEO_ENHANCE),
         address_bits: card.config.va_bits,
         xe2_tiling: generation.xe2_tiling,
+    }
+}
+
+/// The card's URB from its hwconfig. The size is per slice there and for the whole GPU in the
+/// record; a table without it gets the generation's. A stage whose limits the table lacks is left at
+/// zero, which gives that stage no entries.
+fn urb(config: &Hwconfig, generation: &Generation, slices: u32) -> Urb {
+    let value = |key| config.value(key).unwrap_or(0);
+    let entries = |min, max| UrbEntries { min: value(min), max: value(max) };
+    let per_slice = config.value(hwconfig::URB_SIZE_PER_SLICE_IN_KB).unwrap_or(generation.urb_kb_per_slice);
+    Urb {
+        size_kb: per_slice.saturating_mul(slices),
+        vertex: entries(hwconfig::MIN_VS_URB_ENTRIES, hwconfig::MAX_VS_URB_ENTRIES),
+        hull: entries(hwconfig::MIN_HS_URB_ENTRIES, hwconfig::MAX_HS_URB_ENTRIES),
+        geometry: entries(hwconfig::MIN_GS_URB_ENTRIES, hwconfig::MAX_GS_URB_ENTRIES),
+        domain: entries(hwconfig::MIN_DS_URB_ENTRIES, hwconfig::MAX_DS_URB_ENTRIES),
+        task: entries(hwconfig::MIN_TASK_URB_ENTRIES, hwconfig::MAX_TASK_URB_ENTRIES),
+        mesh: entries(hwconfig::MIN_MESH_URB_ENTRIES, hwconfig::MAX_MESH_URB_ENTRIES),
+        max_starting_address: value(hwconfig::MAX_URB_STARTING_ADDRESS),
     }
 }
 
@@ -1027,6 +1050,23 @@ mod tests {
             (built.gt.slice_count, built.gt.dual_subslice_count, built.gt.thread_count),
             (5, 20, 1280)
         );
+    }
+
+    #[test]
+    fn a_card_whose_hwconfig_lacks_the_urb_gets_its_generations_size_and_no_limits() {
+        let backend = IntelBackend::from_card(card::tests::lunar_lake()).unwrap();
+        let urb = record::urb(backend.record());
+        assert_eq!(urb.size_kb, 600, "one slice of Lunar Lake's");
+        assert_eq!(urb.vertex, UrbEntries::default());
+        assert_eq!(urb.max_starting_address, 0);
+    }
+
+    #[test]
+    fn the_urb_size_is_the_hwconfigs_per_slice_figure_times_the_slices() {
+        let config = Hwconfig::parse(&hwconfig::tests::table(&[(hwconfig::URB_SIZE_PER_SLICE_IN_KB, 768)]));
+        assert_eq!(urb(&config, &generation::XE2_HPG, 5).size_kb, 3840);
+        assert_eq!(urb(&config, &generation::XE2_HPG, 0).size_kb, 0, "nothing to divide by");
+        assert_eq!(urb(&Hwconfig::default(), &generation::XE_HPG, 2).size_kb, 960);
     }
 
     #[test]

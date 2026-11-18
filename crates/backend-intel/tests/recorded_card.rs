@@ -19,3 +19,13 @@ fn the_recorded_b580_gives_the_record_its_own_daemon_gave() {
     assert_eq!(record::summary(backend.record()).to_string(), LOGGED_RECORD);
     assert_eq!(recording::read(&recording::write(&card)), Ok(card), "and it writes back the same");
 }
+
+#[test]
+fn the_recorded_b580_gives_the_guest_its_own_urb() {
+    let backend = IntelBackend::from_card(recording::read(ARC_B580).unwrap()).unwrap();
+    assert_eq!(
+        record::urb(backend.record()).to_string(),
+        "size_kb=3840 vs=64-5888 hs=0-1548 gs=2-1952 ds=50-4480 task=0-1548 mesh=4-1952 max_start=127",
+        "768 KB a slice in five slices, and the stages' limits as its hwconfig gives them"
+    );
+}

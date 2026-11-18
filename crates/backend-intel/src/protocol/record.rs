@@ -92,10 +92,19 @@ mod at {
     pub const PARTITION: usize = 0x23B8;
     /// NumThreadsPerEu, inside GT_SYSTEM_INFO.
     pub const THREADS_PER_EU: usize = 0x2110;
-    /// A second copy of the GPU timestamp's frequency, near GT_SYSTEM_INFO's end. Intel's Vulkan
-    /// driver divides a second in nanoseconds by it for the timestamp period, and will not create a
-    /// device while it is zero.
-    pub const GT_TIMESTAMP_FREQUENCY: usize = 0x2124;
+    /// The URB's size for the whole GPU in KB, inside GT_SYSTEM_INFO. A 3D driver divides it by
+    /// [`SLICE_COUNT`] for a slice's share.
+    pub const URB_SIZE: usize = 0x211C;
+    /// The least and most URB entries of each stage, a dword each, least first.
+    pub const VS_URB_ENTRIES: usize = 0x2120;
+    pub const HS_URB_ENTRIES: usize = 0x2130;
+    pub const GS_URB_ENTRIES: usize = 0x2138;
+    pub const DS_URB_ENTRIES: usize = 0x2140;
+    /// The task and mesh stages', in the order of the hwconfig keys.
+    pub const TASK_URB_ENTRIES: usize = 0x2150;
+    pub const MESH_URB_ENTRIES: usize = 0x2158;
+    /// The highest URB starting address a stage may be given.
+    pub const MAX_URB_STARTING_ADDRESS: usize = 0x2174;
     /// KMD_CAPS_INFO, the kernel driver's capability bits.
     pub const KERNEL_DRIVER_CAPS: usize = 0xB18;
     /// GT_VDBOX_INFO and GT_VEBOX_INFO, inside GT_SYSTEM_INFO and again in the record's own copy of
@@ -211,6 +220,84 @@ pub struct StageThreads {
     pub vertex_pocs: u32,
 }
 
+/// The URB, the on-chip memory the 3D stages pass vertices through, as GT_SYSTEM_INFO describes
+/// it. A 3D driver lays its stages out in it from these, so they have to be the card's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Urb {
+    /// For the whole GPU, in KB.
+    pub size_kb: u32,
+    pub vertex: UrbEntries,
+    pub hull: UrbEntries,
+    pub geometry: UrbEntries,
+    pub domain: UrbEntries,
+    pub task: UrbEntries,
+    pub mesh: UrbEntries,
+    pub max_starting_address: u32,
+}
+
+/// The least and most URB entries a stage may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UrbEntries {
+    pub min: u32,
+    pub max: u32,
+}
+
+impl Urb {
+    fn stages(&self) -> [(usize, UrbEntries); 6] {
+        [
+            (at::VS_URB_ENTRIES, self.vertex),
+            (at::HS_URB_ENTRIES, self.hull),
+            (at::GS_URB_ENTRIES, self.geometry),
+            (at::DS_URB_ENTRIES, self.domain),
+            (at::TASK_URB_ENTRIES, self.task),
+            (at::MESH_URB_ENTRIES, self.mesh),
+        ]
+    }
+}
+
+impl std::fmt::Display for Urb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let range = |entries: UrbEntries| format!("{}-{}", entries.min, entries.max);
+        write!(
+            f,
+            "size_kb={} vs={} hs={} gs={} ds={} task={} mesh={} max_start={}",
+            self.size_kb,
+            range(self.vertex),
+            range(self.hull),
+            range(self.geometry),
+            range(self.domain),
+            range(self.task),
+            range(self.mesh),
+            self.max_starting_address
+        )
+    }
+}
+
+fn write_urb(record: &mut [u8], urb: &Urb) {
+    put_dword(record, at::URB_SIZE, urb.size_kb);
+    for (field, entries) in urb.stages() {
+        put_dword(record, field, entries.min);
+        put_dword(record, field + 4, entries.max);
+    }
+    put_dword(record, at::MAX_URB_STARTING_ADDRESS, urb.max_starting_address);
+}
+
+/// The URB as the record gives it.
+pub fn urb(record: &[u8]) -> Urb {
+    let read = |field| dword(record, field).unwrap_or(0);
+    let entries = |field| UrbEntries { min: read(field), max: read(field + 4) };
+    Urb {
+        size_kb: read(at::URB_SIZE),
+        vertex: entries(at::VS_URB_ENTRIES),
+        hull: entries(at::HS_URB_ENTRIES),
+        geometry: entries(at::GS_URB_ENTRIES),
+        domain: entries(at::DS_URB_ENTRIES),
+        task: entries(at::TASK_URB_ENTRIES),
+        mesh: entries(at::MESH_URB_ENTRIES),
+        max_starting_address: read(at::MAX_URB_STARTING_ADDRESS),
+    }
+}
+
 /// Memory as the record describes it, in bytes. An integrated card has none of its own and shares
 /// the system's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -233,6 +320,7 @@ pub struct RecordFacts {
     pub render_mhz: (u32, u32),
     pub memory: Memory,
     pub local_memory: bool,
+    pub urb: Urb,
     /// The Xe cores, as [`shape::representable`] leaves them. The counts in [`GtSystem`] are of these.
     pub cores: Vec<Core>,
     /// The card's compute engines, and whether it has a copy engine.
@@ -271,7 +359,6 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     let name = facts.adapter_name.as_bytes();
     let name = &name[..name.len().min(ADAPTER_NAME_SIZE - 1)];
     record[at::ADAPTER_NAME..at::ADAPTER_NAME + name.len()].copy_from_slice(name);
-    put_dword(&mut record, at::GT_TIMESTAMP_FREQUENCY, facts.timestamp_hz);
     put_dword(&mut record, at::MIN_RENDER_FREQUENCY, facts.render_mhz.0);
     put_dword(&mut record, at::MAX_RENDER_FREQUENCY, facts.render_mhz.1);
     put_dword(&mut record, at::NUMBER_OF_EUS, facts.gt.eu_count);
@@ -309,6 +396,8 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     {
         put_dword(&mut record, at::STAGE_THREADS + at * 4, value);
     }
+
+    write_urb(&mut record, &facts.urb);
 
     shape::write(&mut record, &facts.cores);
     if facts.compute_engines > 0 {
@@ -482,6 +571,7 @@ pub(crate) mod tests {
             render_mhz: (400, 2050),
             memory: Memory { system_shared: 16 << 30, ..Memory::default() },
             local_memory: false,
+            urb: Urb::default(),
             cores: (0..8).map(|index| Core { slice: 0, index, eu_count: 8, eu_mask: 0xFF }).collect(),
             compute_engines: 1,
             copy_engine: true,
@@ -651,7 +741,6 @@ pub(crate) mod tests {
         let record = build(&facts());
         assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY), Some(19_200_000));
         assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY + 4), Some(0), "a 32-bit field");
-        assert_eq!(dword(&record, at::GT_TIMESTAMP_FREQUENCY), Some(19_200_000));
         assert_eq!(dword(&record, at::THREADS_PER_EU), Some(8));
         let name = &record[at::ADAPTER_NAME..at::ADAPTER_NAME + ADAPTER_NAME_SIZE];
         assert_eq!(&name[..17], b"Intel GPU 0x64a0\0");
@@ -666,6 +755,41 @@ pub(crate) mod tests {
         assert_eq!(dword(&record, at::DUAL_SUBSLICE_COUNT), Some(8));
         assert_eq!(qword(&record, at::SYSTEM_SHARED_MEMORY), Some(16 << 30));
         assert_eq!(qword(&record, at::DEDICATED_VIDEO_MEMORY), Some(0));
+    }
+
+    #[test]
+    fn the_urb_goes_where_gt_system_info_has_it_and_reads_back() {
+        let urb = Urb {
+            size_kb: 3840,
+            vertex: UrbEntries { min: 64, max: 5888 },
+            hull: UrbEntries { min: 0, max: 1548 },
+            geometry: UrbEntries { min: 2, max: 1952 },
+            domain: UrbEntries { min: 50, max: 4480 },
+            task: UrbEntries { min: 0, max: 1548 },
+            mesh: UrbEntries { min: 4, max: 1952 },
+            max_starting_address: 127,
+        };
+        let record = build(&RecordFacts { urb, ..facts() });
+        let read = |at| dword(&record, at).unwrap();
+        assert_eq!(read(0x211C), 3840);
+        assert_eq!([read(0x2120), read(0x2124)], [64, 5888], "vertex");
+        assert_eq!([read(0x2130), read(0x2134)], [0, 1548], "hull");
+        assert_eq!([read(0x2138), read(0x213C)], [2, 1952], "geometry");
+        assert_eq!([read(0x2140), read(0x2144)], [50, 4480], "domain");
+        assert_eq!([read(0x2150), read(0x2154), read(0x2158), read(0x215C)], [0, 1548, 4, 1952]);
+        assert_eq!(read(0x2174), 127);
+        assert_eq!(super::urb(&record), urb);
+        assert_eq!(
+            urb.to_string(),
+            "size_kb=3840 vs=64-5888 hs=0-1548 gs=2-1952 ds=50-4480 task=0-1548 mesh=4-1952 max_start=127"
+        );
+    }
+
+    #[test]
+    fn the_timestamp_frequency_is_not_written_over_the_vertex_stages_most_entries() {
+        let record = build(&facts());
+        assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY), Some(19_200_000));
+        assert_eq!(dword(&record, at::VS_URB_ENTRIES + 4), Some(0));
     }
 
     #[test]
