@@ -4,13 +4,17 @@
 //! machine is put on the software desktop, and started again on it in the same start: see
 //! [`crate::intel_desktop`].
 //!
+//! A machine that already has the display driver shows its picture first and is watched after,
+//! so nobody looks at a black screen for the length of the watch. One that still has to get the
+//! driver is watched first, as putting a driver into a desktop that is about to go helps nobody.
+//!
 //! A compositor that stays up is not yet a desktop: on a card where what it draws doesn't run, it
 //! lives on and shows nothing. So once the display is set up, the watch's last look is for a
 //! picture: the display driver's ring, with a frame on it. One with none fails the same way.
 
 use super::{STOP_WAIT_SECONDS, Task};
 use crate::context::Context;
-use crate::display::{DriverPackage, read_state, ring_in, write_state};
+use crate::display::{DisplayState, Driver, DriverPackage, read_state, ring_in, write_state};
 use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
 use crate::intel_desktop;
@@ -123,14 +127,40 @@ fn watch(task: &Task) -> Option<String> {
     None
 }
 
+/// Whether a display driver in this state can show a picture as soon as the display is set up.
+fn shows_at_once(display: &DisplayState, has_package: bool) -> bool {
+    display.driver == Driver::Installed && !display.restart_owed && has_package
+}
+
+/// Whether this start shows its picture before the desktop is watched: one on an Intel card whose
+/// guest already has the display driver.
+pub(super) fn picture_first(task: &Task) -> bool {
+    watched(task)
+        && shows_at_once(
+            &read_state(task.context, &task.machine),
+            DriverPackage::find(task.context).is_some(),
+        )
+}
+
 /// Whether the hardware desktop failed on this boot, and why. `gpu_missing` is the after-boot check
-/// having found no card.
-pub(super) fn failed(task: &Task, gpu_missing: bool) -> Option<String> {
+/// having found no card. With `picture_first` the watch is left for [`failed_with_picture`].
+pub(super) fn failed(task: &Task, gpu_missing: bool, picture_first: bool) -> Option<String> {
     if !watched(task) {
         return None;
     }
     if gpu_missing {
         return Some("Windows started without the card".to_owned());
+    }
+    if picture_first {
+        return None;
+    }
+    watch(task)
+}
+
+/// The watch of a start that showed its picture first, once the picture is up.
+pub(super) fn failed_with_picture(task: &Task) -> Option<String> {
+    if !watched(task) {
+        return None;
     }
     watch(task)
 }
@@ -232,6 +262,16 @@ mod tests {
         assert_eq!(Look::parse(&said), Some(expected));
         assert_eq!(Look::parse("ERROR: the agent said nothing"), None);
         assert_eq!(Look::parse(&format!("{MARK}12 0")), None);
+    }
+
+    #[test]
+    fn only_a_display_driver_that_is_in_and_ready_shows_a_picture_at_once() {
+        let installed = DisplayState { driver: Driver::Installed, ..DisplayState::default() };
+        assert!(shows_at_once(&installed, true));
+        assert!(!shows_at_once(&installed, false), "this build has no driver to check it against");
+        assert!(!shows_at_once(&DisplayState { restart_owed: true, ..installed.clone() }, true));
+        assert!(!shows_at_once(&DisplayState::default(), true), "it still has to be put in");
+        assert!(!shows_at_once(&DisplayState { driver: Driver::Failed, ..DisplayState::default() }, true));
     }
 
     #[test]

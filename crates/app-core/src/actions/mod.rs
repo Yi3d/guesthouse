@@ -204,19 +204,23 @@ fn start_gpu_vm(task: &mut Task) -> Result<PciIdentity> {
 /// The guest has answered, so this takes it from there to a desktop someone can use.
 fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
     intel_device::switch_back_on(task, shown)?;
+    let picture_first = hardware_desktop::picture_first(task);
     // A guest left running without its GPU stays as it came up, for the reports it's kept for.
-    if get_gpu_ready_on_this_desktop(task)? != Gpu::Working {
+    if get_gpu_ready_on_this_desktop(task, picture_first)? != Gpu::Working {
         return Ok(());
     }
     if new_vm_needed(shown, &read_state(task.context, &task.machine), &task.machine) {
         start_again_for_new_identity(task)?;
-        if get_gpu_ready_on_this_desktop(task)? != Gpu::Working {
+        if get_gpu_ready_on_this_desktop(task, picture_first)? != Gpu::Working {
             return Ok(());
         }
     }
     intel_device::switch_off_for_software_desktop(task, shown)?;
     set_up_desktop(task)?;
     if let Some(why) = hardware_desktop::no_picture(task) {
+        return start_again_on_software_desktop(task, &why).map(|_| ());
+    }
+    if picture_first && let Some(why) = hardware_desktop::failed_with_picture(task) {
         return start_again_on_software_desktop(task, &why).map(|_| ());
     }
     apply_window_speed(task)?;
@@ -259,11 +263,14 @@ fn get_gpu_ready(task: &mut Task) -> Result<Gpu> {
     Ok(Gpu::Working)
 }
 
-/// [`get_gpu_ready`], and for a desktop on an Intel card, a watch until it has stayed up. One that
+/// [`get_gpu_ready`], and for a desktop on an Intel card, a watch until it has stayed up, unless
+/// this start shows its picture first and is watched after. One that
 /// failed is started again on the software desktop, and what that start found is then the answer.
-fn get_gpu_ready_on_this_desktop(task: &mut Task) -> Result<Gpu> {
+fn get_gpu_ready_on_this_desktop(task: &mut Task, picture_first: bool) -> Result<Gpu> {
     let gpu = get_gpu_ready(task)?;
-    let Some(why) = hardware_desktop::failed(task, gpu == Gpu::Missing) else { return Ok(gpu) };
+    let Some(why) = hardware_desktop::failed(task, gpu == Gpu::Missing, picture_first) else {
+        return Ok(gpu);
+    };
     start_again_on_software_desktop(task, &why)
 }
 
