@@ -5,6 +5,7 @@ use crate::context::{Context, SLOT_VARIABLE};
 use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
 use crate::guest_memory::GuestMemory;
+use guesthouse_backend_intel::stage::{DESKTOP_VARIABLE, Desktop};
 use guesthouse_daemon::memory_files::{MemoryFiles, RAM_VARIABLE, WINDOW_VARIABLE};
 use guesthouse_daemon::slot::Slot;
 use guesthouse_daemon::{card_choice, jail};
@@ -73,6 +74,13 @@ impl DaemonStart {
     /// backend draws, and the log is quiet again.
     fn with_intel_test_log(mut self) -> Self {
         self.environment.insert(VERBOSE_VARIABLE.to_owned(), "1".to_owned());
+        self
+    }
+
+    /// Where an Intel guest's desktop is drawn, as the app chose for this start: see
+    /// [`crate::intel_desktop`]. The daemon follows the app's choice rather than its own environment.
+    pub fn with_intel_desktop(mut self, desktop: Desktop) -> Self {
+        self.environment.insert(DESKTOP_VARIABLE.to_owned(), desktop.value().to_owned());
         self
     }
 

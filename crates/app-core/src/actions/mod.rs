@@ -10,6 +10,7 @@ mod driver_store;
 mod gpu_check;
 mod guest_files;
 mod guest_upload;
+mod hardware_desktop;
 mod identity;
 mod identity_restart;
 mod identity_switch;
@@ -201,12 +202,12 @@ fn start_gpu_vm(task: &mut Task) -> Result<PciIdentity> {
 /// The guest has answered, so this takes it from there to a desktop someone can use.
 fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
     // A guest left running without its GPU stays as it came up, for the reports it's kept for.
-    if get_gpu_ready(task)? == Gpu::Missing {
+    if get_gpu_ready_on_this_desktop(task)? != Gpu::Working {
         return Ok(());
     }
     if new_vm_needed(shown, &read_state(task.context, &task.machine), &task.machine) {
         start_again_for_new_identity(task)?;
-        if get_gpu_ready(task)? == Gpu::Missing {
+        if get_gpu_ready_on_this_desktop(task)? != Gpu::Working {
             return Ok(());
         }
     }
@@ -249,6 +250,20 @@ fn get_gpu_ready(task: &mut Task) -> Result<Gpu> {
     }
     set_up_identity(task);
     Ok(Gpu::Working)
+}
+
+/// [`get_gpu_ready`], and for a desktop on an Intel card, a watch until it has stayed up. One that
+/// failed is started again on the software desktop, and what that start found is then the answer.
+fn get_gpu_ready_on_this_desktop(task: &mut Task) -> Result<Gpu> {
+    let gpu = get_gpu_ready(task)?;
+    let Some(why) = hardware_desktop::failed(task, gpu == Gpu::Missing) else { return Ok(gpu) };
+    let told = hardware_desktop::fall_back_and_stop(task, &why)?;
+    wait_for_memory(task);
+    task.error.clear();
+    let shown = start_gpu_vm(task)?;
+    get_ready(task, shown)?;
+    task.error = if task.error.is_empty() { told } else { format!("{told} {}", task.error) };
+    Ok(Gpu::StartedAgain)
 }
 
 /// The same start goes on in a new VM, which shows the card maker's number. What the first one said is about a

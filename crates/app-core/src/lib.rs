@@ -32,6 +32,7 @@ pub mod host;
 pub mod host_drives;
 pub mod host_sensors;
 pub mod input;
+pub mod intel_desktop;
 pub mod iso;
 pub mod jailing;
 pub mod kept_logs;

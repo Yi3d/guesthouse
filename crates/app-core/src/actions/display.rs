@@ -13,11 +13,11 @@ use crate::display::{
 use crate::driver_modes::{DriverModes, SETTINGS_FILE, with_rate};
 use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
+use crate::intel_desktop;
 use crate::log::write_log;
 use crate::machine::REFRESH_RATES;
 use crate::screen_gpu::memory_frames;
 use crate::text::base64_encode;
-use guesthouse_backend_intel::stage::Desktop;
 use guesthouse_daemon::display_note::ScreenNote;
 use guesthouse_daemon::gpu_note::read_note as read_gpu_note;
 use std::fs;
@@ -254,7 +254,8 @@ fn take_out(task: &Task) -> Result<()> {
 /// Whether this machine's driver stays out of Windows: an Intel card's, unless the stage gives it the
 /// hardware desktop. Windows would have its compositor draw the driver's display on the card.
 fn kept_off(task: &Task) -> bool {
-    task.machine.windows_maker() == Some(GpuMaker::Intel) && !Desktop::from_environment().has_display_driver()
+    task.machine.windows_maker() == Some(GpuMaker::Intel)
+        && !intel_desktop::for_start(task.context, &task.machine).has_display_driver()
 }
 
 /// Takes the driver out if Windows has it, and says why it stays out.
