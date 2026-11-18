@@ -93,9 +93,10 @@ mod tests {
     use crate::context::Context;
     use crate::machine::Machine;
     use crate::setup::intel::stand_in::lay_out_driver;
-    use crate::setup::intel::{KERNEL_DRIVERS, write_intel_setup};
+    use crate::setup::intel::write_intel_setup;
     use crate::testing::Scratch;
     use crate::vm_host::stand_in::RecordingHost;
+    use guesthouse_backend_intel::protocol::guest_driver::XE2_LPG_DRIVERS;
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::PathBuf;
@@ -172,15 +173,15 @@ mod tests {
     #[test]
     fn a_guest_from_a_test_build_gets_the_kernel_driver_and_a_restart() {
         let scratch = Scratch::new();
-        let (context, guest, machine) = installed_without(&scratch, &[KERNEL_DRIVERS[0]], true);
+        let (context, guest, machine) = installed_without(&scratch, &[XE2_LPG_DRIVERS.kernel], true);
         let host = RecordingHost::default();
         let mut task = Task::new(&context, &host, "start", machine);
         assert_eq!(complete_intel_driver(&mut task), Ok(()));
         assert_eq!(task.error, "");
         let files = guest.files.files.lock().unwrap();
         let placed: Vec<&String> = files.keys().collect();
-        assert_eq!(placed, [&format!("{STORE}\\{}", KERNEL_DRIVERS[0])]);
-        let local = fs::read(scratch.path("intel-driver").join(KERNEL_DRIVERS[0])).unwrap();
+        assert_eq!(placed, [&format!("{STORE}\\{}", XE2_LPG_DRIVERS.kernel)]);
+        let local = fs::read(scratch.path("intel-driver").join(XE2_LPG_DRIVERS.kernel)).unwrap();
         assert!(files[placed[0]] == local);
         assert!(guest.files.requests.lock().unwrap().iter().any(|asked| asked == RESTART_SCRIPT));
     }
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn a_start_of_a_guest_from_a_test_build_has_its_gpu() {
         let scratch = Scratch::new();
-        let (context, _guest, machine) = installed_without(&scratch, &[KERNEL_DRIVERS[0]], true);
+        let (context, _guest, machine) = installed_without(&scratch, &[XE2_LPG_DRIVERS.kernel], true);
         let host = RecordingHost::default();
         let mut task = Task::new(&context, &host, "start", machine);
         assert_eq!(crate::actions::get_gpu_ready(&mut task), Ok(crate::actions::gpu_check::Gpu::Working));
@@ -200,7 +201,7 @@ mod tests {
     #[test]
     fn a_guest_that_does_not_restart_is_told_the_gpu_comes_next_time() {
         let scratch = Scratch::new();
-        let (context, _guest, machine) = installed_without(&scratch, &[KERNEL_DRIVERS[0]], false);
+        let (context, _guest, machine) = installed_without(&scratch, &[XE2_LPG_DRIVERS.kernel], false);
         let host = RecordingHost::default();
         let mut task = Task::new(&context, &host, "start", machine);
         assert_eq!(complete_intel_driver(&mut task), Ok(()));
@@ -220,7 +221,8 @@ mod tests {
     #[test]
     fn a_guest_without_the_driver_itself_or_on_another_card_is_sent_nothing() {
         let scratch = Scratch::new();
-        let (context, guest, machine) = installed_without(&scratch, &[USER_DRIVER, KERNEL_DRIVERS[0]], true);
+        let (context, guest, machine) =
+            installed_without(&scratch, &[USER_DRIVER, XE2_LPG_DRIVERS.kernel], true);
         let host = RecordingHost::default();
         let mut task = Task::new(&context, &host, "start", machine.clone());
         assert_eq!(complete_intel_driver(&mut task), Ok(()));

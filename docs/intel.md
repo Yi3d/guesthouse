@@ -1,6 +1,8 @@
 # Windows on an Intel card
 
-This doesn't work yet, and none of it has met a guest. It's the first step towards Intel's graphics, starting with Lunar Lake (Arc 130V and 140V) on Linux's `xe` driver. Two cards are offered so far: the Arc 140V, PCI id 8086:64A0, and the Arc B580, 8086:E20B.
+This doesn't work yet, and none of it has met a guest. It's the first step towards Intel's graphics on Linux's `xe` driver. The cards offered are the ones Intel's Windows driver 32.0.101.9175 covers and `xe` takes by default: Lunar Lake (Arc 130V and 140V), Battlemage (Arc B570, B580 and the Pro cards), and Panther Lake and Wildcat Lake. Only the Arc B580 has been read on a real PC so far; the others are set up from Intel's and the kernel's open tables and are untested. The daemon tells a card's generation from what the card says, so a card of these generations is offered whatever its PCI id.
+
+Alchemist (the Arc A-series), Meteor Lake and Arrow Lake are known too, but `i915` drives them unless the kernel is told otherwise, and a card that `i915` drives is not offered: the daemon works through `xe`. The setup check says so and gives the kernel options that hand the card to `xe`. `xe` on those cards is newer than `i915` and less tried.
 
 ## What it's meant to do
 
@@ -10,7 +12,7 @@ It only takes Intel's driver 32.0.101.9175 in the guest, as the data it passes a
 
 ## Trying it
 
-You need a Lunar Lake laptop or an Arc B580, Linux with the `xe` driver on that card, and a test build of Guesthouse. It takes a Windows 11 ISO and about an hour.
+You need one of those cards, Linux with the `xe` driver on it, and a test build of Guesthouse. It takes a Windows 11 ISO and about an hour.
 
 1. Download Intel's graphics driver 32.0.101.9175 for Arc from Intel's site. The file is `gfx_win_101.9175.exe`, about 860 MB. Other releases are refused.
 2. Make sure `7z` can unpack it. Intel's installer keeps its files in a RAR archive, and many distributions' `7z` leave RAR out, so it lists the file and then fails to unpack it. The app says so when that happens. 7-Zip's own Linux build from 7-zip.org works. Put it on your PATH as `7z`.
@@ -83,7 +85,7 @@ Test builds up to 0.6.2-intel.1 left the kernel driver file out, so Windows on a
 
 ## What it changes in Windows
 
-At install, Windows gets the user-mode part of Intel's driver in its host driver store, under the folder name the daemon gives it, and one file of the kernel driver: `igdkmdn64.sys` for Lunar Lake or `igdkmdnd64.sys` for Battlemage, the card's own. Windows never loads it, as the paravirtual adapter's kernel driver is Windows' own, but the daemon names it as the adapter's driver image, and Windows won't start the adapter unless that file is in the folder. NVIDIA's and AMD's folders carry theirs for the same reason. The rest of the kernel driver, the firmware and Intel's media software don't go in.
+At install, Windows gets the user-mode part of Intel's driver in its host driver store, under the folder name the daemon gives it, and one file of the kernel driver: `igdkmdn64.sys` for a card in the processor or `igdkmdnd64.sys` for one with memory of its own, the card's own. Windows never loads it, as the paravirtual adapter's kernel driver is Windows' own, but the daemon names it as the adapter's driver image, and Windows won't start the adapter unless that file is in the folder. NVIDIA's and AMD's folders carry theirs for the same reason. The rest of the kernel driver, the firmware and Intel's media software don't go in.
 
 It also gets the libraries Intel's INF copies to Windows' system folders, which programs find by name and which lead them to Intel's OpenCL, Vulkan and Level Zero drivers. The app reads the list from the INF when the driver is unpacked (the sections for the card that copy to directory 11 or `10,SysWow64`), leaving out Intel's control library, media libraries and tools such as `vulkaninfo`, and the guest's setup script places them from the store copy. Every start checks them again and puts back any that are missing. A file is only copied when Windows lacks it or has an older one, which is the INF's own rule, so Windows' own `opengl32.dll` stays. For driver 32.0.101.9175 on the Arc 140V:
 

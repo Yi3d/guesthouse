@@ -99,8 +99,13 @@ impl IntelBackend {
     /// a card whose graphics has no profile.
     pub fn from_card(card: CardFacts) -> Result<Self, Refusal> {
         let ip = card.main_gt().map(|gt| gt.ip).unwrap_or_default();
-        let generation = generation::for_render_ip(ip).ok_or_else(|| {
-            Refusal(format!("This Intel card's graphics IP is {ip}, which this build has no profile for."))
+        let generation = generation::for_card(ip, card.pci.device).ok_or_else(|| {
+            Refusal(format!(
+                "This Intel card, device {:04x} with graphics IP {ip}, is of a generation this build has no \
+                 profile for. Run `intel-probe --record card.txt` and send card.txt with the probe's output, so \
+                 one can be made.",
+                card.pci.device
+            ))
         })?;
         // compute-runtime works out threads per EU by dividing the thread count by the EU count, so a
         // record with none would stop it at the start, or worse.
@@ -193,6 +198,9 @@ impl IntelBackend {
         );
         for (what, error) in &card.unanswered {
             log::warn!("{PREFIX} card query=\"{what}\" unanswered=\"{error}\"");
+        }
+        for guess in self.generation.guesses {
+            log::info!("{PREFIX} profile-guess \"{guess}\"");
         }
         log::info!("{PREFIX} record {}", record::summary(&self.record));
         log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
@@ -406,6 +414,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         video_engines: card.instance_mask(Engine::VIDEO_DECODE),
         video_enhance_engines: card.instance_mask(Engine::VIDEO_ENHANCE),
         address_bits: card.config.va_bits,
+        xe2_tiling: generation.xe2_tiling,
     }
 }
 
@@ -832,6 +841,52 @@ mod tests {
         assert_eq!((summary.eu_count, summary.virtual_machine, summary.compression), (64, 1, false));
     }
 
+    /// A test card given another generation's device id and render IP.
+    fn card_as(mut card: CardFacts, device: u16, ip: xe_query::IpVersion) -> CardFacts {
+        card.pci.device = device;
+        card.config.device_id = device;
+        card.gts.iter_mut().filter(|gt| gt.kind == Gt::MAIN).for_each(|gt| gt.ip = ip);
+        card
+    }
+
+    fn ip(major: u16, minor: u16) -> xe_query::IpVersion {
+        xe_query::IpVersion { major, minor, revision: 0 }
+    }
+
+    #[test]
+    fn a_panther_lake_card_gets_xe3s_family_core_and_threads() {
+        let card = card_as(card::tests::lunar_lake(), 0xB080, ip(30, 0));
+        let backend = IntelBackend::from_card(card.clone()).unwrap();
+        let summary = record::summary(backend.record());
+        assert_eq!((summary.product_family, summary.render_core, summary.device_id), (1300, 0x1E00, 0xB080));
+        assert!(protocol::features::is_set(backend.record(), protocol::features::XE2_TILING));
+        let mut bare = card;
+        bare.hwconfig = hwconfig::Hwconfig::default();
+        let facts = record_facts(&bare, &generation::XE3_LPG, 0);
+        assert_eq!(facts.gt.thread_count, 64 * 10, "ten threads to an EU where hwconfig doesn't say");
+    }
+
+    #[test]
+    fn an_alchemist_card_with_no_ip_gets_dg2s_family_and_no_xe2_tiling() {
+        let backend = IntelBackend::from_card(card_as(card::tests::battlemage(), 0x56A0, ip(0, 0))).unwrap();
+        let summary = record::summary(backend.record());
+        assert_eq!((summary.product_family, summary.render_core, summary.device_id), (1270, 0xC07, 0x56A0));
+        assert_eq!(summary.render_ip, 0, "xe gives no IP for it, so the record says none");
+        assert!(!protocol::features::is_set(backend.record(), protocol::features::XE2_TILING));
+        assert!(protocol::features::is_set(backend.record(), protocol::features::LOCAL_MEMORY));
+    }
+
+    #[test]
+    fn meteor_lake_and_arrow_lake_cards_get_their_own_family_by_id() {
+        let meteor = IntelBackend::from_card(card_as(card::tests::lunar_lake(), 0x7D55, ip(12, 71))).unwrap();
+        let arrow = IntelBackend::from_card(card_as(card::tests::lunar_lake(), 0x7D67, ip(12, 70))).unwrap();
+        assert_eq!(record::summary(meteor.record()).product_family, 1272);
+        assert_eq!(record::summary(arrow.record()).product_family, 1273);
+        assert!(!protocol::features::is_set(arrow.record(), protocol::features::XE2_TILING));
+        let unplaced = IntelBackend::from_card(card_as(card::tests::lunar_lake(), 0x7DFF, ip(12, 70)));
+        assert!(unplaced.unwrap_err().0.contains("intel-probe --record"));
+    }
+
     #[test]
     fn a_card_with_memory_of_its_own_offers_that() {
         let backend = IntelBackend::from_card(card::tests::battlemage()).unwrap();
@@ -864,9 +919,10 @@ mod tests {
     #[test]
     fn a_card_with_no_profile_is_refused_in_plain_words() {
         let mut card = card::tests::lunar_lake();
-        card.gts[0].ip.minor = 2;
+        card.gts[0].ip.minor = 3;
         let refusal = IntelBackend::from_card(card).unwrap_err();
         assert!(refusal.0.contains("no profile"), "{}", refusal.0);
+        assert!(refusal.0.contains("intel-probe --record"), "it says what to send: {}", refusal.0);
     }
 
     #[test]

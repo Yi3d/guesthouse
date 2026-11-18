@@ -381,43 +381,57 @@ mod tests {
         assert_eq!(without_comment("a = \"b;c\" ; d"), "a = \"b;c\" ");
     }
 
-    /// Intel's own INF, named in `GUESTHOUSE_INTEL_INF`, with the card in `GUESTHOUSE_INTEL_DEVICE` as
-    /// hex. Run by hand, as the INF is Intel's and not ours. Prints the files, and holds them to the
-    /// ones the Intel daemon names.
+    /// Intel's own INF, named in `GUESTHOUSE_INTEL_INF`, with the cards in `GUESTHOUSE_INTEL_DEVICE` as
+    /// hex, split by commas, or `listed` for every card the INF lists. Run by hand, as the INF is
+    /// Intel's and not ours. Prints the files, and holds them to the ones the Intel daemon names for
+    /// the card's generation. A card no generation lists is printed and passed over.
     #[test]
     #[ignore = "needs Intel's INF"]
     fn a_real_inf_gives_every_file_the_daemon_names() {
+        use crate::setup::intel::{NAMED_FILES, kind_files};
+        use guesthouse_backend_intel::generation;
         let path = std::env::var("GUESTHOUSE_INTEL_INF").unwrap();
-        let device = u32::from_str_radix(&std::env::var("GUESTHOUSE_INTEL_DEVICE").unwrap(), 16).unwrap();
         let inf = decode(&std::fs::read(path).unwrap());
-        let files = guest_files(&inf, device);
-        println!(
-            "{}
-{} files",
-            files.join(
-                "
-"
-            ),
-            files.len()
-        );
-        for named in crate::setup::intel::NAMED_FILES {
-            assert!(files.iter().any(|file| file == named), "{named} is not among them");
-        }
-        let has_pair = |pair: &[&str; 2]| pair.iter().all(|name| files.iter().any(|file| file == name));
-        assert!(crate::setup::intel::OPENGL_DRIVERS.iter().any(has_pair), "no OpenGL drivers among them");
-        assert!(!files.iter().any(|file| file.ends_with(".sys")), "no kernel driver");
-        let system = system_files(&inf, device);
-        for file in &system {
-            println!("{} {} from {}", file.folder, file.name, file.source);
-        }
-        let has = |folder: &str, name: &str| {
-            system.iter().any(|file| file.folder == folder && file.name.eq_ignore_ascii_case(name))
+        let wanted = std::env::var("GUESTHOUSE_INTEL_DEVICE").unwrap();
+        let devices: Vec<u32> = if wanted == "listed" {
+            let id = regex::Regex::new(r"(?i)PCI\\VEN_8086&DEV_([0-9A-F]{4})").unwrap();
+            let listed = id.captures_iter(&inf).map(|found| u32::from_str_radix(&found[1], 16).unwrap());
+            listed.collect::<BTreeSet<u32>>().into_iter().collect()
+        } else {
+            wanted.split(',').map(|device| u32::from_str_radix(device.trim(), 16).unwrap()).collect()
         };
-        for name in ["vulkan-1.dll", "OpenCL.dll", "msvcp140.dll"] {
-            assert!(has("SysWOW64", name), "{name} is not in SysWOW64");
-        }
-        for name in ["vulkan-1.dll", "OpenCL.dll", "ze_loader.dll", "msvcp140.dll", "vcruntime140.dll"] {
-            assert!(has("System32", name), "{name} is not in System32");
+        for device in devices {
+            let Some(generation) = generation::for_device(device as u16) else {
+                println!("{device:04X}: no generation lists it");
+                continue;
+            };
+            let files = guest_files(&inf, device);
+            let system = system_files(&inf, device);
+            println!(
+                "{device:04X} {}: {} files, {} system files",
+                generation.name,
+                files.len(),
+                system.len()
+            );
+            for named in NAMED_FILES.iter().copied().chain(kind_files(&generation.drivers)) {
+                let is_kernel = named == generation.drivers.kernel;
+                // The kernel driver is the one file the app adds to what the INF puts in the folder.
+                let found = files.iter().any(|file| file.eq_ignore_ascii_case(named));
+                assert_eq!(found, !is_kernel, "{device:04X}: {named}");
+            }
+            assert!(!files.iter().any(|file| file.ends_with(".sys")), "{device:04X}: no kernel driver");
+            let has = |folder: &str, name: &str| {
+                system.iter().any(|file| file.folder == folder && file.name.eq_ignore_ascii_case(name))
+            };
+            for name in ["vulkan-1.dll", "msvcp140.dll"] {
+                assert!(has("SysWOW64", name), "{device:04X}: {name} is not in SysWOW64");
+            }
+            if generation.drivers.opencl_32_bit {
+                assert!(has("SysWOW64", "OpenCL.dll"), "{device:04X}: OpenCL.dll is not in SysWOW64");
+            }
+            for name in ["vulkan-1.dll", "OpenCL.dll", "ze_loader.dll", "msvcp140.dll", "vcruntime140.dll"] {
+                assert!(has("System32", name), "{device:04X}: {name} is not in System32");
+            }
         }
     }
 

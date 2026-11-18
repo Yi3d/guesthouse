@@ -239,6 +239,8 @@ pub struct RecordFacts {
     pub video_enhance_engines: u32,
     /// The bits of GPU address the card has.
     pub address_bits: u64,
+    /// Whether the card tiles as Xe2 and later do.
+    pub xe2_tiling: bool,
 }
 
 /// Builds the record.
@@ -334,7 +336,7 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
 }
 
 /// The flags this backend sets: the memory model the core offers, hardware scheduling, Xe2's
-/// tiling, the engines the card has and the preemption Xe2 has. Compression is always off.
+/// tiling where the card has it, the engines the card has and the preemption Xe2 has. Compression is always off.
 ///
 /// Five-level page tables are on only when the card has the address bits for them. The core's
 /// addresses stop at 1 TiB, so a guest told it has five levels still never gets an address that
@@ -353,7 +355,7 @@ fn set_features(record: &mut [u8], facts: &RecordFacts) {
         (features::TILE_Y, false),
         (features::HW_SEMAPHORE_64, false),
         (features::HW_SCHEDULING, true),
-        (features::XE2_TILING, true),
+        (features::XE2_TILING, facts.xe2_tiling),
         (features::PML5, facts.address_bits >= FIVE_LEVEL_ADDRESS_BITS),
         (features::WALKER_MTP, compute),
         (features::CCS_RING, compute),
@@ -478,6 +480,7 @@ pub(crate) mod tests {
             video_engines: 0b11,
             video_enhance_engines: 0b11,
             address_bits: 48,
+            xe2_tiling: true,
         }
     }
 
@@ -559,6 +562,13 @@ pub(crate) mod tests {
         }
         let discrete = build(&RecordFacts { local_memory: true, ..facts() });
         assert!(features::is_set(&discrete, features::LOCAL_MEMORY));
+    }
+
+    #[test]
+    fn xe2_tiling_is_said_only_of_a_card_that_has_it() {
+        let older = build(&RecordFacts { xe2_tiling: false, ..facts() });
+        assert!(!features::is_set(&older, features::XE2_TILING));
+        assert!(!features::is_set(&older, features::TILE_Y), "nor the tiling before it");
     }
 
     #[test]
