@@ -16,6 +16,7 @@ pub mod features;
 pub mod gaps;
 pub mod guest_driver;
 pub mod hw_queue;
+pub mod node_metadata;
 pub mod nodes;
 pub mod partition;
 pub mod record;

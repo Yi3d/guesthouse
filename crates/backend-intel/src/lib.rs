@@ -464,6 +464,11 @@ impl Backend for IntelBackend {
                     None => QueryOutcome::LeftToTheCore,
                 }
             }
+            protocol::node_metadata::QUERY_NODE_METADATA => match protocol::node_metadata::answer(query, out)
+            {
+                Some(status) => QueryOutcome::Caps(status),
+                None => QueryOutcome::LeftToTheCore,
+            },
             _ => match protocol::wddm_caps::answer(query, out) {
                 Some(status) => QueryOutcome::Caps(status),
                 None => QueryOutcome::LeftToTheCore,
