@@ -231,6 +231,7 @@ mod tests {
         for wanted in [
             "'Microsoft-Windows-Kernel-PnP'",
             "@(411, 219)",
+            r"'WUDFRd*ROOT\DISPLAY\*0xC0000365'",
             "'Microsoft-Windows-DxgKrnl-Admin'",
             "'Microsoft-Windows-DxgKrnl-Operational'",
             "$lines -join ' | '",

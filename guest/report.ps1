@@ -30,6 +30,9 @@ $providers = @('Display', 'Microsoft-Windows-DxgKrnl', 'dxgkrnl', 'nvlddmkm', 'a
 # every device there is, so only these two are taken.
 $pnpProvider = 'Microsoft-Windows-Kernel-PnP'
 $pnpEvents = @(411, 219)
+# Windows logs this 219 for the Guesthouse display at every boot, on a healthy guest too, so it says
+# nothing and only misleads.
+$usualPnp = 'WUDFRd*ROOT\DISPLAY\*0xC0000365'
 # The graphics kernel writes its own logs, apart from System: where it says it reset or stopped an
 # adapter. Every event in them is about the display stack. They're named with a hyphen where Event
 # Viewer shows a slash.
@@ -52,7 +55,8 @@ $since = (Get-Date).AddDays(-$eventDays)
 $system = Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $since } -MaxEvents 20000 |
     Where-Object {
         $providers -contains $_.ProviderName -or $_.ProviderName -like '*Guesthouse*' -or
-            ($_.ProviderName -eq $pnpProvider -and $pnpEvents -contains $_.Id)
+            ($_.ProviderName -eq $pnpProvider -and $pnpEvents -contains $_.Id -and
+                -not ($_.Id -eq 219 -and $_.Message -like "*$usualPnp*"))
     }
 # A log Windows doesn't have stops the whole script with "The parameter is incorrect", whatever the
 # error preference, and with it every part after this one, so each is tried on its own.
