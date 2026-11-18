@@ -17,13 +17,19 @@ use std::ffi::OsStr;
 /// The desktop's compositor, by its program's file name.
 const COMPOSITOR: &str = "dwm.exe";
 
-/// `0` gives the guest the hardware desktop, for an experiment. Unset, or anything else, keeps
-/// [`STAGE_DESKTOP`].
+/// `0` asks for the hardware desktop and `1` for the software one. Unset, or anything else, leaves
+/// the choice to [`Desktop::default_for`].
 pub const DESKTOP_VARIABLE: &str = "GUESTHOUSE_INTEL_SOFTWARE_DESKTOP";
 const HARDWARE_DESKTOP_VALUE: &str = "0";
+const SOFTWARE_DESKTOP_VALUE: &str = "1";
 
-/// The desktop this stage gives a guest unless a person asks for the other.
+/// The desktop this stage gives a guest on a real card unless a person asks for the other. The one
+/// line to change when the hardware desktop becomes the default.
 pub const STAGE_DESKTOP: Desktop = Desktop::Software;
+
+/// A recorded card stands in for a card in the lab, and nothing can draw on it, so its guests keep
+/// the software desktop unless someone asks.
+const RECORDED_CARD_DESKTOP: Desktop = Desktop::Software;
 
 /// Where the guest's desktop is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,17 +41,42 @@ pub enum Desktop {
 }
 
 impl Desktop {
-    /// The desktop from [`DESKTOP_VARIABLE`]'s value.
-    pub fn from_value(value: Option<&OsStr>) -> Self {
-        match value {
-            Some(value) if value == HARDWARE_DESKTOP_VALUE => Self::Hardware,
-            _ => STAGE_DESKTOP,
+    /// The desktop a person asked for in [`DESKTOP_VARIABLE`]'s value, if they asked.
+    pub fn asked(value: Option<&OsStr>) -> Option<Self> {
+        match value? {
+            value if value == HARDWARE_DESKTOP_VALUE => Some(Self::Hardware),
+            value if value == SOFTWARE_DESKTOP_VALUE => Some(Self::Software),
+            _ => None,
         }
+    }
+
+    /// The desktop a guest gets when nobody asked: the stage's, or a recorded card's.
+    pub fn default_for(recorded_card: bool) -> Self {
+        if recorded_card { RECORDED_CARD_DESKTOP } else { STAGE_DESKTOP }
+    }
+
+    /// The desktop from [`DESKTOP_VARIABLE`]'s value, or the default.
+    pub fn from_value(value: Option<&OsStr>, recorded_card: bool) -> Self {
+        Self::asked(value).unwrap_or(Self::default_for(recorded_card))
+    }
+
+    /// What a person asked for in this process's environment, if anything.
+    pub fn asked_in_environment() -> Option<Self> {
+        Self::asked(std::env::var_os(DESKTOP_VARIABLE).as_deref())
     }
 
     /// The desktop this process was started with.
     pub fn from_environment() -> Self {
-        Self::from_value(std::env::var_os(DESKTOP_VARIABLE).as_deref())
+        let recorded_card = crate::recording::recorded_card_file().is_some();
+        Self::from_value(std::env::var_os(DESKTOP_VARIABLE).as_deref(), recorded_card)
+    }
+
+    /// The value of [`DESKTOP_VARIABLE`] that asks for this desktop.
+    pub fn value(self) -> &'static str {
+        match self {
+            Self::Hardware => HARDWARE_DESKTOP_VALUE,
+            Self::Software => SOFTWARE_DESKTOP_VALUE,
+        }
     }
 
     /// Whether `program` is refused the driver for this Direct3D version, and why.
@@ -104,9 +135,22 @@ mod tests {
     }
 
     #[test]
-    fn the_desktop_is_the_stages_unless_a_person_asks_for_the_hardware_one() {
-        assert_eq!(Desktop::from_value(None), STAGE_DESKTOP);
-        assert_eq!(Desktop::from_value(Some(OsStr::new("1"))), Desktop::Software, "as a lab exported it");
-        assert_eq!(Desktop::from_value(Some(OsStr::new("0"))), Desktop::Hardware);
+    fn each_value_asks_for_its_own_desktop_whatever_the_default() {
+        for recorded_card in [false, true] {
+            let from = |value: &str| Desktop::from_value(Some(OsStr::new(value)), recorded_card);
+            assert_eq!(from("0"), Desktop::Hardware);
+            assert_eq!(from("1"), Desktop::Software, "as a lab exported it");
+            assert_eq!(from("yes"), Desktop::default_for(recorded_card));
+            assert_eq!(Desktop::from_value(None, recorded_card), Desktop::default_for(recorded_card));
+        }
+        for desktop in [Desktop::Software, Desktop::Hardware] {
+            assert_eq!(Desktop::asked(Some(OsStr::new(desktop.value()))), Some(desktop));
+        }
+    }
+
+    #[test]
+    fn a_real_card_gets_the_stages_desktop_and_a_recorded_one_the_software_desktop() {
+        assert_eq!(Desktop::default_for(false), STAGE_DESKTOP);
+        assert_eq!(Desktop::default_for(true), Desktop::Software);
     }
 }
