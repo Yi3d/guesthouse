@@ -11,7 +11,7 @@
 // A lab build uses only part of what the tests do.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync};
+use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync, VmFault};
 use super::batch;
 use super::device::{CpuMap, EngineCycles, Xe};
 use super::plan::pat;
@@ -40,6 +40,7 @@ pub enum Call {
     PointReached { syncobj: u32, point: u64 },
     EngineCycles(EngineInstance),
     NamesFaults,
+    VmFaults(u32),
 }
 
 impl Call {
@@ -62,6 +63,7 @@ impl Call {
             Self::PointReached { .. } => "point_reached",
             Self::EngineCycles(_) => "engine_cycles",
             Self::NamesFaults => "names_faults",
+            Self::VmFaults(_) => "vm_faults",
         }
     }
 }
@@ -236,6 +238,8 @@ struct State {
     fault_runs: bool,
     held: Vec<Held>,
     faults: Vec<u64>,
+    /// What xe would list for each VM, as it does when the card has page fault support.
+    vm_faults: HashMap<u32, Vec<VmFault>>,
     clock_reads: u64,
     names_faults: bool,
     /// Calls taken, recorded or not.
@@ -374,6 +378,7 @@ impl State {
             return self.finish_unrun(run);
         }
         let Some(queue) = self.queues.get(&run.queue) else { return };
+        let queue_vm = queue.vm;
         let vm = self.vms.get(&queue.vm);
         let mut outcome = match vm {
             Some(_) if self.fault_runs => Outcome::Fault(run.batch),
@@ -401,6 +406,17 @@ impl State {
             self.queues.get_mut(&run.queue).expect("found above").banned = true;
             if let Outcome::Fault(address) = outcome {
                 self.faults.push(address);
+                // A hang adds nothing to a VM's list, a fault does, if the card can say.
+                if self.names_faults {
+                    let fault = VmFault {
+                        address: address & !0xFFF,
+                        precision: 4096,
+                        access: abi::FAULT_ACCESS_TYPE_READ,
+                        kind: abi::FAULT_TYPE_NOT_PRESENT,
+                        level: abi::FAULT_LEVEL_PTE,
+                    };
+                    self.vm_faults.entry(queue_vm).or_default().push(fault);
+                }
             }
         }
         for sync in &run.syncs {
@@ -769,6 +785,15 @@ impl Xe for FakeXe {
         let _ = state.enter(Call::NamesFaults);
         state.names_faults
     }
+
+    fn vm_faults(&mut self, vm: u32) -> io::Result<Vec<VmFault>> {
+        let mut state = self.state();
+        state.enter(Call::VmFaults(vm))?;
+        if !state.vms.contains_key(&vm) {
+            return Err(errno(libc::ENOENT));
+        }
+        Ok(state.vm_faults.get(&vm).cloned().unwrap_or_default())
+    }
 }
 
 impl State {
@@ -862,6 +887,39 @@ mod tests {
         let mut bytes = [0; 8];
         assert!(map.read(offset, &mut bytes));
         u64::from_le_bytes(bytes)
+    }
+
+    #[test]
+    fn a_vm_lists_the_faults_of_its_runs_only_if_the_card_can_say_and_a_hang_adds_none() {
+        let (mut xe, vm, queue, mut batch_map, _data) = rig();
+        assert!(xe.vm_faults(99).is_err(), "no such VM");
+        xe.set_names_faults(true);
+        // A store to an address nothing is bound at.
+        let store = batch::store_qword(0x9_0000_0123, 1);
+        let words: Vec<u8> = store.iter().chain(&[batch::BATCH_END]).flat_map(|w| w.to_le_bytes()).collect();
+        assert!(batch_map.write(0, &words));
+        assert_eq!(xe.vm_faults(vm).unwrap(), [], "nothing has run");
+        xe.exec(queue, 0x1_0000, &[]).unwrap();
+        let listed = xe.vm_faults(vm).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].address, listed[0].precision), (0x9_0000_0000, 4096), "to the page");
+        assert_eq!(listed[0].kind, abi::FAULT_TYPE_NOT_PRESENT);
+        assert_eq!(xe.calls_named("vm_faults").len(), 3);
+        // A run xe gave up on as a hang is a ban and adds nothing to the list.
+        let (mut hung, vm, queue, mut batch_map, _data) = rig();
+        hung.set_names_faults(true);
+        assert!(batch_map.write(0, &words));
+        hung.hold_runs();
+        hung.exec(queue, 0x1_0000, &[]).unwrap();
+        hung.lose_held_runs();
+        assert!(hung.queue_banned(queue).unwrap());
+        assert_eq!(hung.vm_faults(vm).unwrap(), []);
+        // A card that can't say lists nothing for a fault either.
+        let (mut mute, vm, queue, mut batch_map, _data) = rig();
+        assert!(batch_map.write(0, &words));
+        mute.exec(queue, 0x1_0000, &[]).unwrap();
+        assert_eq!(mute.faults(), [0x9_0000_0123]);
+        assert_eq!(mute.vm_faults(vm).unwrap(), []);
     }
 
     #[test]

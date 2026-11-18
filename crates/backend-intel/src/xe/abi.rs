@@ -129,6 +129,26 @@ pub const SYNC_SIGNAL: u32 = 1 << 0;
 /// `DRM_XE_EXEC_QUEUE_GET_PROPERTY_BAN`.
 pub const QUEUE_PROPERTY_BAN: u32 = 0;
 
+/// `DRM_XE_VM_GET_PROPERTY_FAULTS`.
+pub const VM_PROPERTY_FAULTS: u32 = 0;
+/// `struct xe_vm_fault`, one entry of a VM's fault list.
+pub const VM_FAULT_SIZE: usize = 48;
+
+/// `FAULT_ACCESS_TYPE_*`: what the faulting access was doing.
+pub const FAULT_ACCESS_TYPE_READ: u8 = 0;
+pub const FAULT_ACCESS_TYPE_WRITE: u8 = 1;
+pub const FAULT_ACCESS_TYPE_ATOMIC: u8 = 2;
+/// `FAULT_TYPE_*`: why it faulted.
+pub const FAULT_TYPE_NOT_PRESENT: u8 = 0;
+pub const FAULT_TYPE_WRITE_ACCESS: u8 = 1;
+pub const FAULT_TYPE_ATOMIC_ACCESS: u8 = 2;
+/// `FAULT_LEVEL_*`: the level of the page table where the walk found nothing.
+pub const FAULT_LEVEL_PTE: u8 = 0;
+pub const FAULT_LEVEL_PDE: u8 = 1;
+pub const FAULT_LEVEL_PDP: u8 = 2;
+pub const FAULT_LEVEL_PML4: u8 = 3;
+pub const FAULT_LEVEL_PML5: u8 = 4;
+
 /// `DRM_XE_DEVICE_QUERY_ENGINE_CYCLES`.
 pub const QUERY_ENGINE_CYCLES: u32 = 6;
 
@@ -444,10 +464,91 @@ pub mod engine_cycles {
     }
 }
 
-/// `struct drm_xe_vm_get_property`, only to learn whether the kernel has the call.
+/// One fault xe saved for a VM, `struct xe_vm_fault`. See [`crate::xe::device::Xe::vm_faults`] for
+/// what the list does and does not hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmFault {
+    /// The faulting address, canonical, rounded down to `precision`.
+    pub address: u64,
+    /// How many bytes the address is exact to.
+    pub precision: u32,
+    pub access: u8,
+    pub kind: u8,
+    pub level: u8,
+}
+
+impl VmFault {
+    const PRECISION: usize = 8;
+    const ACCESS: usize = 12;
+    const KIND: usize = 13;
+    const LEVEL: usize = 14;
+
+    /// The entries of an answer, a whole number of `struct xe_vm_fault`.
+    pub fn parse(answer: &[u8]) -> Vec<Self> {
+        answer
+            .as_chunks::<VM_FAULT_SIZE>()
+            .0
+            .iter()
+            .map(|entry| Self {
+                address: u64::from_le_bytes(entry[..8].try_into().expect("eight bytes")),
+                precision: u32::from_le_bytes(entry[Self::PRECISION..Self::ACCESS].try_into().expect("four")),
+                access: entry[Self::ACCESS],
+                kind: entry[Self::KIND],
+                level: entry[Self::LEVEL],
+            })
+            .collect()
+    }
+
+    /// The bytes of an entry as the kernel writes it. Only the stand-in needs them.
+    #[cfg(any(test, feature = "lab-fake-card"))]
+    pub fn bytes(&self) -> [u8; VM_FAULT_SIZE] {
+        let mut entry = [0; VM_FAULT_SIZE];
+        put_qword(&mut entry, 0, self.address);
+        put_dword(&mut entry, Self::PRECISION, self.precision);
+        entry[Self::ACCESS] = self.access;
+        entry[Self::KIND] = self.kind;
+        entry[Self::LEVEL] = self.level;
+        entry
+    }
+}
+
+impl std::fmt::Display for VmFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let access = match self.access {
+            FAULT_ACCESS_TYPE_READ => "read",
+            FAULT_ACCESS_TYPE_WRITE => "write",
+            FAULT_ACCESS_TYPE_ATOMIC => "atomic",
+            other => return write!(f, "{:#x} (access {other}, unnamed)", self.address),
+        };
+        let kind = match self.kind {
+            FAULT_TYPE_NOT_PRESENT => "nothing mapped",
+            FAULT_TYPE_WRITE_ACCESS => "write to a read-only page",
+            FAULT_TYPE_ATOMIC_ACCESS => "atomic on a page that allows none",
+            _ => "an unnamed fault type",
+        };
+        let level = match self.level {
+            FAULT_LEVEL_PTE => "page",
+            FAULT_LEVEL_PDE => "directory",
+            FAULT_LEVEL_PDP => "directory pointer",
+            FAULT_LEVEL_PML4 => "level 4",
+            FAULT_LEVEL_PML5 => "level 5",
+            _ => "an unnamed level",
+        };
+        write!(
+            f,
+            "{:#x} (exact to {:#x} bytes) on a {access}: {kind}, found at the {level} level",
+            self.address, self.precision
+        )
+    }
+}
+
+/// `struct drm_xe_vm_get_property`.
 pub mod vm_property {
     use super::*;
     const VM: usize = 8;
+    const PROPERTY: usize = 12;
+    const SIZE: usize = 16;
+    const DATA: usize = 24;
     /// A VM id no file has. A kernel with the call answers ENOENT for it, and one without says the
     /// call itself is unknown, which is how Mesa tells them apart.
     pub const NO_SUCH_VM: u32 = u32::MAX;
@@ -456,6 +557,22 @@ pub mod vm_property {
         let mut request = [0; VM_GET_PROPERTY_SIZE];
         put_dword(&mut request, VM, NO_SUCH_VM);
         request
+    }
+
+    /// Asks for a VM's fault list. With `size` zero the kernel says in `size` how many bytes the
+    /// list takes; otherwise it copies that many to `data`.
+    pub fn faults(vm: u32, size: u32, data: u64) -> [u8; VM_GET_PROPERTY_SIZE] {
+        let mut request = [0; VM_GET_PROPERTY_SIZE];
+        put_dword(&mut request, VM, vm);
+        put_dword(&mut request, PROPERTY, VM_PROPERTY_FAULTS);
+        put_dword(&mut request, SIZE, size);
+        put_qword(&mut request, DATA, data);
+        request
+    }
+
+    /// The size the kernel wrote into a request.
+    pub fn size_of_answer(request: &[u8]) -> u32 {
+        crate::protocol::bytes::dword(request, SIZE).unwrap_or(0)
     }
 }
 
@@ -606,6 +723,43 @@ mod tests {
         assert_eq!(EngineInstance { class: 4, instance: 0, gt: 1 }.bytes(), [4, 0, 0, 0, 1, 0, 0, 0]);
         let property = queue::property(6, QUEUE_PROPERTY_BAN);
         assert_eq!((dword(&property, 8), dword(&property, 12)), (Some(6), Some(0)));
+    }
+
+    /// Sizes and offsets as `static_assert`s in a C file against `xe_drm.h` of Linux v7.2 held.
+    #[test]
+    fn a_fault_list_is_asked_for_and_read_as_the_header_lays_it_out() {
+        assert_eq!(VM_FAULT_SIZE, 48);
+        assert_eq!(VM_PROPERTY_FAULTS, 0);
+        let ask = vm_property::faults(7, 96, 0x5000);
+        assert_eq!((dword(&ask, 8), dword(&ask, 12), dword(&ask, 16)), (Some(7), Some(0), Some(96)));
+        assert_eq!((qword(&ask, 24), ask.len()), (Some(0x5000), VM_GET_PROPERTY_SIZE));
+        assert_eq!(vm_property::size_of_answer(&ask), 96);
+        let fault = VmFault {
+            address: 0x9_0000_1000,
+            precision: 4096,
+            access: FAULT_ACCESS_TYPE_WRITE,
+            kind: FAULT_TYPE_NOT_PRESENT,
+            level: FAULT_LEVEL_PDE,
+        };
+        let bytes = fault.bytes();
+        assert_eq!((qword(&bytes, 0), dword(&bytes, 8)), (Some(0x9_0000_1000), Some(4096)));
+        assert_eq!((bytes[12], bytes[13], bytes[14], bytes[15]), (1, 0, 1, 0), "the pad stays zero");
+        let mut two = bytes.to_vec();
+        two.extend(fault.bytes());
+        two.extend([0; 5]);
+        assert_eq!(VmFault::parse(&two), [fault, fault], "a part of an entry is ignored");
+        assert!(VmFault::parse(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_fault_reads_in_words_and_an_unnamed_value_does_not_panic() {
+        let fault = VmFault { address: 0x1000, precision: 4096, access: 2, kind: 1, level: 4 };
+        let said = fault.to_string();
+        for part in ["0x1000", "0x1000 bytes", "atomic", "read-only", "level 5"] {
+            assert!(said.contains(part), "{said}");
+        }
+        assert!(VmFault { access: 9, ..fault }.to_string().contains("unnamed"));
+        assert!(VmFault { kind: 9, level: 9, ..fault }.to_string().contains("unnamed fault type"));
     }
 
     #[test]

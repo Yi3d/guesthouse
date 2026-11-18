@@ -4,7 +4,7 @@
 //! [`XeCard`] is the real one. It packs each request with [`super::abi`], makes the call, and reads
 //! the answer. It decides nothing.
 
-use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync};
+use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync, VmFault};
 use crate::ioctl::drm_ioctl;
 use crate::protocol::bytes::{dword, qword};
 use std::fs::File;
@@ -50,6 +50,27 @@ pub trait Xe {
     /// Whether this kernel can say which address a VM faulted at. Newer than the rest, and nothing
     /// depends on it.
     fn names_faults(&mut self) -> bool;
+    /// The faults xe has saved for a VM, oldest first. What an answer means, from Linux v7.2
+    /// (`xe_vm.c`, `xe_pagefault.c`, `xe_drm.h`), where "read" is in that source and "inferred" is
+    /// not stated there:
+    ///
+    /// - Read: the only code that adds to the list is the page fault worker, after it failed to
+    ///   service a fault the GPU reported (`xe_pagefault_save_to_vm`). A hang or a job timeout adds
+    ///   nothing, so after a plain hang the list is empty and an empty list does not mean the queue
+    ///   was banned for nothing. (Checked in the files named, not in the whole tree.)
+    /// - Read: a VM that is not in fault mode is still found and its fault saved. The source says
+    ///   so in a comment, and the service step refuses such a VM unless it has a scratch page, so
+    ///   a fault in a VM made without either lands in the list.
+    /// - Read: the worker exists only where the device has unified shared memory support
+    ///   (`xe_pagefault_init` returns early without it), so on a card without it the list is always
+    ///   empty, fault or not. Entries of reserved engines are left out.
+    /// - Read: each entry is exact to 4 KiB, the list keeps at most 50 entries and drops later
+    ///   ones without a word, and it is emptied only when the VM is freed, so it can hold faults
+    ///   from before the run asked about.
+    /// - Inferred: the entry is saved by a worker after the GPU's report, so a list asked for
+    ///   straight after a ban can still be short by one. And that the Arc B580 reports page faults
+    ///   to xe for a VM that is not in fault mode, which depends on its firmware.
+    fn vm_faults(&mut self, vm: u32) -> io::Result<Vec<VmFault>>;
 }
 
 /// A buffer's bytes as the CPU sees them. Reads and writes are checked against its length.
@@ -288,6 +309,21 @@ impl Xe for XeCard {
         let asked = self.call(abi::VM_GET_PROPERTY, &mut abi::vm_property::probe());
         asked.is_err_and(|error| error.raw_os_error() == Some(libc::ENOENT))
     }
+
+    fn vm_faults(&mut self, vm: u32) -> io::Result<Vec<VmFault>> {
+        // First the size the list takes, then the list. It can only grow between the two, and the
+        // kernel copies what is asked for if that is no more than it holds.
+        let mut request = abi::vm_property::faults(vm, 0, 0);
+        self.call(abi::VM_GET_PROPERTY, &mut request)?;
+        let size = abi::vm_property::size_of_answer(&request);
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let mut list = vec![0u8; size as usize];
+        let mut request = abi::vm_property::faults(vm, size, list.as_mut_ptr() as u64);
+        self.call(abi::VM_GET_PROPERTY, &mut request)?;
+        Ok(VmFault::parse(&list))
+    }
 }
 
 #[cfg(test)]
@@ -324,5 +360,6 @@ mod tests {
         assert!(card.exec(1, 0x1000, &[Sync::Signal { timeline: 1, point: 1 }]).is_err());
         assert!(card.point_reached(1, 1, Duration::ZERO).is_err());
         assert!(!card.names_faults());
+        assert!(card.vm_faults(1).is_err());
     }
 }
