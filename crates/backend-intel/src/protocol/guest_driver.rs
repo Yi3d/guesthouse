@@ -42,14 +42,36 @@ pub struct CardDrivers {
     /// Named to Windows as the adapter's kernel driver image. The guest never loads it, but Windows
     /// won't start the adapter unless the file is in the driver's folder, so the app puts it there.
     pub kernel: &'static str,
+    /// Whether the INF gives these cards OpenCL for 32-bit programs, [`OPENCL_32_BIT`].
+    pub opencl_32_bit: bool,
 }
 
 /// Lunar Lake's, from the INF for integrated cards.
-pub const XE2_LPG_DRIVERS: CardDrivers =
-    CardDrivers { opengl: "igxe2lpgicd64.dll", opengl_32_bit: "igxe2lpgicd32.dll", kernel: "igdkmdn64.sys" };
+pub const XE2_LPG_DRIVERS: CardDrivers = CardDrivers {
+    opengl: "igxe2lpgicd64.dll",
+    opengl_32_bit: "igxe2lpgicd32.dll",
+    kernel: "igdkmdn64.sys",
+    opencl_32_bit: true,
+};
 /// Battlemage's, from the INF for cards with memory of their own.
-pub const XE2_HPG_DRIVERS: CardDrivers =
-    CardDrivers { opengl: "igxe2hpgicd64.dll", opengl_32_bit: "igxe2hpgicd32.dll", kernel: "igdkmdnd64.sys" };
+pub const XE2_HPG_DRIVERS: CardDrivers = CardDrivers {
+    opengl: "igxe2hpgicd64.dll",
+    opengl_32_bit: "igxe2hpgicd32.dll",
+    kernel: "igdkmdnd64.sys",
+    opencl_32_bit: true,
+};
+/// Panther Lake's and Wildcat Lake's, from the INF for integrated cards, which gives them OpenCL for
+/// 64-bit programs only.
+pub const XE3_LPG_DRIVERS: CardDrivers = CardDrivers {
+    opengl: "igxe3icd64.dll",
+    opengl_32_bit: "igxe3icd32.dll",
+    kernel: "igdkmdn64.sys",
+    opencl_32_bit: false,
+};
+
+/// OpenCL's driver for 32-bit programs, and the value that names it, for the cards that have it.
+pub const OPENCL_32_BIT: &str = "igdrcl32.dll";
+const OPENCL_32_BIT_VALUE: &str = "OpenCLDriverNameWow";
 
 /// The adapter query OpenGL's loader asks for its driver with.
 pub const QUERY_OPENGL: u32 = 2;
@@ -73,9 +95,8 @@ enum Form {
 }
 
 /// The values the loaders ask for, by the names the INF gives them. Registry names ignore case.
-const VALUES: [(&str, Form); 9] = [
+const VALUES: [(&str, Form); 8] = [
     ("OpenCLDriverName", Form::File("igdrcl64.dll")),
-    ("OpenCLDriverNameWow", Form::File("igdrcl32.dll")),
     ("VulkanDriverName", Form::File("igvk64.json")),
     ("VulkanDriverNameWow", Form::File("igvk32.json")),
     ("LevelZeroDriverPath", Form::File("ze_intel_gpu64.dll")),
@@ -152,6 +173,12 @@ pub fn registry(name: &RegistryName, drivers: &CardDrivers) -> Option<RegistryVa
         }
         RegistryName::Value(name) if name.eq_ignore_ascii_case(OPENGL_DRIVER_32_BIT_VALUE) => {
             Some(one_file_list(drivers.opengl_32_bit))
+        }
+        RegistryName::Value(name) if name.eq_ignore_ascii_case(OPENCL_32_BIT_VALUE) => {
+            drivers.opencl_32_bit.then(|| RegistryValue {
+                value_type: Some(TYPE_STRING),
+                bytes: utf16_zero(&in_store(OPENCL_32_BIT)),
+            })
         }
         RegistryName::Value(name) => {
             let (_, form) = VALUES.iter().find(|(known, _)| known.eq_ignore_ascii_case(name))?;
@@ -326,6 +353,16 @@ mod tests {
             assert_eq!(value.value_type, Some(TYPE_STRING), "{name}");
         }
         assert!(registry(&RegistryName::Value("openglvendorname".into())).is_none());
+    }
+
+    #[test]
+    fn a_card_without_32_bit_opencl_is_not_given_its_value() {
+        let wow = RegistryName::Value("OpenCLDriverNameWow".into());
+        assert!(super::registry(&wow, &XE3_LPG_DRIVERS).is_none());
+        let opencl = super::registry(&RegistryName::Value("OpenCLDriverName".into()), &XE3_LPG_DRIVERS);
+        assert!(opencl.is_some(), "64-bit OpenCL stays");
+        let opengl = super::registry(&RegistryName::Value("OpenGLDriverName".into()), &XE3_LPG_DRIVERS);
+        assert_eq!(text(&opengl.unwrap().bytes), format!("{DRIVER_STORE}\\igxe3icd64.dll"));
     }
 
     #[test]

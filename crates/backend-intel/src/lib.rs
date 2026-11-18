@@ -81,8 +81,13 @@ impl IntelBackend {
     /// a card whose graphics has no profile.
     pub fn from_card(card: CardFacts) -> Result<Self, Refusal> {
         let ip = card.main_gt().map(|gt| gt.ip).unwrap_or_default();
-        let generation = generation::for_render_ip(ip).ok_or_else(|| {
-            Refusal(format!("This Intel card's graphics IP is {ip}, which this build has no profile for."))
+        let generation = generation::for_card(ip, card.pci.device).ok_or_else(|| {
+            Refusal(format!(
+                "This Intel card, device {:04x} with graphics IP {ip}, is of a generation this build has no \
+                 profile for. Run `intel-probe --record card.txt` and send card.txt with the probe's output, so \
+                 one can be made.",
+                card.pci.device
+            ))
         })?;
         // compute-runtime works out threads per EU by dividing the thread count by the EU count, so a
         // record with none would stop it at the start, or worse.
@@ -174,6 +179,9 @@ impl IntelBackend {
         );
         for (what, error) in &card.unanswered {
             log::warn!("{PREFIX} card query=\"{what}\" unanswered=\"{error}\"");
+        }
+        for guess in self.generation.guesses {
+            log::info!("{PREFIX} profile-guess \"{guess}\"");
         }
         log::info!("{PREFIX} record {}", record::summary(&self.record));
         log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
@@ -288,6 +296,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         video_engines: card.instance_mask(Engine::VIDEO_DECODE),
         video_enhance_engines: card.instance_mask(Engine::VIDEO_ENHANCE),
         address_bits: card.config.va_bits,
+        xe2_tiling: generation.xe2_tiling,
     }
 }
 
@@ -643,9 +652,10 @@ mod tests {
     #[test]
     fn a_card_with_no_profile_is_refused_in_plain_words() {
         let mut card = card::tests::lunar_lake();
-        card.gts[0].ip.minor = 2;
+        card.gts[0].ip.minor = 3;
         let refusal = IntelBackend::from_card(card).unwrap_err();
         assert!(refusal.0.contains("no profile"), "{}", refusal.0);
+        assert!(refusal.0.contains("intel-probe --record"), "it says what to send: {}", refusal.0);
     }
 
     #[test]

@@ -10,6 +10,8 @@ use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
 use crate::render_cards::{RenderCard, render_card, render_cards};
 use crate::settings::write_json;
+use guesthouse_backend_intel::generation;
+use guesthouse_backend_intel::protocol::guest_driver::{CardDrivers, OPENCL_32_BIT};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,9 +26,9 @@ pub const NO_INTEL_SETUP: &str = "A Windows machine on an Intel card needs Intel
                                   and it hasn't been.";
 
 /// The files the Intel daemon names to Windows for every card: the Direct3D drivers for 64-bit and
-/// 32-bit programs, the OpenCL and Level Zero drivers, and the Vulkan manifests. A test holds the
-/// daemon to this list and the next two.
-pub const NAMED_FILES: [&str; 11] = [
+/// 32-bit programs, OpenCL's and Level Zero's for 64-bit programs, and the Vulkan manifests. The rest
+/// differ by the kind of card: see [`card_kinds`]. A test holds the daemon to these.
+pub const NAMED_FILES: [&str; 10] = [
     "igd9trinity64.dll",
     "igd10iumd64.dll",
     "igd12umd64.dll",
@@ -34,20 +36,33 @@ pub const NAMED_FILES: [&str; 11] = [
     "igd10iumd32.dll",
     "igd12umd32.dll",
     "igdrcl64.dll",
-    "igdrcl32.dll",
     "igvk64.json",
     "igvk32.json",
     "ze_intel_gpu64.dll",
 ];
-/// The OpenGL drivers the daemon names, which differ by the kind of card: Lunar Lake's pair, then
-/// Battlemage's. A driver folder is unpacked for one card, so it holds one pair.
-pub const OPENGL_DRIVERS: [[&str; 2]; 2] =
-    [["igxe2lpgicd64.dll", "igxe2lpgicd32.dll"], ["igxe2hpgicd64.dll", "igxe2hpgicd32.dll"]];
-/// The kernel driver the daemon names as the adapter's image path, for the same kinds of card in the
-/// same order. The guest never loads it, as the paravirtual adapter's kernel driver is Windows' own,
-/// but Windows won't start the adapter unless the file is in the guest's copy of the driver, as
-/// NVIDIA's and AMD's are.
-pub const KERNEL_DRIVERS: [&str; 2] = ["igdkmdn64.sys", "igdkmdnd64.sys"];
+
+/// Each kind of card's own drivers, as the daemon names them for the generations it knows: the
+/// OpenGL pair, the kernel driver and, for most, 32-bit OpenCL. The kernel driver is named as the
+/// adapter's image path. The guest never loads it, as the paravirtual adapter's kernel driver is
+/// Windows' own, but Windows won't start the adapter unless the file is in the guest's copy of the
+/// driver, as NVIDIA's and AMD's are. A driver folder is unpacked for one card, so it holds one kind's.
+pub fn card_kinds() -> Vec<CardDrivers> {
+    let mut kinds: Vec<CardDrivers> = Vec::new();
+    for generation in generation::known() {
+        if !kinds.contains(&generation.drivers) {
+            kinds.push(generation.drivers);
+        }
+    }
+    kinds
+}
+
+/// The files one kind of card's drivers are.
+pub fn kind_files(drivers: &CardDrivers) -> Vec<&'static str> {
+    let mut files = vec![drivers.opengl, drivers.opengl_32_bit, drivers.kernel];
+    files.extend(drivers.opencl_32_bit.then_some(OPENCL_32_BIT));
+    files
+}
+
 /// The Intel cards the Intel daemon is written for, by PCI device id: Lunar Lake's Arc 140V and
 /// Battlemage's Arc B580. Intel's other cards are in this PC's list as well, and offering them would
 /// put an iGPU that can't work in the card choice of nearly every PC with an Intel processor.
@@ -105,10 +120,12 @@ pub fn missing_files(folder: &Path) -> Vec<String> {
     let mut wanted: Vec<String> = NAMED_FILES.iter().map(|name| (*name).to_owned()).collect();
     wanted.extend(manifest_libraries(folder));
     // The OpenGL pair the folder has most of says which kind of card it's for.
-    let kind = (0..OPENGL_DRIVERS.len())
-        .min_by_key(|kind| OPENGL_DRIVERS[*kind].iter().filter(|name| !folder.join(name).is_file()).count())
-        .unwrap_or_default();
-    wanted.extend(OPENGL_DRIVERS[kind].iter().chain([&KERNEL_DRIVERS[kind]]).map(|name| (*name).to_owned()));
+    let lacking = |name: &str| !folder.join(name).is_file();
+    let kinds = card_kinds();
+    let kind = kinds.iter().min_by_key(|kind| {
+        [kind.opengl, kind.opengl_32_bit].into_iter().filter(|name| lacking(name)).count()
+    });
+    wanted.extend(kind.map(kind_files).unwrap_or_default().into_iter().map(str::to_owned));
     wanted.retain(|name| !folder.join(name).is_file());
     wanted.sort();
     wanted
@@ -151,6 +168,7 @@ pub fn intel_start_problems(context: &Context, pci: &str) -> Vec<String> {
 #[cfg(test)]
 pub mod stand_in {
     use crate::testing::Scratch;
+    use guesthouse_backend_intel::protocol::guest_driver::XE2_LPG_DRIVERS;
 
     /// A Vulkan manifest whose driver is `library`, beside it.
     pub fn manifest(library: &str) -> String {
@@ -160,8 +178,8 @@ pub mod stand_in {
     /// Writes an unpacked driver folder `folder` in `scratch` with every file the daemon names, and
     /// the libraries the manifests name. Each file holds its own path.
     pub fn lay_out_driver(scratch: &Scratch, folder: &str) {
-        let kernel = [super::KERNEL_DRIVERS[0]];
-        for name in super::NAMED_FILES.iter().chain(&super::OPENGL_DRIVERS[0]).chain(&kernel) {
+        let lunar_lake = super::kind_files(&XE2_LPG_DRIVERS);
+        for name in super::NAMED_FILES.iter().chain(&lunar_lake) {
             scratch.write(&format!("{folder}/{name}"), format!("{folder}/{name}"));
         }
         scratch.write(&format!("{folder}/igvk64.json"), manifest("igvk64.dll"));
@@ -177,6 +195,9 @@ mod tests {
     use super::*;
     use crate::linux::amd::stand_in::fake_render_node;
     use crate::testing::{Scratch, scratch_context};
+    use guesthouse_backend_intel::protocol::guest_driver::{
+        XE2_HPG_DRIVERS, XE2_LPG_DRIVERS, XE3_LPG_DRIVERS,
+    };
     use regex::Regex;
     use std::collections::BTreeSet;
 
@@ -247,14 +268,31 @@ mod tests {
         let scratch = Scratch::new();
         lay_out_driver(&scratch, "driver");
         let folder = scratch.path("driver");
-        for name in OPENGL_DRIVERS[0] {
+        for name in [XE2_LPG_DRIVERS.opengl, XE2_LPG_DRIVERS.opengl_32_bit] {
             fs::rename(folder.join(name), folder.join(name.replace("lpg", "hpg"))).unwrap();
         }
-        assert_eq!(missing_files(&folder), [KERNEL_DRIVERS[1]], "that kind of card's kernel driver too");
-        fs::rename(folder.join(KERNEL_DRIVERS[0]), folder.join(KERNEL_DRIVERS[1])).unwrap();
+        assert_eq!(missing_files(&folder), [XE2_HPG_DRIVERS.kernel], "that kind of card's kernel driver too");
+        fs::rename(folder.join(XE2_LPG_DRIVERS.kernel), folder.join(XE2_HPG_DRIVERS.kernel)).unwrap();
         assert_eq!(folder_problem(&folder), None, "the other kind of card's files will do");
         fs::remove_file(folder.join("igxe2hpgicd32.dll")).unwrap();
         assert_eq!(missing_files(&folder), ["igxe2hpgicd32.dll"]);
+    }
+
+    /// Panther Lake's folder has no 32-bit OpenCL, as Intel's INF gives it none, and needs none.
+    #[test]
+    fn a_kind_of_card_without_32_bit_opencl_does_without_it() {
+        let scratch = Scratch::new();
+        lay_out_driver(&scratch, "driver");
+        let folder = scratch.path("driver");
+        fs::remove_file(folder.join(OPENCL_32_BIT)).unwrap();
+        assert_eq!(missing_files(&folder), [OPENCL_32_BIT], "Lunar Lake's needs it");
+        for (from, to) in [
+            (XE2_LPG_DRIVERS.opengl, XE3_LPG_DRIVERS.opengl),
+            (XE2_LPG_DRIVERS.opengl_32_bit, XE3_LPG_DRIVERS.opengl_32_bit),
+        ] {
+            fs::rename(folder.join(from), folder.join(to)).unwrap();
+        }
+        assert_eq!(folder_problem(&folder), None);
     }
 
     /// A folder unpacked by 0.4.1-intel.2 or 0.6.2-intel.1 has everything but the kernel driver. It
@@ -265,7 +303,7 @@ mod tests {
         let context = scratch_context(&scratch);
         lay_out_driver(&scratch, "intel-driver");
         let folder = scratch.path("intel-driver");
-        fs::remove_file(folder.join(KERNEL_DRIVERS[0])).unwrap();
+        fs::remove_file(folder.join(XE2_LPG_DRIVERS.kernel)).unwrap();
         write_intel_setup(&context, &folder, "32.0.101.9175").unwrap();
         fake_render_node(&scratch, 128, CARD, "0x8086", 0x64a0);
         assert_eq!(intel_driver_folder(&context), None);
@@ -275,24 +313,15 @@ mod tests {
         assert!(found[0].contains("Give Intel's installer again"), "{}", found[0]);
     }
 
-    /// Each kind of card's OpenGL pair and kernel driver, as the daemon names them together.
     #[test]
-    fn each_kind_of_cards_files_are_the_daemons_for_that_kind() {
-        let drivers =
-            Regex::new(r#"opengl: "([^"]+)", opengl_32_bit: "([^"]+)", kernel: "([^"]+)""#).unwrap();
-        let path = format!("{}/../backend-intel/src/protocol/guest_driver.rs", env!("CARGO_MANIFEST_DIR"));
-        let text = fs::read_to_string(path).unwrap();
-        let daemons: Vec<[String; 3]> = drivers
-            .captures_iter(&text)
-            .map(|found| [found[1].to_owned(), found[2].to_owned(), found[3].to_owned()])
-            .collect();
-        let ours: Vec<[String; 3]> = (0..OPENGL_DRIVERS.len())
-            .map(|kind| {
-                let [opengl, opengl_32_bit] = OPENGL_DRIVERS[kind];
-                [opengl.to_owned(), opengl_32_bit.to_owned(), KERNEL_DRIVERS[kind].to_owned()]
-            })
-            .collect();
-        assert_eq!(daemons, ours);
+    fn every_generations_drivers_are_a_kind_of_card() {
+        let kinds = card_kinds();
+        for generation in generation::known() {
+            assert!(kinds.contains(&generation.drivers), "{}", generation.name);
+        }
+        let mut opengl: Vec<&str> = kinds.iter().map(|kind| kind.opengl).collect();
+        opengl.dedup();
+        assert_eq!(opengl.len(), kinds.len(), "the OpenGL pair tells the kinds apart");
     }
 
     #[test]
@@ -312,9 +341,9 @@ mod tests {
         let text = fs::read_to_string(path).unwrap();
         let named: BTreeSet<String> =
             file_name.captures_iter(&text).map(|found| found[1].to_owned()).collect();
-        let opengl = OPENGL_DRIVERS.iter().flatten().copied();
-        let ours: BTreeSet<String> =
-            NAMED_FILES.iter().copied().chain(opengl).chain(KERNEL_DRIVERS).map(str::to_owned).collect();
+        let kinds = card_kinds();
+        let per_kind = kinds.iter().flat_map(kind_files);
+        let ours: BTreeSet<String> = NAMED_FILES.iter().copied().chain(per_kind).map(str::to_owned).collect();
         assert_eq!(named, ours);
     }
 }

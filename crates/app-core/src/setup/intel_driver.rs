@@ -12,7 +12,7 @@
 use super::driver::Extraction;
 use super::guest_files::{GuestFile, file_list};
 use super::inf::inf_driver_version;
-use super::intel::{KERNEL_DRIVERS, OPENGL_DRIVERS, SYSTEM_LIST, folder_problem, write_intel_setup};
+use super::intel::{SYSTEM_LIST, card_kinds, folder_problem, write_intel_setup};
 use super::intel_inf::{decode, guest_files, lists_device, system_files};
 use crate::context::Context;
 use crate::failure::{Failure, Result};
@@ -111,8 +111,7 @@ fn listed_paths(listing: &str) -> Vec<&str> {
 /// The kernel driver the daemon names for the kind of card whose OpenGL driver is among `names`.
 fn kernel_driver(names: &[String]) -> Option<&'static str> {
     let has = |wanted: &str| names.iter().any(|name| name.eq_ignore_ascii_case(wanted));
-    let kind = OPENGL_DRIVERS.iter().position(|pair| has(pair[0]))?;
-    Some(KERNEL_DRIVERS[kind])
+    card_kinds().into_iter().find(|kind| has(kind.opengl)).map(|kind| kind.kernel)
 }
 
 /// Reads Intel's installer at `path`, and says whether it will do for the card `device`.
@@ -163,6 +162,7 @@ mod tests {
     use crate::setup::intel::{intel_driver_folder, missing_files};
     use crate::setup::intel_inf::stand_in::{DEVICE, GUEST_FILES, SYSTEM_FILES, fake_inf};
     use crate::testing::{Scratch, scratch_context};
+    use guesthouse_backend_intel::protocol::guest_driver::XE2_LPG_DRIVERS;
     use std::fs;
     use std::process::Stdio;
 
@@ -248,7 +248,7 @@ mod tests {
         let mut wanted: Vec<String> = GUEST_FILES.iter().map(|name| (*name).to_owned()).collect();
         wanted.extend(SYSTEM_FILES.iter().map(|file| file.1.to_owned()));
         wanted.push(SYSTEM_LIST.to_owned());
-        wanted.push(KERNEL_DRIVERS[0].to_owned());
+        wanted.push(XE2_LPG_DRIVERS.kernel.to_owned());
         wanted.sort();
         assert_eq!(
             names, wanted,
@@ -302,18 +302,30 @@ mod tests {
         assert!(refused.0.contains("Graphics/igdrcl-missing.dll"), "{}", refused.0);
     }
 
-    /// Intel's own installer, named in `GUESTHOUSE_INTEL_INSTALLER`, with the card in
-    /// `GUESTHOUSE_INTEL_DEVICE` as hex. Run by hand, as the installer is most of a gigabyte and not ours.
+    /// Intel's own installer, named in `GUESTHOUSE_INTEL_INSTALLER`, with the cards in
+    /// `GUESTHOUSE_INTEL_DEVICE` as hex, split by commas. Run by hand, as the installer is most of a
+    /// gigabyte and not ours. Each card has to be covered, with every file the daemon names for its
+    /// generation.
     #[test]
     #[ignore = "needs Intel's installer"]
     fn a_real_installer_is_read() {
+        use crate::setup::intel::{NAMED_FILES, kind_files};
+        use guesthouse_backend_intel::generation;
         let path = std::env::var("GUESTHOUSE_INTEL_INSTALLER").unwrap();
-        let device = u32::from_str_radix(&std::env::var("GUESTHOUSE_INTEL_DEVICE").unwrap(), 16).unwrap();
-        match read_intel_installer(&path, device) {
-            Ok(package) => {
-                println!("covers {device:04X}: {} files, {}", package.entries.len(), package.version)
+        for device in std::env::var("GUESTHOUSE_INTEL_DEVICE").unwrap().split(',') {
+            let device = u32::from_str_radix(device.trim(), 16).unwrap();
+            let package = read_intel_installer(&path, device)
+                .unwrap_or_else(|failure| panic!("{device:04X}: {}", failure.0));
+            println!("covers {device:04X}: {} files, {}", package.entries.len(), package.version);
+            let generation = generation::for_device(device as u16).expect("a generation lists the card");
+            let named = NAMED_FILES.iter().copied().chain(kind_files(&generation.drivers));
+            for name in named {
+                let entry = format!("{DRIVER_ENTRY}/{name}");
+                assert!(
+                    package.entries.iter().any(|found| found.eq_ignore_ascii_case(&entry)),
+                    "{device:04X}: {name}"
+                );
             }
-            Err(failure) => println!("refused {device:04X}: {}", failure.0),
         }
     }
 
