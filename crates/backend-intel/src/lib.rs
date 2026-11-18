@@ -44,10 +44,10 @@ use card::CardFacts;
 use generation::Generation;
 use guesthouse_backend::guest_text::QUERY_USER_DRIVER_NAME;
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
-    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal, RegistryName,
-    RegistryValue, Setup, SpaceId, StagingCopy, StagingStart, Status, UnmapRequest, VendorQuery, Work,
-    WorkStart,
+    AdapterFacts, AllocationShape, Backend, BackendError, COPY_PIXEL_BYTES, CardLabel, Doorbell, DriverFound,
+    DriverSurvey, GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, Refusal,
+    RegistryName, RegistryValue, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart, Status, UnmapRequest,
+    VendorQuery, Work, WorkStart,
 };
 pub use ioctl::{INTEL_VENDOR, intel_render_node};
 use protocol::allocation::Resource;
@@ -57,10 +57,12 @@ use protocol::escape::Escape;
 use protocol::record::{EngineMaxima, GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads};
 use protocol::{gaps, guest_driver, record, shape};
 use stage::{Desktop, Fallback, Stage};
+use std::os::fd::OwnedFd;
 use std::time::Instant;
 use traffic::{QueryOutcome, Traffic};
 use watch::PREFIX;
 use work::CardWork;
+use work::copies::Rows;
 use xe::device::Xe;
 use xe::plan::BufferUse;
 use xe_query::{Engine, Gt};
@@ -310,6 +312,17 @@ fn no_card() -> std::io::Result<Box<dyn Xe + Send>> {
     Err(std::io::Error::other("there is no card"))
 }
 
+/// A copy's result as the guest is told it, with the reason in the log.
+fn copied(result: Result<(), BackendError>) -> Status {
+    match result {
+        Ok(()) => Status::SUCCESS,
+        Err(error) => {
+            log::warn!("{PREFIX} a frame wasn't copied: {error}");
+            Status::UNSUCCESSFUL
+        }
+    }
+}
+
 /// The adapter's name, as the guest's programs see it in the adapter's description and the record.
 fn adapter_name(card: &CardFacts) -> String {
     format!("Intel GPU {:#06x}", card.pci.device)
@@ -500,6 +513,25 @@ impl Backend for IntelBackend {
             Some(work) => work.read_start(memory, out),
             None => Err(BackendError::new("nothing has written video memory at this stage")),
         }
+    }
+
+    /// A buffer of the card's, as a file a viewer on the same card can import.
+    fn export_memory(&mut self, memory: MemoryId, _size: u64) -> Result<OwnedFd, BackendError> {
+        match &mut self.work {
+            Some(work) => work.export(memory),
+            None => Err(BackendError::new("nothing is on the card to export at this stage")),
+        }
+    }
+
+    /// Intel's drivers have the CPU lock nearly every allocation, the display driver's slots among
+    /// them, so once work runs the slots are looked for in the guest's pages too.
+    fn slots_may_be_guest_pages(&self) -> bool {
+        self.work.is_some()
+    }
+
+    /// Once work runs on the card, what it can spare beside the host's own desktop.
+    fn video_memory_cap(&self) -> Option<u64> {
+        self.work.as_ref().map(CardWork::cap)
     }
 
     fn create_address_space(&mut self, ranges: &[GpuRange]) -> Result<SpaceId, BackendError> {
@@ -696,10 +728,25 @@ impl Backend for IntelBackend {
         }
     }
 
-    /// What would be copied was never drawn, so the copy is done by leaving the target as it is.
+    /// By the CPU, at once: see [`work::copies`]. While listening, what would be copied was never
+    /// drawn, so the copy is done by leaving the target as it is.
     fn start_staging_copy(&mut self, _host: &mut dyn HostServices, copy: &StagingCopy) -> StagingStart {
         self.traffic.copy(if copy.is_screen { "screen" } else { "staging" });
-        StagingStart::Finished(Status::SUCCESS)
+        let Some(work) = &mut self.work else { return StagingStart::Finished(Status::SUCCESS) };
+        let Some(rows) = Rows::of_staging(copy, COPY_PIXEL_BYTES) else {
+            log::warn!("{PREFIX} a copy to a staging surface that this backend can't place: {copy:?}");
+            return StagingStart::Finished(Status::UNSUCCESSFUL);
+        };
+        StagingStart::Finished(copied(work.copy_rows(copy.own_space, &rows)))
+    }
+
+    /// A whole frame into a viewer's slot, by the CPU, at once.
+    fn start_slot_copy(&mut self, _host: &mut dyn HostServices, copy: &SlotCopy) -> StagingStart {
+        let Some(work) = &mut self.work else { return StagingStart::Finished(Status::UNSUCCESSFUL) };
+        let Some(rows) = Rows::of_slot(copy, COPY_PIXEL_BYTES) else {
+            return StagingStart::Finished(Status::UNSUCCESSFUL);
+        };
+        StagingStart::Finished(copied(work.copy_rows(copy.own_space, &rows)))
     }
 
     fn poll_staging_copy(&mut self, _host: &mut dyn HostServices, _now: Instant) -> Option<Status> {
@@ -947,5 +994,62 @@ mod tests {
         assert_eq!(xe.live(), 0);
         assert!(xe.calls().len() > before);
         assert!(backend.gpu_clock().unwrap() > 0);
+    }
+
+    #[test]
+    fn past_listening_the_card_sets_the_cap_and_slots_may_be_guest_pages() {
+        let xe = xe::fake::FakeXe::default();
+        let (backend, _) = started((Stage::Everything, None), &xe);
+        // The test card: 12216 MiB, of which a quarter is kept for the host's desktop.
+        assert_eq!(backend.video_memory_cap(), Some((12216 - 3054) << 20));
+        assert!(backend.slots_may_be_guest_pages());
+        let (listening, _) = started((Stage::Listen, None), &xe);
+        assert_eq!(listening.video_memory_cap(), None);
+        assert!(!listening.slots_may_be_guest_pages());
+    }
+
+    #[test]
+    fn a_frame_is_copied_into_a_viewers_slot_and_a_tiled_slot_is_refused() {
+        let xe = xe::fake::FakeXe::default();
+        let (mut backend, _) = started((Stage::Everything, None), &xe);
+        let (frame, slot) = (work::testing::Pages::new(0x1000), work::testing::Pages::new(0x1000));
+        frame.write(0, &[9u8; 0x1000]);
+        let from = backend.adopt_host_pages(frame.address(), 0x1000).unwrap();
+        let to = backend.adopt_host_pages(slot.address(), 0x1000).unwrap();
+        let space = backend.create_address_space(&guesthouse_backend::GPU_RANGES).unwrap();
+        backend.map(&work::testing::map_request(space, from, 0x400_0000, 0, 0x1000)).unwrap();
+        backend.map(&work::testing::map_request(space, to, 0x500_0000, 0, 0x1000)).unwrap();
+        let source = guesthouse_backend::SurfaceShape {
+            width: 16,
+            height: 8,
+            format: 0,
+            pitch: 64,
+            tiling: None,
+            refresh: (0, 1),
+            samples: (1, 0),
+            colour: 0,
+        };
+        let copy = SlotCopy {
+            source,
+            source_address: 0x400_0000,
+            slot_address: 0x500_0000,
+            slot_pitch: 64,
+            width: 16,
+            height: 8,
+            own_space: space,
+            slot_tiling: None,
+        };
+        let mut host = work::testing::FakeHost::default();
+        assert_eq!(backend.start_slot_copy(&mut host, &copy), StagingStart::Finished(Status::SUCCESS));
+        assert_eq!(slot.bytes()[..512], [9u8; 512]);
+        assert_eq!(slot.bytes()[512], 0);
+        let tiled = SlotCopy { slot_tiling: Some(4), ..copy };
+        assert_eq!(backend.start_slot_copy(&mut host, &tiled), StagingStart::Finished(Status::UNSUCCESSFUL));
+        let outside = SlotCopy { height: 4096, ..copy };
+        assert_eq!(
+            backend.start_slot_copy(&mut host, &outside),
+            StagingStart::Finished(Status::UNSUCCESSFUL)
+        );
+        assert!(backend.export_memory(from, 0x1000).is_err(), "guest pages are not the card's to export");
     }
 }

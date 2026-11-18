@@ -3,11 +3,12 @@
 //!
 //! [`CardWork`] is what the backend's trait methods call once the stage is past listening. Its
 //! parts are in the modules here: [`memory`] for buffers and guest pages, [`spaces`] for address
-//! spaces and their mappings, and [`queues`] for submissions and what became of them. [`choices`]
-//! holds what the card has yet to confirm.
+//! spaces and their mappings, [`queues`] for submissions and what became of them, and [`copies`]
+//! for pictures on their way out. [`choices`] holds what the card has yet to confirm.
 
 pub mod cap;
 pub mod choices;
+pub mod copies;
 pub mod engines;
 mod memory;
 mod queues;
