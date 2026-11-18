@@ -357,7 +357,17 @@ impl CardWork {
             }
         }
         let attempted = prepared.run.or(prepared.ring_run);
-        let sent = self.xe.exec(prepared.xe_queue, prepared.batch, &prepared.syncs);
+        let mut sent = self.xe.exec(prepared.xe_queue, prepared.batch, &prepared.syncs);
+        // A ring that xe won't take with a fence still runs without one. Its end then goes
+        // unsaid, which is better than no ring.
+        let refused = sent.as_ref().is_err_and(|error| plan::exec_verdict(error) == ExecVerdict::Failed);
+        if refused && prepared.ring_run.is_some() && !prepared.syncs.is_empty() {
+            log::warn!(
+                "intel work: xe refused a ring with a fence ({}), so it is sent with none",
+                sent.as_ref().expect_err("just seen")
+            );
+            sent = self.xe.exec(prepared.xe_queue, prepared.batch, &[]);
+        }
         match sent.as_ref().map_err(plan::exec_verdict) {
             Ok(()) => {
                 let prepared = self.prepared.remove(&doorbell).expect("found above");
@@ -779,6 +789,21 @@ mod tests {
         assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::RungToStay);
         let Some(Call::Exec { syncs, .. }) = rig.xe.calls_named("exec").pop() else { panic!() };
         assert!(syncs.is_empty(), "{syncs:?}");
+    }
+
+    #[test]
+    fn a_ring_xe_refuses_with_a_fence_is_sent_again_with_none() {
+        let mut rig = Rig::new(Stage::Everything);
+        ring(&mut rig);
+        let work = rig.submission(1, 3);
+        let WorkStart::Started { doorbell, .. } = rig.start(&work) else { panic!() };
+        rig.xe.fail_call(rig.xe.calls().len(), libc::EOPNOTSUPP);
+        assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::RungToStay);
+        let execs = rig.xe.calls_named("exec");
+        let [Call::Exec { syncs: first, .. }, Call::Exec { syncs: second, .. }] = &execs[..] else {
+            panic!("{execs:?}")
+        };
+        assert!(!first.is_empty() && second.is_empty());
     }
 
     #[test]
