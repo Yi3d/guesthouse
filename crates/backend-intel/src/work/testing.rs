@@ -1,0 +1,357 @@
+//! What the tests of [`super`] share: a card that is a stand-in, pages that play the guest's, a
+//! host that plays the core, and a space set up with a batch, some data and a fence.
+
+use super::CardWork;
+use crate::card;
+use crate::protocol::bytes::put_dword;
+use crate::protocol::command_header::{COMPACT_SIZE, Header};
+use crate::stage::Stage;
+use crate::xe::fake::FakeXe;
+use crate::xe::plan::BufferUse;
+use guesthouse_backend::{
+    BackendError, CommandBuffer, GPU_RANGES, GuestSpan, HostServices, MapMemoryType, MapRequest, MemoryError,
+    MemoryId, SharedSpan, SpaceId, Work, WorkSource, WorkStart,
+};
+use std::time::{Duration, Instant};
+
+impl CardWork {
+    /// Writes the start of a block through the CPU's view of it.
+    pub fn write_for_test(&mut self, memory: MemoryId, bytes: &[u8]) {
+        assert!(self.cpu_view(memory).unwrap().write(0, bytes));
+    }
+}
+
+/// A cap no test reaches unless it means to.
+const ROOMY: u64 = 1 << 40;
+
+pub fn work(stage: Stage) -> (CardWork, FakeXe) {
+    work_with_cap(stage, ROOMY)
+}
+
+pub fn work_with_cap(stage: Stage, cap: u64) -> (CardWork, FakeXe) {
+    let xe = FakeXe::default();
+    let work = CardWork::new(Box::new(xe.clone()), &card::tests::battlemage(), stage, cap).unwrap();
+    (work, xe)
+}
+
+pub fn map_request(space: SpaceId, memory: MemoryId, address: u64, offset: u64, length: u64) -> MapRequest {
+    MapRequest {
+        space,
+        memory,
+        offset,
+        length,
+        address,
+        small_pages: false,
+        gpu_cached: false,
+        readable: true,
+        writable: true,
+        executable: false,
+        memory_type: MapMemoryType::Default,
+        driver_protection: 0,
+    }
+}
+
+/// Zeroed pages at a fixed host address, standing in for the guest's.
+pub struct Pages(Box<[u64]>);
+
+impl Pages {
+    pub fn new(bytes: usize) -> Self {
+        Self(vec![0u64; bytes / 8].into_boxed_slice())
+    }
+
+    pub fn address(&self) -> u64 {
+        self.0.as_ptr() as u64
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len() * 8
+    }
+
+    pub fn bytes(&self) -> Vec<u8> {
+        // SAFETY: the pages are plain memory this value owns. The stand-in card writes them through
+        // their address, so they are read the same way.
+        (0..self.len()).map(|at| unsafe { (self.address() as *const u8).add(at).read_volatile() }).collect()
+    }
+
+    pub fn qword(&self, offset: usize) -> u64 {
+        // SAFETY: as in `bytes`, and the offset is checked by the slice of the caller's test.
+        assert!(offset + 8 <= self.len());
+        unsafe { (self.address() as *const u8).add(offset).cast::<u64>().read_volatile() }
+    }
+
+    pub fn write(&self, offset: usize, bytes: &[u8]) {
+        assert!(offset + bytes.len() <= self.len());
+        // SAFETY: inside the pages, checked above.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (self.address() as *mut u8).add(offset),
+                bytes.len(),
+            )
+        };
+    }
+}
+
+/// The core, as far as work on the card asks it anything: guest pages by GPU address, and fences by
+/// guest physical address.
+#[derive(Default)]
+pub struct FakeHost {
+    /// Guest pages mapped in a space: the space, the GPU address, the host address and the length.
+    spans: Vec<(SpaceId, u64, u64, usize)>,
+    /// Fences: the guest physical address, and where it is in this process.
+    fences: Vec<(u64, u64)>,
+    /// Every fence the host itself wrote.
+    pub written: Vec<(u64, u64)>,
+}
+
+impl FakeHost {
+    pub fn show(&mut self, space: SpaceId, gpu_address: u64, pages: &Pages) {
+        self.spans.push((space, gpu_address, pages.address(), pages.len()));
+    }
+
+    pub fn fence_at(&mut self, guest_address: u64, host_address: u64) {
+        self.fences.push((guest_address, host_address));
+    }
+
+    fn fence(&self, guest_address: u64) -> Result<*mut u64, MemoryError> {
+        let found = self.fences.iter().find(|(guest, _)| *guest == guest_address);
+        found.map(|(_, host)| *host as *mut u64).ok_or(MemoryError::Outside(guest_address))
+    }
+}
+
+impl HostServices for FakeHost {
+    fn take_gpu_addresses(&mut self, _size: u64, _align: u64) -> Result<u64, BackendError> {
+        Err(BackendError::new("the test host hands out no addresses"))
+    }
+
+    fn read_at_gpu_address(&self, space: SpaceId, address: u64, out: &mut [u8]) -> Option<usize> {
+        self.read_guest_span(space, address, out)
+    }
+
+    fn shared_span(&self, _space: SpaceId, _address: u64) -> Option<SharedSpan> {
+        None
+    }
+
+    fn guest_span(&self, _space: SpaceId, _address: u64) -> Option<GuestSpan> {
+        None
+    }
+
+    fn read_guest_span(&self, space: SpaceId, address: u64, out: &mut [u8]) -> Option<usize> {
+        let &(_, start, host, length) = self.spans.iter().find(|(held, start, _, length)| {
+            *held == space && (*start..*start + *length as u64).contains(&address)
+        })?;
+        let offset = (address - start) as usize;
+        let count = out.len().min(length - offset);
+        // SAFETY: the span is pages a test keeps alive, and the range was cut to its length.
+        unsafe { std::ptr::copy_nonoverlapping((host as *const u8).add(offset), out.as_mut_ptr(), count) };
+        Some(count)
+    }
+
+    fn write_guest_span(&mut self, _space: SpaceId, _address: u64, _value: u32) -> bool {
+        false
+    }
+
+    fn write_u32(&mut self, _address: u64, _value: u32) -> Result<(), MemoryError> {
+        Err(MemoryError::Outside(_address))
+    }
+
+    fn write_u64(&mut self, address: u64, value: u64) -> Result<(), MemoryError> {
+        let fence = self.fence(address)?;
+        // SAFETY: a fence a test registered, in pages it keeps alive.
+        unsafe { fence.write_volatile(value) };
+        self.written.push((address, value));
+        Ok(())
+    }
+
+    fn read_guest(&self, _address: u64, _out: &mut [u8]) -> usize {
+        0
+    }
+
+    fn fence_value(&self, fence: u64) -> Result<u64, MemoryError> {
+        // SAFETY: as in `write_u64`.
+        Ok(unsafe { self.fence(fence)?.read_volatile() })
+    }
+}
+
+/// A submission a test can change before it is started.
+pub struct WorkBuilder {
+    pub queue: u32,
+    pub space: SpaceId,
+    pub node: u32,
+    pub private: Vec<u8>,
+    pub commands: Option<CommandBuffer>,
+    pub fence: u64,
+    pub fence_gpu_address: u64,
+    pub fence_value: u64,
+    pub may_run: bool,
+    pub queue_failed: bool,
+}
+
+/// Where the header's first dword keeps the context type and the patch-list bit.
+const CONTEXT_TYPE_SHIFT: u32 = 16;
+const PATCH_LIST_BIT: u32 = 1 << 22;
+/// OpenCL's context type, on the compute node, as the lab's guest submits.
+const OPENCL: u32 = 5;
+const COMPUTE_NODE: u32 = 5;
+
+impl WorkBuilder {
+    pub fn context_type(mut self, kind: u32) -> Self {
+        put_dword(&mut self.private, 0, kind << CONTEXT_TYPE_SHIFT);
+        self
+    }
+
+    pub fn patch_list(mut self) -> Self {
+        put_dword(&mut self.private, 0, OPENCL << CONTEXT_TYPE_SHIFT | PATCH_LIST_BIT);
+        self
+    }
+
+    pub fn work(&self) -> Work<'_> {
+        Work {
+            source: WorkSource::HardwareQueue,
+            queue: self.queue,
+            space: self.space,
+            node: self.node,
+            client_hint: 0,
+            context_queues: 1,
+            private: &self.private,
+            commands: self.commands,
+            fence: self.fence,
+            fence_gpu_address: self.fence_gpu_address,
+            fence_value: self.fence_value,
+            may_run: self.may_run,
+            queue_failed: self.queue_failed,
+        }
+    }
+}
+
+const BATCH_AT: u64 = 0x1_4000_0000;
+const DATA_AT: u64 = 0x400_0000;
+const FENCE_AT: u64 = 0x500_0000;
+const BATCH_BYTES: u64 = 0x1000;
+const DATA_BYTES: usize = 0x2000;
+const FENCE_BYTES: usize = 0x1000;
+/// The fence's guest physical address, which only the test host resolves.
+const FENCE_GUEST_ADDRESS: u64 = 0x7000_0000;
+
+/// A process's space with a batch in video memory, data in guest pages and the fence block mapped,
+/// as the core sets one up.
+pub struct Rig {
+    pub work: CardWork,
+    pub xe: FakeXe,
+    pub host: FakeHost,
+    pub space: SpaceId,
+    batch: MemoryId,
+    data: (MemoryId, Pages),
+    fence: (MemoryId, Pages),
+    batch_length: u32,
+    now: Instant,
+}
+
+impl Rig {
+    pub fn new(stage: Stage) -> Self {
+        let (mut work, xe) = work(stage);
+        let (batch, _) = work.allocate(BATCH_BYTES, BufferUse::Card).unwrap();
+        let data_pages = Pages::new(DATA_BYTES);
+        let data = work.adopt(data_pages.address(), DATA_BYTES as u64).unwrap();
+        let fence_pages = Pages::new(FENCE_BYTES);
+        let fence = work.adopt(fence_pages.address(), FENCE_BYTES as u64).unwrap();
+        let mut host = FakeHost::default();
+        host.fence_at(FENCE_GUEST_ADDRESS, fence_pages.address());
+        let mut rig = Self {
+            work,
+            xe,
+            host,
+            space: SpaceId(0),
+            batch,
+            data: (data, data_pages),
+            fence: (fence, fence_pages),
+            batch_length: 0,
+            now: Instant::now(),
+        };
+        rig.space = rig.second_space();
+        rig
+    }
+
+    /// Another process's space, with the same three things mapped at the same addresses.
+    pub fn second_space(&mut self) -> SpaceId {
+        let space = self.work.create_space(&GPU_RANGES).unwrap();
+        self.work.map(&map_request(space, self.batch, BATCH_AT, 0, BATCH_BYTES)).unwrap();
+        self.work.map(&map_request(space, self.data.0, DATA_AT, 0, DATA_BYTES as u64)).unwrap();
+        self.work.map(&map_request(space, self.fence.0, FENCE_AT, 0, FENCE_BYTES as u64)).unwrap();
+        self.host.show(space, DATA_AT, &self.data.1);
+        self.host.show(space, FENCE_AT, &self.fence.1);
+        space
+    }
+
+    pub fn batch_address(&self) -> u64 {
+        BATCH_AT
+    }
+
+    pub fn data_address(&self) -> u64 {
+        DATA_AT
+    }
+
+    pub fn fence_gpu_address(&self) -> u64 {
+        FENCE_AT
+    }
+
+    pub fn fence_guest_address(&self) -> u64 {
+        FENCE_GUEST_ADDRESS
+    }
+
+    /// Writes the batch into video memory, zeroed first, and makes submissions name its length.
+    pub fn write_batch(&mut self, dwords: &[u32]) {
+        let view = self.work.cpu_view(self.batch).unwrap();
+        assert!(view.write(0, &vec![0u8; BATCH_BYTES as usize]));
+        assert!(view.write(0, &crate::xe::batch::bytes(dwords)));
+        self.batch_length = dwords.len() as u32 * 4;
+    }
+
+    pub fn write_data(&mut self, offset: usize, bytes: &[u8]) {
+        self.data.1.write(offset, bytes);
+    }
+
+    pub fn data_qword(&self, offset: usize) -> u64 {
+        self.data.1.qword(offset)
+    }
+
+    /// The fence's value, as the guest would read it.
+    pub fn fence(&self) -> u64 {
+        self.fence.1.qword(0)
+    }
+
+    pub fn submission(&self, queue: u32, value: u64) -> WorkBuilder {
+        self.submission_in(self.space, queue, value)
+    }
+
+    pub fn submission_in(&self, space: SpaceId, queue: u32, value: u64) -> WorkBuilder {
+        let builder = WorkBuilder {
+            queue,
+            space,
+            node: COMPUTE_NODE,
+            private: vec![0; COMPACT_SIZE],
+            commands: Some(CommandBuffer { address: BATCH_AT, length: self.batch_length }),
+            fence: FENCE_GUEST_ADDRESS,
+            fence_gpu_address: FENCE_AT,
+            fence_value: value,
+            may_run: true,
+            queue_failed: false,
+        };
+        builder.context_type(OPENCL)
+    }
+
+    pub fn start(&mut self, builder: &WorkBuilder) -> WorkStart {
+        let work = builder.work();
+        self.work.start(&mut self.host, &work, &Header::read(work.private))
+    }
+
+    /// Looks at the runs, at a time far enough on that the look isn't skipped.
+    pub fn poll(&mut self) {
+        self.now += Duration::from_millis(100);
+        self.work.poll(&mut self.host, self.now);
+    }
+
+    pub fn poll_later(&mut self) {
+        self.poll();
+    }
+}

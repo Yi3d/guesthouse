@@ -262,7 +262,8 @@ impl Traffic {
         dump(format_args!("allocation type={}", resource.resource_type), private);
     }
 
-    pub fn submission(&mut self, work: &Work<'_>, header: &Header) {
+    /// `answer` is what became of it: `finished-unrun`, or what work on the card made of it.
+    pub fn submission(&mut self, work: &Work<'_>, header: &Header, answer: &str) {
         if let Some(count) = self.submitted.get_mut(&work.queue) {
             *count += 1;
         }
@@ -284,7 +285,7 @@ impl Traffic {
         tell!(
             telling,
             "{PREFIX} submit source={source} queue={:#x} node={} node_name={} hint={:#x} fence_value={} length={} \
-             kernel_would={kernel_would} answer=finished-unrun fields=[{}] undecoded=[{}]",
+             kernel_would={kernel_would} answer={answer} fields=[{}] undecoded=[{}]",
             work.queue,
             work.node,
             nodes::name(work.node),
@@ -468,8 +469,8 @@ mod tests {
             may_run: true,
             queue_failed: false,
         };
-        traffic.submission(&work, &Header::read(&[]));
-        traffic.submission(&work, &Header::read(&[]));
+        traffic.submission(&work, &Header::read(&[]), "finished-unrun");
+        traffic.submission(&work, &Header::read(&[]), "finished-unrun");
         assert_eq!(traffic.submitted.get(&7), Some(&2));
         traffic.queue_closed(7);
         assert!(traffic.submitted.is_empty());

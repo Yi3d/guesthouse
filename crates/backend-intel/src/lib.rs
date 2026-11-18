@@ -1,12 +1,16 @@
 //! The Intel backend: the host's open xe driver, and the private data Intel's Windows driver passes
 //! to its kernel driver.
 //!
-//! This is a first stage, a stand-in that listens. It reads the card through sysfs and xe's
-//! read-only queries, builds the adapter record the guest's user-mode drivers ask for, and is meant
-//! to answer the guest so that they can make devices, contexts, queues and allocations and submit.
-//! None of it has met a guest yet. Nothing reaches the card: a submission comes back finished, unrun, and video memory is
-//! only a name, as nothing writes it. What it is for is the log: every exchange that is Intel's own
-//! gets a line, in [`traffic`], so one guest run says what the real backend has to do.
+//! It reads the card through sysfs and xe's read-only queries, builds the adapter record the
+//! guest's user-mode drivers ask for, and answers the guest so that they can make devices, contexts,
+//! queues and allocations and submit. Every exchange that is Intel's own gets a line in the log, in
+//! [`traffic`].
+//!
+//! What becomes of the guest's work is the [`stage`]'s word. While listening, nothing reaches the
+//! card: a submission comes back finished, unrun, and video memory is only a name. Past that,
+//! [`work`] makes real buffers, address spaces and queues through [`xe`] and runs the guest's
+//! batches. That has run against a stand-in for xe only, never on a card, so the backend tests the
+//! card itself at each start and stays listening if any of it fails.
 //!
 //! The guest-protocol side, in [`protocol`], is plain byte work tested without a guest. The host
 //! side is [`card`] and the modules under it, and `intel-probe` prints what it reads.
@@ -31,6 +35,7 @@ pub mod stage;
 pub mod sysfs;
 mod traffic;
 mod watch;
+pub mod work;
 pub mod xe;
 pub mod xe_query;
 
@@ -51,10 +56,13 @@ use protocol::context::Context;
 use protocol::escape::Escape;
 use protocol::record::{EngineMaxima, GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads};
 use protocol::{gaps, guest_driver, record, shape};
-use stage::Desktop;
+use stage::{Desktop, Fallback, Stage};
 use std::time::Instant;
 use traffic::{QueryOutcome, Traffic};
 use watch::PREFIX;
+use work::CardWork;
+use xe::device::Xe;
+use xe::plan::BufferUse;
 use xe_query::{Engine, Gt};
 
 /// How this backend names the host driver's branch: the Linux kernel's xe.
@@ -75,6 +83,9 @@ pub struct IntelBackend {
     started: Instant,
     /// See [`IntelBackend::set_desktop`].
     desktop: Desktop,
+    /// Work on the card, at every stage past listening. `None` is the listening stage: memory and
+    /// spaces are [`Books`]' names, and every submission is finished unrun.
+    work: Option<CardWork>,
 }
 
 impl IntelBackend {
@@ -119,6 +130,7 @@ impl IntelBackend {
             traffic: Traffic::default(),
             started: Instant::now(),
             desktop: Desktop::Hardware,
+            work: None,
         };
         backend.log_start();
         Ok(backend)
@@ -146,7 +158,7 @@ impl IntelBackend {
 
     /// Blocks of memory still held, for a test to see that frees reach the backend.
     pub fn live_memory_blocks(&self) -> usize {
-        self.books.live_memory()
+        self.work.as_ref().map_or_else(|| self.books.live_memory(), CardWork::live_blocks)
     }
 
     /// The adapter record the guest is given, before its build stamp is put in.
@@ -184,7 +196,81 @@ impl IntelBackend {
         if self.card.config.has_vram() {
             log::info!("{PREFIX} record-gap \"{}\"", gaps::LOCAL_MEMORY);
         }
-        log::warn!("{PREFIX} this stage runs nothing on the card: the guest's work is finished unrun");
+    }
+
+    /// How much of the guest's work runs on the card.
+    pub fn stage(&self) -> Stage {
+        self.work.as_ref().map_or(Stage::Listen, CardWork::stage)
+    }
+
+    /// Starts work on the card at the stage asked for, or stays listening and says in the log which
+    /// layer refused. Nothing here fails the guest's start: a card that can't run work is still
+    /// one whose guest can be listened to. `open` opens the card for work, and `sysfs` is the
+    /// card's device folder.
+    pub fn start_work_on_card(
+        &mut self,
+        asked: (Stage, Option<Fallback>),
+        open: impl FnOnce() -> std::io::Result<Box<dyn Xe + Send>>,
+        sysfs: Option<&std::path::Path>,
+    ) {
+        match self.work_at(asked, open, sysfs) {
+            Ok(work) => {
+                log::info!(
+                    "{PREFIX} stage={:?}: the guest's work runs on the card, with at most {} MiB of video \
+                     memory; {}=0 turns that off",
+                    work.stage(),
+                    work.cap() >> 20,
+                    stage::RUN_VARIABLE
+                );
+                self.work = Some(work);
+            }
+            Err(fallback) => {
+                self.work = None;
+                log::warn!(
+                    "{PREFIX} stage=Listen {fallback}. Nothing reaches the card: the guest's work is \
+                     finished unrun"
+                );
+            }
+        }
+    }
+
+    fn work_at(
+        &mut self,
+        (asked, why): (Stage, Option<Fallback>),
+        open: impl FnOnce() -> std::io::Result<Box<dyn Xe + Send>>,
+        sysfs: Option<&std::path::Path>,
+    ) -> Result<CardWork, Fallback> {
+        if !asked.is_real() {
+            return Err(why.unwrap_or(Fallback::AskedFor));
+        }
+        if self.card.driver != ioctl::XE_DRIVER {
+            return Err(Fallback::NotXe(self.card.driver.clone()));
+        }
+        let mut xe = open().map_err(|error| Fallback::NodeNotOpened(error.to_string()))?;
+        // The same test `intel-probe --run` runs, without its two break steps: if this card and
+        // kernel don't do what work on the card needs, no guest finds out the hard way.
+        let mut said = Vec::new();
+        let summary = xe::selftest::run(
+            &mut *xe,
+            &self.card,
+            sysfs,
+            xe::selftest::Options::default(),
+            &mut std::io::empty(),
+            &mut said,
+        );
+        for line in String::from_utf8_lossy(&said).lines() {
+            if line.starts_with("FAIL") {
+                log::warn!("{PREFIX} self-test {line}");
+            } else {
+                log::info!("{PREFIX} self-test {line}");
+            }
+        }
+        if !summary.all_passed() {
+            return Err(Fallback::SelfTestFailed(summary.failed));
+        }
+        let shared = self.card.system_memory() / SHARED_MEMORY_PART;
+        let cap = work::cap::video_cap(&self.card.regions, shared);
+        CardWork::new(xe, &self.card, asked, cap).ok_or(Fallback::NoMemoryRegion)
     }
 }
 
@@ -211,6 +297,17 @@ fn recorded_card(file: &std::path::Path, address: Option<&str>) -> Result<CardFa
         recording::RECORDED_CARD_VARIABLE
     );
     Ok(card)
+}
+
+/// What a recorded card can be asked for: listening, whatever a person asked, as there is no card
+/// to run on. A person's own request to listen keeps its own reason.
+fn on_a_recorded_card((asked, why): (Stage, Option<Fallback>)) -> (Stage, Option<Fallback>) {
+    (Stage::Listen, if asked.is_real() { Some(Fallback::RecordedCard) } else { why })
+}
+
+/// The opener for a card that isn't there.
+fn no_card() -> std::io::Result<Box<dyn Xe + Send>> {
+    Err(std::io::Error::other("there is no card"))
 }
 
 /// The adapter's name, as the guest's programs see it in the adapter's description and the record.
@@ -321,8 +418,13 @@ impl Backend for IntelBackend {
 
     fn open(setup: &Setup, _survey: &DriverSurvey) -> Result<Self, Refusal> {
         let address = setup.card_address.map(|address| address.to_string());
-        let card = match recording::recorded_card_file() {
-            Some(file) => recorded_card(&file, address.as_deref())?,
+        let asked = Stage::from_environment();
+        let mut backend = match recording::recorded_card_file() {
+            Some(file) => {
+                let mut backend = Self::from_card(recorded_card(&file, address.as_deref())?)?;
+                backend.start_work_on_card(on_a_recorded_card(asked), no_card, None);
+                backend
+            }
             None => {
                 let node = intel_render_node(address.as_deref()).ok_or_else(|| {
                     Refusal(
@@ -330,11 +432,14 @@ impl Backend for IntelBackend {
                             .into(),
                     )
                 })?;
-                CardFacts::read(&node)
-                    .map_err(|error| Refusal(format!("Opening the Intel card failed: {error}")))?
+                let card = CardFacts::read(&node)
+                    .map_err(|error| Refusal(format!("Opening the Intel card failed: {error}")))?;
+                let mut backend = Self::from_card(card)?;
+                let open = || xe::device::XeCard::open(&node.device_file).map(|card| Box::new(card) as _);
+                backend.start_work_on_card(asked, open, Some(&node.sysfs));
+                backend
             }
         };
-        let mut backend = Self::from_card(card)?;
         backend.facts.guest_driver_version = setup.guest_driver_version.packed();
         Ok(backend)
     }
@@ -348,43 +453,81 @@ impl Backend for IntelBackend {
         size: u64,
         _kind: MemoryKind,
     ) -> Result<(MemoryId, u64), BackendError> {
-        Ok((self.books.new_memory(), size))
+        match &mut self.work {
+            Some(work) => work.allocate(size, BufferUse::Card),
+            None => Ok((self.books.new_memory(), size)),
+        }
     }
 
-    fn adopt_host_pages(&mut self, _host_address: u64, _size: u64) -> Result<MemoryId, BackendError> {
-        Ok(self.books.new_memory())
+    fn adopt_host_pages(&mut self, host_address: u64, size: u64) -> Result<MemoryId, BackendError> {
+        match &mut self.work {
+            Some(work) => work.adopt(host_address, size),
+            None => Ok(self.books.new_memory()),
+        }
     }
 
     fn release_memory(&mut self, memory: MemoryId) {
-        self.books.release(memory);
+        match &mut self.work {
+            Some(work) => work.release(memory),
+            None => self.books.release(memory),
+        }
     }
 
-    /// Nothing has written the video memory, so there is nothing to move.
+    /// By the CPU, through its view of both. While listening nothing has written the video memory,
+    /// so there is nothing to move.
     fn preserve_contents(
         &mut self,
         _host: &mut dyn HostServices,
         _own_space: SpaceId,
-        _from: MemoryId,
-        _to: MemoryId,
-        _size: u64,
+        from: MemoryId,
+        to: MemoryId,
+        size: u64,
     ) -> Result<(), BackendError> {
-        Ok(())
+        match &mut self.work {
+            Some(work) => work.preserve(from, to, size),
+            None => Ok(()),
+        }
+    }
+
+    fn read_memory_start(
+        &mut self,
+        _host: &mut dyn HostServices,
+        _own_space: SpaceId,
+        memory: MemoryId,
+        out: &mut [u8],
+    ) -> Result<(), BackendError> {
+        match &mut self.work {
+            Some(work) => work.read_start(memory, out),
+            None => Err(BackendError::new("nothing has written video memory at this stage")),
+        }
     }
 
     fn create_address_space(&mut self, ranges: &[GpuRange]) -> Result<SpaceId, BackendError> {
-        Ok(self.books.create_space(ranges))
+        match &mut self.work {
+            Some(work) => work.create_space(ranges),
+            None => Ok(self.books.create_space(ranges)),
+        }
     }
 
     fn destroy_address_space(&mut self, space: SpaceId) {
-        self.books.destroy_space(space);
+        match &mut self.work {
+            Some(work) => work.destroy_space(space),
+            None => self.books.destroy_space(space),
+        }
     }
 
     fn map(&mut self, request: &MapRequest) -> Result<(), BackendError> {
-        self.books.map(request)
+        match &mut self.work {
+            Some(work) => work.map(request),
+            None => self.books.map(request),
+        }
     }
 
     fn unmap(&mut self, unmap: &UnmapRequest) -> Result<(), BackendError> {
-        self.books.unmap(unmap)
+        match &mut self.work {
+            Some(work) => work.unmap(unmap),
+            None => self.books.unmap(unmap),
+        }
     }
 
     /// Data this backend refuses gets a page, as the call fails anyway once
@@ -480,10 +623,11 @@ impl Backend for IntelBackend {
         value
     }
 
-    /// The host's clock stands in for the GPU's, which nothing reads here, in nanoseconds since
-    /// the backend started.
+    /// An engine's cycle counter once work runs on the card. While listening, or if xe won't say,
+    /// the host's clock stands in for it, in nanoseconds since the backend started.
     fn gpu_clock(&mut self) -> Result<u64, BackendError> {
-        Ok(self.started.elapsed().as_nanos() as u64)
+        let card = self.work.as_mut().and_then(CardWork::clock);
+        Ok(card.unwrap_or_else(|| self.started.elapsed().as_nanos() as u64))
     }
 
     fn context_allowed(&mut self, node: u32, client_hint: u32) -> bool {
@@ -515,19 +659,41 @@ impl Backend for IntelBackend {
         log::debug!("{PREFIX} process-gone process={process:#x}");
     }
 
-    /// Nothing runs in this stage, so no submission fails: each is logged with what its header
-    /// says, as far as it can be read, and finished unrun.
-    fn start_work(&mut self, _host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart {
-        self.traffic.submission(work, &Header::read(work.private));
-        WorkStart::Finished
+    /// Each submission is logged with what its header says, as far as it can be read. While
+    /// listening nothing runs, so none fails: each is finished unrun.
+    fn start_work(&mut self, host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart {
+        let header = Header::read(work.private);
+        let start = match &mut self.work {
+            Some(card) => card.start(host, work, &header),
+            None => WorkStart::Finished,
+        };
+        let answer = match start {
+            WorkStart::Started { .. } => "started",
+            WorkStart::QueueFailed => "queue-failed",
+            _ => "finished-unrun",
+        };
+        self.traffic.submission(work, &header, answer);
+        start
     }
 
-    fn ring_doorbell(&mut self, _queue: u32, _doorbell: u64) -> Result<Doorbell, BackendError> {
-        Ok(Doorbell::Rung)
+    fn ring_doorbell(&mut self, _queue: u32, doorbell: u64) -> Result<Doorbell, BackendError> {
+        match &mut self.work {
+            Some(work) => work.ring_doorbell(doorbell),
+            None => Ok(Doorbell::Rung),
+        }
+    }
+
+    fn poll_work(&mut self, host: &mut dyn HostServices, now: Instant) {
+        if let Some(work) = &mut self.work {
+            work.poll(host, now);
+        }
     }
 
     fn close_queue(&mut self, queue: u32) {
         self.traffic.queue_closed(queue);
+        if let Some(work) = &mut self.work {
+            work.close_queue(queue);
+        }
     }
 
     /// What would be copied was never drawn, so the copy is done by leaving the target as it is.
@@ -656,5 +822,130 @@ mod tests {
         let facts = record_facts(&card, &generation::XE2_LPG, 0);
         assert_eq!(facts.gt.thread_count, 64 * generation::XE2_LPG.threads_per_eu);
         assert_eq!(facts.gt.max_slices, 0, "not guessed");
+    }
+    /// A backend on the test card, with a stand-in for xe that `open` hands out when asked to.
+    fn started(asked: (Stage, Option<Fallback>), xe: &xe::fake::FakeXe) -> (IntelBackend, bool) {
+        let mut backend = IntelBackend::from_card(card::tests::battlemage()).unwrap();
+        let mut opened = false;
+        let open = || {
+            opened = true;
+            Ok(Box::new(xe.clone()) as Box<dyn Xe + Send>)
+        };
+        backend.start_work_on_card(asked, open, None);
+        (backend, opened)
+    }
+
+    #[test]
+    fn with_nothing_asked_a_card_that_passes_its_test_runs_everything() {
+        let xe = xe::fake::FakeXe::default();
+        let (backend, opened) = started(Stage::asked(None), &xe);
+        assert!(opened);
+        assert_eq!(backend.stage(), stage::FURTHEST_STAGE);
+        assert_eq!(xe.live(), 0, "the test at the start left nothing on the card");
+        assert!(!xe.calls_named("exec").is_empty(), "and it did run");
+    }
+
+    #[test]
+    fn a_recorded_card_listens_whatever_is_asked_and_nothing_is_opened() {
+        for asked in [Stage::asked(None), (Stage::Compute, None), (Stage::Everything, None)] {
+            let on_recording = on_a_recorded_card(asked);
+            assert_eq!(on_recording, (Stage::Listen, Some(Fallback::RecordedCard)));
+            let xe = xe::fake::FakeXe::default();
+            let (backend, opened) = started(on_recording, &xe);
+            assert_eq!(backend.stage(), Stage::Listen);
+            assert!(!opened && xe.calls().is_empty());
+        }
+        let asked_to_listen = (Stage::Listen, Some(Fallback::AskedFor));
+        assert_eq!(on_a_recorded_card(asked_to_listen.clone()), asked_to_listen, "its own reason is kept");
+        assert!(no_card().is_err());
+    }
+
+    #[test]
+    fn the_off_switch_and_an_unknown_word_keep_everything_off_the_card() {
+        for value in ["0", "listen", "maybe"] {
+            let xe = xe::fake::FakeXe::default();
+            let asked = Stage::asked(Some(std::ffi::OsStr::new(value)));
+            let (mut backend, opened) = started(asked, &xe);
+            assert_eq!(backend.stage(), Stage::Listen, "{value}");
+            assert!(!opened, "{value}: the card isn't even opened for work");
+            // What a guest does at this stage is names in books, as before.
+            let (memory, _) = backend.allocate_video_memory(0x1000, MemoryKind::PLAIN).unwrap();
+            let space = backend.create_address_space(&guesthouse_backend::GPU_RANGES).unwrap();
+            backend.map(&work::testing::map_request(space, memory, 0x400_0000, 0, 0x1000)).unwrap();
+            let mut host = work::testing::FakeHost::default();
+            let submission = work::testing::Rig::new(Stage::Everything).submission(1, 1);
+            assert_eq!(backend.start_work(&mut host, &submission.work()), WorkStart::Finished);
+            assert_eq!(backend.ring_doorbell(1, 1).unwrap(), Doorbell::Rung);
+            backend.poll_work(&mut host, Instant::now());
+            backend.release_memory(memory);
+            assert!(xe.calls().is_empty(), "{value}: nothing reached xe");
+        }
+    }
+
+    #[test]
+    fn a_card_that_fails_its_test_at_the_start_listens_and_the_guest_still_starts() {
+        let xe = xe::fake::FakeXe::default();
+        xe.fail("exec", libc::EOPNOTSUPP);
+        let (mut backend, opened) = started(Stage::asked(None), &xe);
+        assert!(opened);
+        assert_eq!(backend.stage(), Stage::Listen);
+        assert_eq!(xe.live(), 0, "what the test made is gone");
+        xe.heal();
+        let calls = xe.calls().len();
+        backend.allocate_video_memory(0x1000, MemoryKind::PLAIN).unwrap();
+        assert_eq!(xe.calls().len(), calls, "and the guest's memory is names again");
+    }
+
+    #[test]
+    fn a_card_that_cannot_be_opened_for_work_or_is_not_on_xe_listens() {
+        let mut backend = IntelBackend::from_card(card::tests::battlemage()).unwrap();
+        let denied = || Err(std::io::Error::from_raw_os_error(libc::EACCES));
+        backend.start_work_on_card(Stage::asked(None), denied, None);
+        assert_eq!(backend.stage(), Stage::Listen);
+        let mut on_i915 = card::tests::battlemage();
+        on_i915.driver = "i915".into();
+        let mut backend = IntelBackend::from_card(on_i915).unwrap();
+        let never =
+            || -> std::io::Result<Box<dyn Xe + Send>> { panic!("a card not on xe is never opened for work") };
+        backend.start_work_on_card(Stage::asked(None), never, None);
+        assert_eq!(backend.stage(), Stage::Listen);
+    }
+
+    #[test]
+    fn past_listening_the_trait_makes_real_things_and_runs_a_batch() {
+        let xe = xe::fake::FakeXe::default();
+        let (mut backend, _) = started((Stage::Everything, None), &xe);
+        let before = xe.calls().len();
+        let (batch, size) = backend.allocate_video_memory(0x1000, MemoryKind::PLAIN).unwrap();
+        assert_eq!(size, 0x1000);
+        let pages = work::testing::Pages::new(0x1000);
+        let fence = backend.adopt_host_pages(pages.address(), 0x1000).unwrap();
+        let space = backend.create_address_space(&guesthouse_backend::GPU_RANGES).unwrap();
+        backend.map(&work::testing::map_request(space, batch, 0x1_4000_0000, 0, 0x1000)).unwrap();
+        backend.map(&work::testing::map_request(space, fence, 0x500_0000, 0, 0x1000)).unwrap();
+        assert_eq!(backend.live_memory_blocks(), 2);
+        let view = backend.work.as_mut().unwrap();
+        view.write_for_test(batch, &xe::batch::bytes(&[xe::batch::BATCH_END]));
+        let mut host = work::testing::FakeHost::default();
+        host.fence_at(0x7000_0000, pages.address());
+        let mut submission = work::testing::Rig::new(Stage::Everything).submission(7, 3);
+        submission.space = space;
+        submission.commands = Some(guesthouse_backend::CommandBuffer { address: 0x1_4000_0000, length: 4 });
+        let WorkStart::Started { doorbell, .. } = backend.start_work(&mut host, &submission.work()) else {
+            panic!("the batch should start")
+        };
+        assert_eq!(backend.ring_doorbell(7, doorbell).unwrap(), Doorbell::Rung);
+        assert_eq!(pages.qword(0), 3, "the card wrote the guest's fence");
+        backend.poll_work(&mut host, Instant::now());
+        let mut start = [0u8; 4];
+        backend.read_memory_start(&mut host, space, batch, &mut start).unwrap();
+        assert_eq!(start, xe::batch::BATCH_END.to_le_bytes());
+        backend.close_queue(7);
+        backend.destroy_address_space(space);
+        backend.release_memory(batch);
+        backend.release_memory(fence);
+        assert_eq!(xe.live(), 0);
+        assert!(xe.calls().len() > before);
+        assert!(backend.gpu_clock().unwrap() > 0);
     }
 }
