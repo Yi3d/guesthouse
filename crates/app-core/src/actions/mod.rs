@@ -212,6 +212,9 @@ fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
         }
     }
     set_up_desktop(task)?;
+    if let Some(why) = hardware_desktop::no_picture(task) {
+        return start_again_on_software_desktop(task, &why).map(|_| ());
+    }
     apply_window_speed(task)?;
     place_files_for_maker(task)
 }
@@ -257,7 +260,13 @@ fn get_gpu_ready(task: &mut Task) -> Result<Gpu> {
 fn get_gpu_ready_on_this_desktop(task: &mut Task) -> Result<Gpu> {
     let gpu = get_gpu_ready(task)?;
     let Some(why) = hardware_desktop::failed(task, gpu == Gpu::Missing) else { return Ok(gpu) };
-    let told = hardware_desktop::fall_back_and_stop(task, &why)?;
+    start_again_on_software_desktop(task, &why)
+}
+
+/// A desktop on an Intel card that failed, for `why`: the machine goes to the software desktop and
+/// is started again on it, and what that start found is then the answer.
+fn start_again_on_software_desktop(task: &mut Task, why: &str) -> Result<Gpu> {
+    let told = hardware_desktop::fall_back_and_stop(task, why)?;
     wait_for_memory(task);
     task.error.clear();
     let shown = start_gpu_vm(task)?;

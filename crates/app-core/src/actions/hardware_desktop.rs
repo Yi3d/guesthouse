@@ -3,14 +3,20 @@
 //! card for the session within a minute or two, and a tester would be left with no desktop. Then the
 //! machine is put on the software desktop, and started again on it in the same start: see
 //! [`crate::intel_desktop`].
+//!
+//! A compositor that stays up is not yet a desktop: on a card where what it draws doesn't run, it
+//! lives on and shows nothing. So once the display is set up, the watch's last look is for a
+//! picture: the display driver's ring, with a frame on it. One with none fails the same way.
 
 use super::{STOP_WAIT_SECONDS, Task};
+use crate::display::{DriverPackage, read_state, ring_in};
 use crate::failure::Result;
 use crate::gpu_maker::GpuMaker;
 use crate::intel_desktop;
 use crate::log::write_log;
 use crate::vm_host::Stopped;
 use guesthouse_backend_intel::stage::Desktop;
+use guesthouse_daemon::display_note::ScreenNote;
 use std::time::Duration;
 
 /// How long after Windows boots the desktop must have stayed on the card. The lab's and a tester's
@@ -25,6 +31,12 @@ const LOOK_SECONDS: u64 = 30;
 /// until something makes it try the card again. One is let pass, for a crash that has another cause.
 const CRASH_LIMIT: u32 = 1;
 const MARK: &str = "hardware-desktop:";
+/// How long a picture gets once the display is set up. By then Windows has been up past the watched
+/// uptime, and the display step has given the driver its own wait for a frame.
+const PICTURE_WAIT: Duration = Duration::from_secs(60);
+const PICTURE_POLL: Duration = Duration::from_secs(5);
+const NO_RING: &str = "no ring for the display driver";
+const NO_FRAME: &str = "no frame came to the display driver's ring";
 
 /// What the guest says about its desktop since it booted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +133,35 @@ pub(super) fn failed(task: &Task, gpu_missing: bool) -> Option<String> {
     watch(task)
 }
 
+/// Why there is no picture, from what is on the display driver's ring.
+fn picture_failure(ring: Option<ScreenNote>) -> Option<&'static str> {
+    match ring {
+        None => Some(NO_RING),
+        Some(ring) if !ring.frames => Some(NO_FRAME),
+        Some(_) => None,
+    }
+}
+
+/// Whether a desktop on the card shows no picture, and why, once the display is set up. A display
+/// driver that waits on a restart, or a build with none to give, is judged on another boot.
+pub(super) fn no_picture(task: &Task) -> Option<String> {
+    if !watched(task) {
+        return None;
+    }
+    if read_state(task.context, &task.machine).restart_owed || DriverPackage::find(task.context).is_none() {
+        return None;
+    }
+    task.step("Waiting for a picture from the card");
+    let end = task.now() + PICTURE_WAIT;
+    loop {
+        let failure = picture_failure(ring_in(task.context, None))?;
+        if task.now() >= end {
+            return Some(failure.to_owned());
+        }
+        task.sleep(PICTURE_POLL);
+    }
+}
+
 /// What the user is told once the machine is up on the software desktop.
 fn told(why: &str) -> String {
     format!(
@@ -173,6 +214,14 @@ mod tests {
         assert_eq!(Look::parse(&said), Some(expected));
         assert_eq!(Look::parse("ERROR: the agent said nothing"), None);
         assert_eq!(Look::parse(&format!("{MARK}12 0")), None);
+    }
+
+    #[test]
+    fn a_desktop_with_no_ring_or_no_frame_has_no_picture() {
+        let ring = |frames| ScreenNote { width: 1920, height: 1080, hdr: false, daemon: 1, frames };
+        assert_eq!(picture_failure(None), Some(NO_RING));
+        assert_eq!(picture_failure(Some(ring(false))), Some(NO_FRAME));
+        assert_eq!(picture_failure(Some(ring(true))), None);
     }
 
     #[test]
