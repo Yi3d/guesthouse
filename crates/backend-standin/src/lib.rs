@@ -14,9 +14,9 @@ mod memory;
 mod random_messages;
 
 use guesthouse_backend::{
-    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, Doorbell, DriverFound, DriverSurvey,
-    GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, RangeView, Refusal,
-    RegistryName, RegistryValue, RingTiling, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart,
+    AdapterFacts, AllocationShape, Backend, BackendError, CardLabel, CommandBuffer, Doorbell, DriverFound,
+    DriverSurvey, GpuRange, GuestBooks, HostServices, MapRequest, MemoryId, MemoryKind, PciCard, RangeView,
+    Refusal, RegistryName, RegistryValue, RingTiling, Setup, SlotCopy, SpaceId, StagingCopy, StagingStart,
     StandardSurface, Status, SurfaceShape, UnmapRequest, VendorQuery, Work, WorkStart,
 };
 pub use memory::SparseMemory;
@@ -104,6 +104,8 @@ pub struct StandIn {
     pub busy_starts: u32,
     /// How many doorbells to come are refused for now, as a driver refusing a submission call.
     pub refused_rings: u32,
+    /// The commands the last submission named, as the core passed them on.
+    pub last_commands: Option<CommandBuffer>,
 }
 
 #[derive(Debug, Default)]
@@ -180,6 +182,7 @@ impl StandIn {
             work_patience: None,
             busy_starts: 0,
             refused_rings: 0,
+            last_commands: None,
         }
     }
 
@@ -470,6 +473,7 @@ impl Backend for StandIn {
     }
 
     fn start_work(&mut self, host: &mut dyn HostServices, work: &Work<'_>) -> WorkStart {
+        self.last_commands = work.commands;
         if !self.run_work || !work.may_run || work.queue_failed {
             return WorkStart::Finished;
         }

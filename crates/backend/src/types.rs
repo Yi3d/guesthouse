@@ -263,6 +263,15 @@ pub enum WorkSource {
     Context,
 }
 
+/// Where a submission's commands are, as the guest's message gave them: a GPU address in the
+/// submission's space, and a length in bytes. A backend whose driver's private data names its
+/// commands itself has no use for this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandBuffer {
+    pub address: u64,
+    pub length: u32,
+}
+
 /// A submission, as the core understood it.
 #[derive(Debug, Clone, Copy)]
 pub struct Work<'a> {
@@ -277,6 +286,8 @@ pub struct Work<'a> {
     pub context_queues: u32,
     /// The vendor driver's private data.
     pub private: &'a [u8],
+    /// The commands the message itself names, for a message that names any.
+    pub commands: Option<CommandBuffer>,
     pub fence: u64,
     pub fence_gpu_address: u64,
     pub fence_value: u64,

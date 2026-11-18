@@ -461,6 +461,7 @@ mod tests {
             client_hint: 0,
             context_queues: 1,
             private: &[],
+            commands: None,
             fence: 0,
             fence_gpu_address: 0,
             fence_value: 1,

@@ -13,7 +13,7 @@
 //!
 //! Where the trait does not fit Intel:
 //! - A submission's batch address and length are in the submission message, not in Intel's private
-//!   data, and [`Work`] doesn't carry them. A backend that runs work will need them.
+//!   data. [`Work`] carries them for a hardware queue's submission, and not yet for a context's.
 //! - Escapes have no status of their own, so one this backend's rules refuse can only be logged.
 //! - [`Backend::finish_queue_data`] sees the queue's data with the message's padding after it, so
 //!   its true size can't be checked.

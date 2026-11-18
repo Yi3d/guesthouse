@@ -920,6 +920,25 @@ mod allocations {
     }
 
     #[test]
+    fn a_hardware_queue_submissions_commands_reach_the_backend_and_a_contexts_names_none() {
+        let mut session = session();
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        let mut request = message(Command::SubmitToHardwareQueue, 0x50);
+        set_u32(&mut request, 0x18, queue);
+        set_u64(&mut request, 0x20, 1);
+        set_u64(&mut request, 0x28, 0x255_F13C_0000);
+        set_u32(&mut request, 0x30, 0x1040);
+        assert_eq!(send(&mut session, &request), SUCCESS.to_le_bytes());
+        let named = guesthouse_backend::CommandBuffer { address: 0x255_F13C_0000, length: 0x1040 };
+        assert_eq!(session.backend().last_commands, Some(named));
+        let mut request = message(Command::SubmitToContext, 0x198);
+        set_u32(&mut request, 0x34, context);
+        send(&mut session, &request);
+        assert_eq!(session.backend().last_commands, None);
+    }
+
+    #[test]
     fn a_first_lock_waits_for_the_gpu_to_finish_in_its_space() {
         let mut session = session();
         session.backend_mut().run_work = true;
