@@ -742,10 +742,15 @@ impl State {
     fn finish_unrun(&mut self, run: Held) {
         let Some(vm_id) = self.queues.get(&run.queue).map(|queue| queue.vm) else { return };
         let Some(vm) = self.vms.get(&vm_id) else { return };
+        let batch_bound = vm.host(run.batch, 4).is_some();
         if vm.flags & abi::VM_LONG_RUNNING != 0 {
+            if !batch_bound {
+                let lab = self.lab.get_or_insert_with(Lab::default);
+                lab.unbound_batches += 1;
+                lab_says("ring batch", run.batch, vm_id, lab.unbound_batches);
+            }
             return;
         }
-        let batch_bound = vm.host(run.batch, 4).is_some();
         let mut fences_unbound = Vec::new();
         for sync in &run.syncs {
             if let Sync::UserFence { address, value } = *sync
@@ -867,6 +872,8 @@ mod tests {
         xe.exec(queue, 0x1_0000, &[]).unwrap();
         assert!(!xe.queue_banned(queue).unwrap());
         assert_eq!(xe.unbound(), (0, 0));
+        xe.exec(queue, 0x9_0000, &[]).unwrap();
+        assert_eq!(xe.unbound(), (1, 0), "a ring at an unbound address is counted too");
     }
 
     #[test]
