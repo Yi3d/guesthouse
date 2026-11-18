@@ -50,6 +50,7 @@ use protocol::context::Context;
 use protocol::escape::Escape;
 use protocol::record::{EngineMaxima, GtSystem, IpWord, Memory, Platform, RecordFacts, StageThreads};
 use protocol::{gaps, guest_driver, record, shape};
+use stage::Desktop;
 use std::time::Instant;
 use traffic::{QueryOutcome, Traffic};
 use watch::PREFIX;
@@ -71,8 +72,8 @@ pub struct IntelBackend {
     books: Books,
     traffic: Traffic,
     started: Instant,
-    /// See [`IntelBackend::set_software_desktop`].
-    software_desktop: bool,
+    /// See [`IntelBackend::set_desktop`].
+    desktop: Desktop,
 }
 
 impl IntelBackend {
@@ -116,22 +117,22 @@ impl IntelBackend {
             books: Books::default(),
             traffic: Traffic::default(),
             started: Instant::now(),
-            software_desktop: false,
+            desktop: Desktop::Hardware,
         };
         backend.log_start();
         Ok(backend)
     }
 
-    /// The guest is refused the drivers for Direct3D 9, 10 and 11, so that the desktop composes in
-    /// software and stays up, while Direct3D 12, compute and Vulkan still come here. The daemon
-    /// turns it on for this stage: see its `intel_stage`.
-    pub fn set_software_desktop(&mut self, on: bool) {
-        self.software_desktop = on;
-        let state = if on { "on" } else { "off" };
-        log::info!(
-            "{PREFIX} software-desktop {state}: Direct3D 9, 10 and 11 drivers {}",
-            if on { "refused" } else { "given" }
-        );
+    /// Where the guest's desktop is drawn, which decides the drivers each program is given: see
+    /// [`stage`]. The daemon sets the stage's own unless a person asks otherwise.
+    pub fn set_desktop(&mut self, desktop: Desktop) {
+        self.desktop = desktop;
+        match desktop {
+            Desktop::Software => log::info!(
+                "{PREFIX} software-desktop on: Direct3D 9, 10 and 11 drivers refused, and every driver to the compositor"
+            ),
+            Desktop::Hardware => log::info!("{PREFIX} software-desktop off: every driver given"),
+        }
     }
 
     pub fn card(&self) -> &CardFacts {
@@ -451,7 +452,7 @@ impl Backend for IntelBackend {
                 QueryOutcome::OpenGl(Status::SUCCESS, driver)
             }
             QUERY_USER_DRIVER_NAME => {
-                let (status, name) = guest_driver::write_name(query, self.software_desktop, out);
+                let (status, name) = guest_driver::write_name(query, self.desktop, out);
                 if let guest_driver::NameAnswer::Withheld(why) = name {
                     self.traffic.program_withheld(query.program, why);
                 }

@@ -10,7 +10,7 @@
 //! copies them.
 
 use super::bytes::dword;
-use crate::stage::{self, Withheld};
+use crate::stage::{Desktop, Withheld};
 use guesthouse_backend::guest_text::{self, utf16_list, utf16_zero};
 use guesthouse_backend::{RegistryName, RegistryValue, Status, VendorQuery};
 use guesthouse_messages::registry::{TYPE_NUMBER, TYPE_STRING, TYPE_STRING_LIST};
@@ -95,13 +95,9 @@ pub enum NameAnswer {
 
 /// Writes the Direct3D driver's path into `out`, keeping the guest's version dword, unless the
 /// stage withholds it from this program: see [`crate::stage`].
-pub fn write_name(
-    query: &VendorQuery<'_>,
-    software_desktop: bool,
-    out: &mut Vec<u8>,
-) -> (Status, NameAnswer) {
+pub fn write_name(query: &VendorQuery<'_>, desktop: Desktop, out: &mut Vec<u8>) -> (Status, NameAnswer) {
     let version = dword(query.data, VERSION_FIELD).map_or(NEWEST, |version| (version as usize).min(NEWEST));
-    if let Some(why) = stage::withheld(software_desktop, version >= DIRECT3D_12, query.program) {
+    if let Some(why) = desktop.withheld(version >= DIRECT3D_12, query.program) {
         return (Status::NOT_SUPPORTED, NameAnswer::Withheld(why));
     }
     let drivers = if query.process_is_32_bit { USER_DRIVERS_32_BIT } else { USER_DRIVERS };
@@ -187,7 +183,7 @@ mod tests {
             program: "",
         };
         let mut out = Vec::new();
-        let (status, answer) = write_name(&query, false, &mut out);
+        let (status, answer) = write_name(&query, Desktop::Hardware, &mut out);
         (status, answer, out)
     }
 
@@ -207,7 +203,7 @@ mod tests {
                 process_is_32_bit: false,
                 program: "",
             };
-            assert_eq!(write_name(&query, true, &mut out).1, wanted, "{version}");
+            assert_eq!(write_name(&query, Desktop::Software, &mut out).1, wanted, "{version}");
         }
     }
 
@@ -223,15 +219,21 @@ mod tests {
         };
         let mut out = Vec::new();
         assert_eq!(
-            write_name(&query("dwm.exe"), true, &mut out).1,
+            write_name(&query("dwm.exe"), Desktop::Software, &mut out).1,
             NameAnswer::Withheld(Withheld::FromTheCompositor)
         );
         assert_eq!(
-            write_name(&query("DWM.EXE"), true, &mut out).1,
+            write_name(&query("DWM.EXE"), Desktop::Software, &mut out).1,
             NameAnswer::Withheld(Withheld::FromTheCompositor)
         );
-        assert_eq!(write_name(&query("dwm.exe"), false, &mut out).1, NameAnswer::Given("igd12umd64.dll"));
-        assert_eq!(write_name(&query("game.exe"), true, &mut out).1, NameAnswer::Given("igd12umd64.dll"));
+        assert_eq!(
+            write_name(&query("dwm.exe"), Desktop::Hardware, &mut out).1,
+            NameAnswer::Given("igd12umd64.dll")
+        );
+        assert_eq!(
+            write_name(&query("game.exe"), Desktop::Software, &mut out).1,
+            NameAnswer::Given("igd12umd64.dll")
+        );
     }
 
     #[test]

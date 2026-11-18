@@ -140,17 +140,15 @@ fn serve_intel(
             Needs::of_render_node(slot, &project, &setup.driver_folder, node.device_file, None)
         }
     };
-    use guesthouse_daemon::intel_stage::{SOFTWARE_DESKTOP_VARIABLE, software_desktop};
-    let software_desktop = software_desktop(env::var_os(SOFTWARE_DESKTOP_VARIABLE).as_deref());
-    if software_desktop {
+    use guesthouse_backend_intel::stage::{DESKTOP_VARIABLE, Desktop};
+    let desktop = Desktop::from_environment();
+    if desktop == Desktop::Software {
         log::info!(
-            "Intel's test stage composes the guest's desktop in software; {SOFTWARE_DESKTOP_VARIABLE}=0 gives it \
-             Intel's Direct3D 9, 10 and 11 drivers instead"
+            "Intel's test stage composes the guest's desktop in software; {DESKTOP_VARIABLE}=0 gives it \
+             the hardware desktop instead"
         );
     }
-    serve_on_render_node::<IntelBackend>(slot, project, &setup, needs, |backend| {
-        backend.set_software_desktop(software_desktop)
-    })
+    serve_on_render_node::<IntelBackend>(slot, project, &setup, needs, |backend| backend.set_desktop(desktop))
 }
 
 /// Serves with a backend whose card is reached through one render node, which with what else is in
