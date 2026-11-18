@@ -66,6 +66,12 @@ mod at {
     pub const COMPUTE_ENGINES_VALID: usize = 0x2090;
     /// GMM_GFX_PARTITIONING, [`super::partition`].
     pub const PARTITION: usize = 0x23B8;
+    /// NumThreadsPerEu, inside GT_SYSTEM_INFO.
+    pub const THREADS_PER_EU: usize = 0x2110;
+    /// A second copy of the GPU timestamp's frequency, near GT_SYSTEM_INFO's end. Intel's Vulkan
+    /// driver divides a second in nanoseconds by it for the timestamp period, and will not create a
+    /// device while it is zero.
+    pub const GT_TIMESTAMP_FREQUENCY: usize = 0x2124;
     /// KMD_CAPS_INFO, the kernel driver's capability bits.
     pub const KERNEL_DRIVER_CAPS: usize = 0xB18;
     /// GT_VDBOX_INFO and GT_VEBOX_INFO, inside GT_SYSTEM_INFO and again in the record's own copy of
@@ -147,6 +153,7 @@ pub struct GtSystem {
     pub max_slices: u32,
     pub max_subslices: u32,
     pub max_dual_subslices: u32,
+    pub threads_per_eu: u32,
     /// The threads each 3D stage may have across the GPU, as the card's hwconfig gives them.
     pub stage_threads: StageThreads,
 }
@@ -214,6 +221,7 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     put_word(&mut record, at::REVISION, platform.revision);
 
     put_dword(&mut record, at::TIMESTAMP_FREQUENCY, facts.timestamp_hz);
+    put_dword(&mut record, at::GT_TIMESTAMP_FREQUENCY, facts.timestamp_hz);
     put_dword(&mut record, at::MIN_RENDER_FREQUENCY, facts.render_mhz.0);
     put_dword(&mut record, at::MAX_RENDER_FREQUENCY, facts.render_mhz.1);
     put_dword(&mut record, at::NUMBER_OF_EUS, facts.gt.eu_count);
@@ -233,6 +241,7 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
         (at::MAX_SLICES, gt.max_slices),
         (at::MAX_SUBSLICES, gt.max_subslices),
         (at::MAX_DUAL_SUBSLICES, gt.max_dual_subslices),
+        (at::THREADS_PER_EU, gt.threads_per_eu),
     ] {
         put_dword(&mut record, field, value);
     }
@@ -400,7 +409,13 @@ pub(crate) mod tests {
                 render_ip: IpWord::new(20, 4, 4),
                 ..Platform::default()
             },
-            gt: GtSystem { eu_count: 64, thread_count: 512, dual_subslice_count: 8, ..GtSystem::default() },
+            gt: GtSystem {
+                eu_count: 64,
+                thread_count: 512,
+                dual_subslice_count: 8,
+                threads_per_eu: 8,
+                ..GtSystem::default()
+            },
             timestamp_hz: 19_200_000,
             render_mhz: (400, 2050),
             memory: Memory { system_shared: 16 << 30, ..Memory::default() },
@@ -550,6 +565,8 @@ pub(crate) mod tests {
         let record = build(&facts());
         assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY), Some(19_200_000));
         assert_eq!(dword(&record, at::TIMESTAMP_FREQUENCY + 4), Some(0), "a 32-bit field");
+        assert_eq!(dword(&record, at::GT_TIMESTAMP_FREQUENCY), Some(19_200_000));
+        assert_eq!(dword(&record, at::THREADS_PER_EU), Some(8));
         assert_eq!(dword(&record, at::MIN_RENDER_FREQUENCY), Some(400));
         assert_eq!(dword(&record, at::MAX_RENDER_FREQUENCY), Some(2050));
         assert_eq!(dword(&record, at::NUMBER_OF_EUS), Some(64));

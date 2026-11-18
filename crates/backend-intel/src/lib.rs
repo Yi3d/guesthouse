@@ -250,6 +250,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             max_slices: config(hwconfig::MAX_SLICES_SUPPORTED),
             max_subslices: most_dual_subslices,
             max_dual_subslices: most_dual_subslices,
+            threads_per_eu,
             stage_threads: StageThreads {
                 vertex: config(hwconfig::TOTAL_VS_THREADS),
                 hull: config(hwconfig::TOTAL_HS_THREADS),
