@@ -22,11 +22,17 @@ const GIB: u64 = 1 << 30;
 /// What a 32-bit heap spans: offsets from its base fit 32 bits.
 const HEAP_32_SIZE: u64 = 4 * GIB;
 const HEAPS_32: usize = 4;
+/// TR, the heap for tiled resources. Intel's Vulkan driver reserves at its top as it makes a
+/// device: with TR empty it asked for no bytes at 1 GiB below address 0, which the core refuses, and
+/// the device failed. In a lab guest it took 256 MiB ending 1 GiB below TR's top. The size is this
+/// backend's choice, room enough for that, as nothing says how big Intel's own driver makes it.
+const TR_SIZE: u64 = 64 * GIB;
 
 /// The ranges by their place in the block.
 mod index {
     pub const STANDARD: usize = 0;
     pub const STANDARD_64KB: usize = 1;
+    pub const TR: usize = 5;
     pub const HEAP_32: usize = 6;
 }
 
@@ -47,21 +53,23 @@ impl Range {
     }
 }
 
-/// The partition this backend gives: the four 32-bit heaps first, then Standard, then
-/// Standard64KB to the end of the core's addresses. SVM stays empty, as the record says the GPU
-/// can't share the CPU's pointers.
+/// The partition this backend gives: the four 32-bit heaps first, then Standard, Standard64KB, and
+/// TR at the end of the core's addresses. SVM stays empty, as the record says the GPU can't share the
+/// CPU's pointers.
 pub fn ours() -> [Range; RANGES] {
     let upper = GPU_RANGES[1];
     let heaps_start = upper.start.next_multiple_of(HEAP_32_SIZE);
     let standard_start = heaps_start + HEAPS_32 as u64 * HEAP_32_SIZE;
-    let standard_64kb_start = standard_start + (upper.end - standard_start) / 2;
+    let tr_start = upper.end - TR_SIZE;
+    let standard_64kb_start = standard_start + (tr_start - standard_start) / 2;
     let mut ranges = [Range::default(); RANGES];
     for heap in 0..HEAPS_32 {
         ranges[index::HEAP_32 + heap] =
             Range::spanning(heaps_start + heap as u64 * HEAP_32_SIZE, HEAP_32_SIZE);
     }
     ranges[index::STANDARD] = Range::spanning(standard_start, standard_64kb_start - standard_start);
-    ranges[index::STANDARD_64KB] = Range::spanning(standard_64kb_start, upper.end - standard_64kb_start);
+    ranges[index::STANDARD_64KB] = Range::spanning(standard_64kb_start, tr_start - standard_64kb_start);
+    ranges[index::TR] = Range::spanning(tr_start, TR_SIZE);
     ranges
 }
 
@@ -129,7 +137,8 @@ mod tests {
             assert_eq!(heap.limit - heap.base + 1, HEAP_32_SIZE);
         }
         assert_eq!(ranges[index::STANDARD_64KB].base % 0x1_0000, 0);
-        assert_eq!(ranges[index::STANDARD_64KB].limit, GPU_RANGES[1].end - 1);
+        assert_eq!(ranges[index::TR].limit, GPU_RANGES[1].end - 1);
+        assert_eq!(ranges[index::TR].limit - ranges[index::TR].base + 1, TR_SIZE);
         assert!(ranges[4].is_empty(), "SVM");
         assert!(ranges[RANGES - 1].is_empty(), "the eleventh, which has no name");
     }
