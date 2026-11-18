@@ -258,6 +258,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.run_deferred();
         let request = SubmitToQueue::parse(message)?;
         let value = request.fence_value;
+        self.note_batch(request.queue, request.commands, request.commands_length);
         self.note_waiting_updates(request.queue);
         match self.start_on_gpu(request.queue, WorkSource::HardwareQueue, request.private, value) {
             GpuTook::Work(work) => self.hold_if_ring_is_full(request.queue, value, work),
