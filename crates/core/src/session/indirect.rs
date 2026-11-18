@@ -424,7 +424,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             return;
         }
         // Slots in the guest's own pages aren't the card's to hand out, so their frames are copied
-        // into slots made here, as for a viewer that asks for its frames in memory.
+        // into slots made for the viewer: on the card, or in memory here if it asked for that.
         let in_guest_pages = self.frames.indirect.as_ref().is_some_and(|ring| {
             let locked = |slot: &GuestSlot| {
                 self.allocations.get(&slot.allocation).is_some_and(|found| found.guest_address.is_some())
@@ -465,7 +465,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     /// Slots of the viewer's own, one for each of the guest's, which each frame is copied into as it
     /// lands. They're in memory here for a viewer whose screen is on another GPU, which can't take the
-    /// card's buffers, or on the card in `tiling`. A frame that's already waiting is copied now, as a
+    /// card's buffers, or on the card: in `tiling`, or in rows when the guest's own slots lie in its
+    /// pages and so can't be handed out. A frame that's already waiting is copied now, as a
     /// still desktop sends no more.
     ///
     /// Says whether the viewer has them. Slots in memory that can't be made leave it with nothing,
@@ -481,7 +482,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         for size in sizes {
             let made = match tiling {
                 Some(tiling) => self.make_tiled_slot(picture, tiling, space),
-                None => self.make_host_slot(size, space),
+                // In memory here for a viewer that asked for that, and on the card for one that
+                // takes the card's buffers.
+                None => self.make_slot(size, space),
             };
             match made {
                 Ok((slot, buffer)) => {

@@ -657,24 +657,55 @@ fn a_backend_whose_slots_may_be_guest_pages_has_their_stamps_read_there() {
     assert_eq!(found, buffers, "by the stamps in guest memory, not by the stale ones on the card");
 }
 
-#[test]
-fn frames_in_guest_pages_are_copied_into_slots_made_here_and_nothing_is_exported() {
+/// A ring whose slots are in guest pages, one frame waiting, and a viewer of this kind watching.
+fn watched_in_guest_pages(viewer: ViewerFacts) -> (TestSession, Sink) {
     let (mut session, _) = stamped_after_locking();
     session.backend_mut().slots_in_guest_pages = true;
     let first = register(&mut session, &ring(Look::SDR)).1.expect("a slot");
     frame(&mut session, Some(first));
     let _ = session.poll(Instant::now());
-    // An export would be an error here: the stand-in refuses them.
+    session.viewer_arrived();
+    session.viewer_described(viewer);
+    let mut sink = Sink::default();
+    turn(&mut session, &mut sink);
+    turn(&mut session, &mut sink);
+    (session, sink)
+}
+
+#[test]
+fn frames_in_guest_pages_reach_a_viewer_on_the_card_through_slots_made_on_the_card() {
+    let (session, sink) = watched_in_guest_pages(ViewerFacts::default());
+    assert_eq!(sink.rings.len(), 1);
+    // The viewer didn't ask for memory, so it must not be handed any: it would import it as the
+    // card's buffers.
+    assert!(session.memory().host_buffers.is_empty());
+    let ring = session.frames.ring.as_ref().unwrap();
+    assert_eq!(ring.memory.len(), SLOTS as usize, "slots of the viewer's own, in video memory");
+    assert_eq!((sink.frames.len(), session.backend().slot_copies.len()), (1, 1));
+    assert_eq!(sink.frames[0].tiling, None, "in rows");
+    assert!(!session.frames.indirect.as_ref().unwrap().export_refused);
+}
+
+#[test]
+fn frames_in_guest_pages_reach_a_viewer_on_another_gpu_through_memory_here() {
+    let viewer = ViewerFacts { wants_memory: true, ..ViewerFacts::default() };
+    let (session, sink) = watched_in_guest_pages(viewer);
+    assert_eq!(session.memory().host_buffers.len(), SLOTS as usize);
+    assert_eq!((sink.rings.len(), sink.frames.len(), session.backend().slot_copies.len()), (1, 1, 1));
+}
+
+#[test]
+fn guest_page_slots_whose_copies_cant_be_exported_leave_the_viewer_nothing_and_say_so() {
+    let (mut session, _) = stamped_after_locking();
+    session.backend_mut().slots_in_guest_pages = true;
+    register(&mut session, &ring(Look::SDR));
     session.backend_mut().refuse_exports = true;
     session.viewer_arrived();
     session.viewer_described(ViewerFacts::default());
     let mut sink = Sink::default();
     turn(&mut session, &mut sink);
-    turn(&mut session, &mut sink);
-    assert_eq!(sink.rings.len(), 1);
-    assert_eq!(session.memory().host_buffers.len(), SLOTS as usize);
-    assert_eq!((sink.frames.len(), session.backend().slot_copies.len()), (1, 1));
-    assert!(!session.frames.indirect.as_ref().unwrap().export_refused);
+    assert!(session.frames.indirect.as_ref().unwrap().export_refused);
+    assert!(session.memory().host_buffers.is_empty());
 }
 
 #[test]

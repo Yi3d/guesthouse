@@ -242,7 +242,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// Makes one slot: memory the GPU can reach, and the file a viewer reads it by. It's video memory,
     /// unless the viewer's screen is on another GPU, which can't take the card's buffers. Then it's
     /// memory here, which the viewer copies from.
-    fn make_slot(&mut self, size: u64, space: SpaceId) -> Result<(SlotMemory, OwnedFd), BackendError> {
+    pub(super) fn make_slot(
+        &mut self,
+        size: u64,
+        space: SpaceId,
+    ) -> Result<(SlotMemory, OwnedFd), BackendError> {
         if self.frames.viewer_facts.wants_memory {
             return self.make_host_slot(size, space);
         }
