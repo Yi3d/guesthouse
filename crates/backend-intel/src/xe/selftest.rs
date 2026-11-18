@@ -62,17 +62,43 @@ pub struct Options {
 }
 
 /// How the steps came out.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
     pub passed: u32,
     pub failed: u32,
     pub skipped: u32,
+    /// The names of the steps that failed, in the order they ran.
+    pub failed_steps: Vec<String>,
 }
 
 impl Summary {
     pub fn all_passed(&self) -> bool {
         self.failed == 0
     }
+
+    /// The failed steps that the guest's work needs: see [`work_needs`].
+    pub fn failed_that_work_needs(&self) -> Vec<String> {
+        self.failed_steps.iter().filter(|step| work_needs(step)).cloned().collect()
+    }
+
+    /// The failed steps that work on the card can do without.
+    pub fn failed_that_work_does_without(&self) -> Vec<String> {
+        self.failed_steps.iter().filter(|step| !work_needs(step)).cloned().collect()
+    }
+}
+
+/// The engine classes the guest's work runs on: render, compute and copy. The video engines only
+/// serve the guest's video work, which can fail alone.
+const ENGINES_WORK_NEEDS: [&str; 3] = ["engine rcs", "engine ccs", "engine bcs"];
+
+/// The other steps the guest's work needs: an address space, buffers, host pages, binds, and a
+/// copy on the copy engine. The clock reading and the cleanup aren't among them, nor the break
+/// steps.
+const STEPS_WORK_NEEDS: [&str; 5] = ["vm", "buffers", "userptr", "binds", "copy"];
+
+/// Whether a failure of `step` keeps the guest's work off the card.
+pub fn work_needs(step: &str) -> bool {
+    STEPS_WORK_NEEDS.contains(&step) || ENGINES_WORK_NEEDS.iter().any(|engine| step.starts_with(engine))
 }
 
 /// Why a recorded card can't be tested: there is no card behind it.
@@ -235,6 +261,7 @@ impl<'a> Run<'a> {
             }
             Step::Fail(why) => {
                 self.summary.failed += 1;
+                self.summary.failed_steps.push(name.to_owned());
                 format!("FAIL {name}: {why}")
             }
             Step::Skip(why) => {
@@ -794,7 +821,7 @@ pub fn run(
         }
     }
     run.step("cleanup", Run::clean_up);
-    let summary = run.summary;
+    let summary = std::mem::take(&mut run.summary);
     let _ = writeln!(
         run.out,
         "{} passed, {} failed, {} skipped",
@@ -886,6 +913,34 @@ mod tests {
         assert!(said.contains("this kernel's xe doesn't support it"), "{said}");
         assert_eq!(summary.failed, 5, "four engines and the copy: {said}");
         assert_eq!(xe.live(), 0);
+    }
+
+    #[test]
+    fn the_summary_names_the_failed_steps_and_which_of_them_work_needs() {
+        let xe = FakeXe::default();
+        xe.fail("exec", libc::EOPNOTSUPP);
+        let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        let steps = ["engine rcs0", "engine bcs0", "engine vcs0", "engine ccs0", "copy"];
+        let mut in_order: Vec<String> = steps.iter().map(|step| (*step).to_owned()).collect();
+        in_order.sort_by_key(|step| said.find(&format!("FAIL {step}:")));
+        assert_eq!(summary.failed_steps, in_order, "{said}");
+        let needed = summary.failed_that_work_needs();
+        assert_eq!(needed.len(), 4, "all but the video engine: {needed:?}");
+        assert!(!needed.contains(&"engine vcs0".to_owned()));
+        assert_eq!(summary.failed_that_work_does_without(), ["engine vcs0"]);
+    }
+
+    #[test]
+    fn work_needs_the_memory_and_the_render_compute_and_copy_engines_only() {
+        for step in ["vm", "buffers", "userptr", "binds", "copy", "engine rcs0", "engine ccs0", "engine bcs0"]
+        {
+            assert!(work_needs(step), "{step}");
+        }
+        for step in
+            ["open", "engine vcs0", "engine vcs1", "engine vecs0", "clock", "cleanup", "fault", "hang"]
+        {
+            assert!(!work_needs(step), "{step}");
+        }
     }
 
     #[test]

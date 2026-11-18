@@ -391,7 +391,7 @@ mod tests {
         let chosen = pick(asked, Desktop::default_for(recorded), fell_back);
         let (stage, listening) = match card {
             Card::Real => Stage::asked(run),
-            Card::Listening => (Stage::Listen, Some(Refused::SelfTestFailed(1))),
+            Card::Listening => (Stage::Listen, Some(Refused::SelfTestFailed(vec!["binds".into()]))),
             Card::Recorded => (Stage::Listen, Some(Refused::RecordedCard)),
         };
         let (given, why) = chosen.at_stage(stage, listening.as_ref(), false);

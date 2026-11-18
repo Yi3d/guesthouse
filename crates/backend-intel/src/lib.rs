@@ -305,9 +305,7 @@ impl IntelBackend {
                 log::info!("{PREFIX} self-test {line}");
             }
         }
-        if !summary.all_passed() {
-            return Err(Fallback::SelfTestFailed(summary.failed));
-        }
+        self_test_verdict(&summary)?;
         let shared = self.card.system_memory() / SHARED_MEMORY_PART;
         let cap = work::cap::video_cap(&self.card.regions, shared);
         if cap < work::cap::LEAST_FOR_A_GUEST {
@@ -315,6 +313,23 @@ impl IntelBackend {
         }
         CardWork::new(xe, &self.card, asked, cap).ok_or(Fallback::NoMemoryRegion)
     }
+}
+
+/// Whether the self-test lets the guest's work on the card: every step work needs passed. A failed
+/// step work does without, such as a video engine, the clock or the cleanup, is a warning only.
+fn self_test_verdict(summary: &xe::selftest::Summary) -> Result<(), Fallback> {
+    let needed = summary.failed_that_work_needs();
+    if !needed.is_empty() {
+        return Err(Fallback::SelfTestFailed(needed));
+    }
+    let spared = summary.failed_that_work_does_without();
+    if !spared.is_empty() {
+        log::warn!(
+            "{PREFIX} self-test: {} failed, which the guest's work doesn't need, so it runs on the card all the same",
+            spared.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// The facts of a card recorded elsewhere, for a lab run on a PC without it. The guest must have
@@ -835,6 +850,38 @@ impl Backend for IntelBackend {
 mod tests {
     use super::*;
     use guesthouse_backend::{DriverVersion, StartDecision, decide_start};
+
+    fn summary_with(failed: &[&str]) -> xe::selftest::Summary {
+        xe::selftest::Summary {
+            passed: 10,
+            failed: failed.len() as u32,
+            skipped: 0,
+            failed_steps: failed.iter().map(|step| (*step).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_failed_step_work_needs_keeps_work_off_the_card_and_is_named() {
+        for step in ["vm", "buffers", "userptr", "binds", "copy", "engine rcs0", "engine ccs0", "engine bcs0"]
+        {
+            let verdict = self_test_verdict(&summary_with(&["clock", step]));
+            assert_eq!(verdict, Err(Fallback::SelfTestFailed(vec![step.to_owned()])), "{step}");
+        }
+        let both = self_test_verdict(&summary_with(&["binds", "engine rcs0"])).unwrap_err();
+        assert!(both.to_string().contains("its steps binds, engine rcs0 failed"), "{both}");
+    }
+
+    #[test]
+    fn a_failed_video_engine_clock_or_cleanup_lets_work_run() {
+        for step in ["engine vcs0", "engine vecs0", "clock", "cleanup"] {
+            assert_eq!(self_test_verdict(&summary_with(&[step])), Ok(()), "{step}");
+        }
+        assert_eq!(
+            self_test_verdict(&summary_with(&["engine vcs0", "engine vecs0", "clock", "cleanup"])),
+            Ok(())
+        );
+        assert_eq!(self_test_verdict(&summary_with(&[])), Ok(()));
+    }
 
     /// A recording of the test card in a file of its own.
     fn recorded(name: &str, text: &str) -> std::path::PathBuf {

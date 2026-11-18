@@ -185,8 +185,8 @@ pub enum Fallback {
     NotXe(String),
     /// The render node couldn't be opened for work.
     NodeNotOpened(String),
-    /// The host's own test of xe failed this many steps.
-    SelfTestFailed(u32),
+    /// The host's own test of xe failed these steps, which the guest's work needs.
+    SelfTestFailed(Vec<String>),
     /// The card's memory regions give nowhere to put a buffer.
     NoMemoryRegion,
     /// The host's own desktop leaves the guest this many bytes of the card, which is too few.
@@ -208,7 +208,8 @@ impl std::fmt::Display for Fallback {
             Self::SelfTestFailed(steps) => {
                 write!(
                     f,
-                    "layer=host-self-test: {steps} of its steps failed on this card (intel-probe --run shows them)"
+                    "layer=host-self-test: its steps {} failed on this card, and work needs them (intel-probe --run shows them)",
+                    steps.join(", ")
                 )
             }
             Self::NoMemoryRegion => f.write_str("layer=card-memory: xe named no system memory region"),
@@ -331,7 +332,7 @@ mod tests {
             Fallback::RecordedCard,
             Fallback::NotXe("i915".into()),
             Fallback::NodeNotOpened("denied".into()),
-            Fallback::SelfTestFailed(2),
+            Fallback::SelfTestFailed(vec!["vm".into(), "binds".into()]),
             Fallback::NoMemoryRegion,
             Fallback::TooLittleMemory(1 << 20),
         ]
@@ -370,7 +371,7 @@ mod tests {
 
     #[test]
     fn the_note_says_when_nothing_runs_on_a_software_desktop_that_was_asked_for() {
-        let failed = Fallback::SelfTestFailed(1);
+        let failed = Fallback::SelfTestFailed(vec!["binds".into()]);
         let note = Desktop::note(Desktop::Software, None, Stage::Listen, Some(&failed)).unwrap();
         assert_eq!(note, format!("{LISTENING_NOTE_START} {failed}"));
         assert_eq!(Desktop::note(Desktop::Software, None, Stage::Compute, None), None, "compute runs");
