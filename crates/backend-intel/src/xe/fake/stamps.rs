@@ -30,9 +30,11 @@ const SEARCHES: u32 = 16;
 pub(super) struct Stamps {
     /// Searches left, by VM.
     searches: HashMap<u32, u32>,
-    /// Stamps already copied, by VM and where they were. A driver that starts over numbers its
-    /// generations from one again, so a generation alone can't say a stamp is new.
-    copied: HashSet<(u32, u64, [u8; STAMP_BYTES])>,
+    /// By VM, the stamps that were in its memory when its last ring's were copied: what is still
+    /// there unchanged is old. A driver that starts over numbers its rings from one again, and its
+    /// upload memory can put the new stamps where the old ones were, so neither a generation nor a
+    /// place alone can say a stamp is new.
+    copied: HashMap<u32, HashSet<(u64, [u8; STAMP_BYTES])>>,
     /// Buffers stamped here, by their serial. Their stamps are copies, never the guest's own.
     stamped: HashSet<u64>,
 }
@@ -62,9 +64,12 @@ impl Stamps {
         let Some(left) = self.searches.get_mut(&vm_id).filter(|left| **left > 0) else { return };
         *left -= 1;
         let last = *left == 0;
-        let found: Vec<Found> = stamps_in(vm, &self.stamped)
-            .into_iter()
-            .filter(|stamp| !self.copied.contains(&(vm_id, stamp.at, stamp.bytes)))
+        let all = stamps_in(vm, &self.stamped);
+        let old = self.copied.get(&vm_id);
+        let found: Vec<Found> = all
+            .iter()
+            .filter(|stamp| !old.is_some_and(|old| old.contains(&(stamp.at, stamp.bytes))))
+            .copied()
             .collect();
         let Some(generation) = found.iter().map(|stamp| stamp.generation).max() else {
             if last {
@@ -101,7 +106,7 @@ impl Stamps {
             unsafe { std::ptr::copy_nonoverlapping(stamp.bytes.as_ptr(), target.start, STAMP_BYTES) };
         }
         self.stamped.extend(targets.iter().map(|target| target.serial));
-        self.copied.extend(slots.values().map(|stamp| (vm_id, stamp.at, stamp.bytes)));
+        self.copied.insert(vm_id, all.iter().map(|stamp| (stamp.at, stamp.bytes)).collect());
         // Until the VM is given large buffers again, nothing more is looked for.
         self.searches.remove(&vm_id);
         let first = slots.values().next().map_or(0, |stamp| stamp.at);
@@ -237,37 +242,35 @@ mod tests {
     }
 
     #[test]
-    fn a_driver_that_starts_over_at_generation_one_gets_its_new_slots_stamped() {
+    fn a_driver_that_starts_over_at_generation_one_in_the_same_place_gets_its_new_slots_stamped() {
         const BIGGER: u64 = 0x7f_0000;
         let mut xe = FakeXe::lab();
         xe.stop_running();
         let vm = xe.create_vm(0).unwrap();
-        let old: Vec<u32> = (0..2).map(|i| buffer(&mut xe, vm, SLOT, 0x2000_0000 + i * 0x100_0000)).collect();
         let upload = buffer(&mut xe, vm, 0x1000, 0x3000_0000);
         let queue = xe.create_queue(vm, abi::EngineInstance { class: 0, instance: 0, gt: 0 }).unwrap();
         let mut map = xe.map_buffer(upload, 0x1000).unwrap();
-        for slot in 0..2 {
-            map.write(
-                0x40 + 0x10 * slot,
-                &as_the_driver_sends::stamp(Stamp { generation: 1, slot: slot as u32 }),
-            );
-        }
-        xe.exec(queue, 0x3000_0000, &[]).unwrap();
-        assert_eq!(start_of(&mut xe, old[1], SLOT), Some(Stamp { generation: 1, slot: 1 }));
-
-        let new: Vec<u32> =
-            (0..2).map(|i| buffer(&mut xe, vm, BIGGER, 0x4000_0000 + i * 0x100_0000)).collect();
-        xe.exec(queue, 0x3000_0000, &[]).unwrap();
-        assert_eq!(start_of(&mut xe, new[0], BIGGER), None, "the old stamps were copied already");
-        for slot in 0..2 {
-            map.write(
-                0x200 + 0x10 * slot,
-                &as_the_driver_sends::stamp(Stamp { generation: 1, slot: slot as u32 }),
-            );
-        }
-        xe.exec(queue, 0x3000_0000, &[]).unwrap();
-        for (slot, &handle) in new.iter().enumerate() {
-            assert_eq!(start_of(&mut xe, handle, BIGGER), Some(Stamp { generation: 1, slot: slot as u32 }));
+        // As the guest did: 800x600 as generations 1 and 2, then 1920x1080 as generation 1 again,
+        // each ring's stamps where the last ones were.
+        for (ring, (generation, size)) in [(1, SLOT), (2, SLOT), (1, BIGGER)].into_iter().enumerate() {
+            let at = 0x4000_0000 + 0x1000_0000 * ring as u64;
+            let slots: Vec<u32> = (0..2).map(|i| buffer(&mut xe, vm, size, at + i * 0x100_0000)).collect();
+            xe.exec(queue, 0x3000_0000, &[]).unwrap();
+            assert_eq!(start_of(&mut xe, slots[0], size), None, "ring {ring}: the old stamps are old");
+            for slot in 0..2 {
+                map.write(
+                    0x40 + 0x10 * slot,
+                    &as_the_driver_sends::stamp(Stamp { generation, slot: slot as u32 }),
+                );
+            }
+            xe.exec(queue, 0x3000_0000, &[]).unwrap();
+            for (slot, &handle) in slots.iter().enumerate() {
+                assert_eq!(
+                    start_of(&mut xe, handle, size),
+                    Some(Stamp { generation, slot: slot as u32 }),
+                    "ring {ring}"
+                );
+            }
         }
     }
 }
