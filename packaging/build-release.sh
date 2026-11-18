@@ -448,6 +448,10 @@ stage_app() {
     # shellcheck disable=SC2046 # empty, or the flag and its value
     (cd "$REPO" && cargo build --release --locked -p guesthouse-app -p guesthouse-app-core \
         -p guesthouse-daemon $(daemon_features))
+    # The lab's stand-in card is never in a build for people. Its switch's name is only in a daemon
+    # built with it.
+    ! grep -q -a GUESTHOUSE_INTEL_LAB_FAKE_CARD "$target_folder/release/guesthouse-daemon" ||
+        die "guesthouse-daemon was built with the lab's stand-in card, which is never in a release."
     mkdir -p "$OUT/stage"
     stage_intel_probe
     for program in guesthouse guesthouse-check guesthouse-daemon guesthouse-jail guesthouse-share guesthouse-task guesthouse-vm \
