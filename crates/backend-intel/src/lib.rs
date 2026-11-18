@@ -230,6 +230,11 @@ impl IntelBackend {
             log::info!("{PREFIX} profile-guess \"{guess}\"");
         }
         log::info!("{PREFIX} record {}", record::summary(&self.record));
+        let urb = record::urb(&self.record);
+        log::info!("{PREFIX} record-urb {urb}");
+        if urb.vertex.max == 0 {
+            log::warn!("{PREFIX} record-urb-unknown \"the card's hwconfig gives no URB entry limits\"");
+        }
         log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
         for gap in gaps::unset(shape::filled(&self.record)) {
             log::info!("{PREFIX} record-gap \"{gap}\"");
