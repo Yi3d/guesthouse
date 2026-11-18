@@ -90,6 +90,13 @@ impl Desktop {
         (!direct3d_12).then_some(Withheld::BeforeDirect3d12)
     }
 
+    /// Whether `program` is told a driver update is in progress: the compositor, on the software
+    /// desktop, so its failed tries on the card don't count against it. See
+    /// [`crate::protocol::update_status`].
+    pub fn tells_compositor_of_an_update(self, program: &str) -> bool {
+        self == Self::Software && program.eq_ignore_ascii_case(COMPOSITOR)
+    }
+
     /// Whether the Guesthouse display driver may be in the guest.
     pub fn has_display_driver(self) -> bool {
         self == Self::Hardware
@@ -126,6 +133,13 @@ mod tests {
         assert_eq!(software.withheld(false, "game.exe"), Some(Withheld::BeforeDirect3d12));
         assert_eq!(software.withheld(true, "game.exe"), None);
         assert_eq!(Desktop::Hardware.withheld(false, "dwm.exe"), None, "all of Intel's drivers for everyone");
+    }
+
+    #[test]
+    fn only_the_compositor_on_the_software_desktop_is_told_of_an_update() {
+        assert!(Desktop::Software.tells_compositor_of_an_update("DWM.EXE"));
+        assert!(!Desktop::Software.tells_compositor_of_an_update("explorer.exe"));
+        assert!(!Desktop::Hardware.tells_compositor_of_an_update("dwm.exe"));
     }
 
     #[test]

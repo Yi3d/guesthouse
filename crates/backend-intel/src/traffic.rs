@@ -37,6 +37,8 @@ pub enum QueryOutcome {
     OpenGl(Status, &'static str),
     /// A WDDM capability query, answered with what this backend can promise.
     Caps(Status),
+    /// The driver-update query, answered "in progress" to the compositor on the software desktop.
+    UpdateInProgress(Status),
     /// Not one of this backend's, so the core answers it or says it can't.
     LeftToTheCore,
 }
@@ -56,6 +58,7 @@ impl fmt::Display for QueryOutcome {
             Self::DriverName(status, NameAnswer::Withheld(why)) => {
                 write!(f, "refused={:#x} why=\"{}\"", status.0, why.why())
             }
+            Self::UpdateInProgress(_) => f.write_str("answered=driver-update-in-progress"),
             Self::LeftToTheCore => f.write_str("answered=left-to-the-core"),
         }
     }
@@ -71,7 +74,7 @@ impl QueryOutcome {
             Self::Record(status, asked) => (status.0, Some(asked), None),
             Self::DriverName(status, name) => (status.0, None, Some(name)),
             Self::OpenGl(status, name) => (status.0, None, Some(NameAnswer::Given(name))),
-            Self::Caps(status) => (status.0, None, None),
+            Self::Caps(status) | Self::UpdateInProgress(status) => (status.0, None, None),
             Self::LeftToTheCore => (0, None, None),
         }
     }
