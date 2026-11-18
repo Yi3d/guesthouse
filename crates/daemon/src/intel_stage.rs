@@ -4,7 +4,8 @@
 //! starts on the adapter, crashes each time it presents, as nothing it sends is run, and Windows then
 //! stops the adapter and the basic display with it: a lab guest showed this, as a tester's did.
 //! Refused those drivers, DWM draws in software, the adapter stays up, and Direct3D 12, compute and
-//! Vulkan still come to the backend, which is what a run is for. Take this out when the backend
+//! Vulkan still come to the backend, which is what a run is for. Which program is refused which
+//! driver is the backend's `stage` module; the compositor gets none. Take this out when the backend
 //! draws.
 
 use std::ffi::OsStr;

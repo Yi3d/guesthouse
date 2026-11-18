@@ -19,9 +19,10 @@ use crate::protocol::hw_queue::{self, Queue};
 use crate::protocol::nodes;
 use crate::protocol::partition;
 use crate::protocol::record::Asked;
+use crate::stage::Withheld;
 use crate::watch::{Hex, PREFIX, Seen, Undecoded, dump, tell};
 use guesthouse_backend::{RegistryName, Status, VendorQuery, Work, WorkSource};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// How many bytes of an escape's payload a line shows.
@@ -52,8 +53,8 @@ impl fmt::Display for QueryOutcome {
             Self::OpenGl(_, name) => write!(f, "answered=opengl-driver driver={name}"),
             Self::Caps(status) if *status == Status::SUCCESS => f.write_str("answered=caps"),
             Self::Caps(status) => write!(f, "refused={:#x} why=\"too short for the caps\"", status.0),
-            Self::DriverName(status, NameAnswer::Withheld) => {
-                write!(f, "refused={:#x} why=\"held back by the software desktop switch\"", status.0)
+            Self::DriverName(status, NameAnswer::Withheld(why)) => {
+                write!(f, "refused={:#x} why=\"{}\"", status.0, why.why())
             }
             Self::LeftToTheCore => f.write_str("answered=left-to-the-core"),
         }
@@ -89,6 +90,7 @@ pub struct Traffic {
     refusals: Seen,
     copies: Seen,
     submitted: HashMap<u32, u64>,
+    programs_withheld: HashSet<(String, Withheld)>,
 }
 
 /// A bool as the lines write it.
@@ -296,6 +298,15 @@ impl Traffic {
     }
 
     /// A context on a node past those offered.
+    /// A program refused a driver at this stage, said once for each program and reason, so a report
+    /// shows which programs drew in software.
+    pub fn program_withheld(&mut self, program: &str, why: Withheld) {
+        if self.programs_withheld.insert((program.to_owned(), why)) {
+            let program = if program.is_empty() { "unnamed" } else { program };
+            log::info!("{PREFIX} driver-withheld program={program} why=\"{}\"", why.why());
+        }
+    }
+
     pub fn context_refused(&mut self, node: u32, client_hint: u32) {
         let telling = self.refusals.worth_telling(("context-node", node, client_hint));
         tell!(
@@ -421,7 +432,9 @@ mod tests {
             "answered=record guest_build=0x10"
         );
         assert_eq!(QueryOutcome::LeftToTheCore.to_string(), "answered=left-to-the-core");
-        let held = QueryOutcome::DriverName(Status::NOT_SUPPORTED, NameAnswer::Withheld).to_string();
+        let held =
+            QueryOutcome::DriverName(Status::NOT_SUPPORTED, NameAnswer::Withheld(Withheld::BeforeDirect3d12))
+                .to_string();
         assert!(held.starts_with("refused="), "{held}");
         assert_eq!(
             QueryOutcome::OpenGl(Status::SUCCESS, "x.dll").to_string(),

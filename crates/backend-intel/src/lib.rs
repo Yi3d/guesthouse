@@ -27,6 +27,7 @@ pub mod hwconfig;
 pub mod ioctl;
 pub mod protocol;
 pub mod recording;
+pub mod stage;
 pub mod sysfs;
 mod traffic;
 mod watch;
@@ -419,6 +420,9 @@ impl Backend for IntelBackend {
             }
             QUERY_USER_DRIVER_NAME => {
                 let (status, name) = guest_driver::write_name(query, self.software_desktop, out);
+                if let guest_driver::NameAnswer::Withheld(why) = name {
+                    self.traffic.program_withheld(query.program, why);
+                }
                 QueryOutcome::DriverName(status, name)
             }
             _ => match protocol::wddm_caps::answer(query, out) {
