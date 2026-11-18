@@ -1,6 +1,7 @@
-//! Why the daemon gave an Intel guest the software desktop when the hardware desktop was asked,
-//! in the run folder for the app. The app then keeps the display driver off and doesn't watch a
-//! desktop on the card for this start.
+//! Why the daemon gave an Intel guest the software desktop when the hardware desktop was asked, or
+//! that nothing runs on the card on a software desktop asked for, in the run folder for the app. The
+//! app then keeps the display driver off and doesn't watch a desktop on the card for this start, and
+//! keeps the Intel device on in the guest only for work that runs.
 
 use std::fs;
 use std::io::{self, ErrorKind};

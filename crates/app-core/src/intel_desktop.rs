@@ -15,7 +15,7 @@ use crate::context::Context;
 use crate::gpu_maker::GpuMaker;
 use crate::machine::Machine;
 use crate::updates::VERSION;
-use guesthouse_backend_intel::stage::{Desktop, RUN_VARIABLE};
+use guesthouse_backend_intel::stage::{Desktop, LISTENING_NOTE_START, RUN_VARIABLE, Stage};
 use guesthouse_daemon::desktop_note::read_note;
 use std::ffi::OsStr;
 use std::fs;
@@ -83,21 +83,27 @@ pub fn device_off_file(context: &Context, machine: &Machine) -> PathBuf {
 
 /// Whether the Intel render device is switched off in the guest on `desktop`. On the software
 /// desktop the compositor takes it for what it draws, and refused Intel's driver it keeps asking
-/// and draws nothing. With the device off, it draws in software on the basic display. A person
-/// who asks for the software desktop on a real card whose work runs keeps the device, for that
-/// work, and the screen stays black.
+/// and draws nothing. With the device off, it draws in software on the basic display. A person who
+/// asks for work on a real card keeps the device, for that work, and the screen stays black: by
+/// asking for the software desktop, or for compute work in [`RUN_VARIABLE`], which also holds on a
+/// machine that fell back from the hardware desktop. Nothing runs, and the device goes off, on a
+/// recorded card, at the listening stage, or where the daemon's note (`daemon_note`, see
+/// [`Desktop::note`]) says the stage is listening.
 pub fn switches_device_off(
     desktop: Desktop,
     asked: Option<Desktop>,
     recorded_card: bool,
     run: Option<&OsStr>,
+    daemon_note: Option<&str>,
 ) -> bool {
     if desktop.has_display_driver() {
         return false;
     }
-    let listening = run.is_some_and(|word| word == "0" || word == "listen");
-    let work_on_the_card = asked == Some(Desktop::Software) && !recorded_card && !listening;
-    !work_on_the_card
+    let (stage, _) = Stage::asked(run);
+    let daemon_listens = daemon_note.is_some_and(|note| note.starts_with(LISTENING_NOTE_START));
+    let work_runs = !recorded_card && stage.is_real() && !daemon_listens;
+    let work_asked_for = asked == Some(Desktop::Software) || stage == Stage::Compute;
+    !(work_runs && work_asked_for)
 }
 
 /// [`switches_device_off`] for this start of an Intel machine.
@@ -108,6 +114,7 @@ pub fn device_off_for_start(context: &Context, machine: &Machine) -> bool {
             Desktop::asked_in_environment(),
             context.recorded_intel_card.is_some(),
             std::env::var_os(RUN_VARIABLE).as_deref(),
+            given_in_software(context).as_deref(),
         )
 }
 
@@ -227,12 +234,116 @@ mod tests {
     #[test]
     fn the_device_goes_off_on_the_software_desktop_unless_a_person_asked_for_work_on_a_card() {
         let (soft, hard) = (Desktop::Software, Desktop::Hardware);
-        let listen = Some(OsStr::new("listen"));
-        assert!(!switches_device_off(hard, Some(hard), false, None), "the hardware desktop keeps it");
-        assert!(switches_device_off(soft, None, false, None), "fallen back or by default");
-        assert!(switches_device_off(soft, Some(hard), true, None), "the daemon gave the software desktop");
-        assert!(!switches_device_off(soft, Some(soft), false, None), "asked, with work on the card");
-        assert!(switches_device_off(soft, Some(soft), true, None), "a recorded card runs nothing");
-        assert!(switches_device_off(soft, Some(soft), false, listen), "nothing runs when listening");
+        let word = |word| Some(OsStr::new(word));
+        let compute = word("compute");
+        assert!(!switches_device_off(hard, Some(hard), false, None, None), "the hardware desktop keeps it");
+        assert!(switches_device_off(soft, None, false, None, None), "fallen back or by default");
+        assert!(
+            switches_device_off(soft, Some(hard), true, None, None),
+            "the daemon gave the software desktop"
+        );
+        assert!(!switches_device_off(soft, Some(soft), false, None, None), "asked, with work on the card");
+        assert!(switches_device_off(soft, Some(soft), true, None, None), "a recorded card runs nothing");
+        for listening in ["listen", "0", "LISTEN", " listen ", "yes"] {
+            assert!(switches_device_off(soft, Some(soft), false, word(listening), None), "{listening:?}");
+        }
+        assert!(!switches_device_off(soft, None, false, compute, None), "compute asked keeps it");
+        assert!(!switches_device_off(soft, None, false, word("Compute"), None));
+        assert!(switches_device_off(soft, None, true, compute, None), "but not on a recorded card");
+        let listens = Some("stage=Listen layer=host-self-test: 1 of its steps failed");
+        assert!(switches_device_off(soft, Some(soft), false, None, listens), "the daemon runs nothing");
+        assert!(switches_device_off(soft, None, false, compute, listens));
+        let compute_note = Some("stage=Compute: GUESTHOUSE_INTEL_RUN_ON_CARD=compute runs compute work only");
+        assert!(!switches_device_off(soft, None, false, compute, compute_note));
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Card {
+        /// A real card whose self-test passes.
+        Real,
+        /// A real card the daemon leaves listening: its self-test failed, or it isn't on xe.
+        Listening,
+        Recorded,
+    }
+
+    /// One start, from the two switches, a fallback on this build (whether a person had asked for
+    /// what failed) and the card, through the app's choice, the daemon's stage and note and the
+    /// app's device step: the desktop given, whether the Intel device is on in the guest, and
+    /// whether work runs on the card.
+    fn start(
+        run: Option<&str>,
+        desktop: Option<&str>,
+        fell_back: Option<bool>,
+        card: Card,
+    ) -> (Desktop, bool, bool) {
+        use guesthouse_backend_intel::stage::Fallback as Refused;
+        let run = run.map(OsStr::new);
+        let asked = Desktop::asked(desktop.map(OsStr::new));
+        let recorded = card == Card::Recorded;
+        let chosen = pick(asked, Desktop::default_for(recorded), fell_back);
+        let (stage, listening) = match card {
+            Card::Real => Stage::asked(run),
+            Card::Listening => (Stage::Listen, Some(Refused::SelfTestFailed(1))),
+            Card::Recorded => (Stage::Listen, Some(Refused::RecordedCard)),
+        };
+        let (given, why) = chosen.at_stage(stage, listening.as_ref(), false);
+        let note = Desktop::note(given, why, stage, listening.as_ref());
+        let for_start = if note.is_some() { Desktop::Software } else { chosen };
+        assert_eq!(for_start, given, "the app and the daemon agree on the desktop");
+        let on = !switches_device_off(given, asked, recorded, run, note.as_deref());
+        (given, on, on && stage.is_real())
+    }
+
+    #[test]
+    fn every_switch_fallback_and_card_gives_the_desktop_device_and_work_of_the_docs_table() {
+        use Card::{Listening, Real, Recorded};
+        let (hard, soft) = (Desktop::Hardware, Desktop::Software);
+        let (by_default, asked) = (Some(false), Some(true));
+        // (stage word, desktop word, fell back, card) => (desktop, device on, work on the card)
+        let rows = [
+            ((None, None, None, Real), (hard, true, true)),
+            ((None, None, by_default, Real), (soft, false, false)),
+            ((None, None, asked, Real), (soft, false, false)),
+            ((None, Some("0"), None, Real), (hard, true, true)),
+            ((None, Some("0"), by_default, Real), (hard, true, true)),
+            ((None, Some("0"), asked, Real), (soft, false, false)),
+            ((None, Some("1"), None, Real), (soft, true, true)),
+            ((None, Some("1"), by_default, Real), (soft, true, true)),
+            ((None, Some("1"), asked, Real), (soft, true, true)),
+            ((Some("1"), None, None, Real), (hard, true, true)),
+            ((Some("everything"), None, by_default, Real), (soft, false, false)),
+            ((Some("compute"), None, None, Real), (soft, true, true)),
+            ((Some("compute"), None, by_default, Real), (soft, true, true)),
+            ((Some("compute"), None, asked, Real), (soft, true, true)),
+            ((Some("compute"), Some("0"), None, Real), (soft, true, true)),
+            ((Some("compute"), Some("0"), asked, Real), (soft, true, true)),
+            ((Some("compute"), Some("1"), by_default, Real), (soft, true, true)),
+        ];
+        for ((run, desktop, fell_back, card), expected) in rows {
+            assert_eq!(
+                start(run, desktop, fell_back, card),
+                expected,
+                "{run:?} {desktop:?} {fell_back:?} {card:?}"
+            );
+        }
+        let any_run = [None, Some("1"), Some("compute"), Some("0"), Some("listen"), Some("yes")];
+        let nothing_runs = [Some("0"), Some("listen"), Some("LISTEN"), Some("yes")];
+        for desktop in [None, Some("0"), Some("1")] {
+            for fell_back in [None, by_default, asked] {
+                for run in nothing_runs {
+                    assert_eq!(
+                        start(run, desktop, fell_back, Real),
+                        (soft, false, false),
+                        "{run:?} {desktop:?}"
+                    );
+                }
+                for run in any_run {
+                    for card in [Listening, Recorded] {
+                        let got = start(run, desktop, fell_back, card);
+                        assert_eq!(got, (soft, false, false), "{run:?} {desktop:?} {fell_back:?} {card:?}");
+                    }
+                }
+            }
+        }
     }
 }

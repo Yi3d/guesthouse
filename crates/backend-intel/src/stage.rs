@@ -114,10 +114,30 @@ impl Desktop {
         }
         let reason = match stage {
             Stage::Compute => format!("stage=Compute: {RUN_VARIABLE}=compute runs compute work only"),
-            _ => format!("stage=Listen {}", why.cloned().unwrap_or(Fallback::AskedFor)),
+            _ => listening_note(why),
         };
         (Self::Software, Some(reason))
     }
+
+    /// What the daemon tells the app of the desktop it `given` at `stage`: why the hardware desktop
+    /// asked wasn't given (`why`, from [`Self::at_stage`]), or, for a software desktop that was asked
+    /// for, that nothing runs on the card when the stage is listening. The app keeps the Intel device
+    /// on in the guest only for work that runs, so it has to know.
+    pub fn note(
+        given: Self,
+        why: Option<String>,
+        stage: Stage,
+        listening: Option<&Fallback>,
+    ) -> Option<String> {
+        why.or_else(|| (given == Self::Software && stage == Stage::Listen).then(|| listening_note(listening)))
+    }
+}
+
+/// How the daemon's note starts when nothing runs on the card.
+pub const LISTENING_NOTE_START: &str = "stage=Listen";
+
+fn listening_note(why: Option<&Fallback>) -> String {
+    format!("{LISTENING_NOTE_START} {}", why.cloned().unwrap_or(Fallback::AskedFor))
 }
 
 /// `1` keeps the hardware desktop a person asked for on a recorded card, where nothing runs and so
@@ -346,6 +366,20 @@ mod tests {
             assert_eq!(Desktop::Software.at_stage(stage, None, false), (Desktop::Software, None));
             assert_eq!(Desktop::Software.at_stage(stage, None, true), (Desktop::Software, None));
         }
+    }
+
+    #[test]
+    fn the_note_says_when_nothing_runs_on_a_software_desktop_that_was_asked_for() {
+        let failed = Fallback::SelfTestFailed(1);
+        let note = Desktop::note(Desktop::Software, None, Stage::Listen, Some(&failed)).unwrap();
+        assert_eq!(note, format!("{LISTENING_NOTE_START} {failed}"));
+        assert_eq!(Desktop::note(Desktop::Software, None, Stage::Compute, None), None, "compute runs");
+        assert_eq!(Desktop::note(Desktop::Software, None, Stage::Everything, None), None);
+        assert_eq!(Desktop::note(Desktop::Hardware, None, Stage::Listen, None), None, "a lab's kept desktop");
+        let (given, why) = Desktop::Hardware.at_stage(Stage::Listen, Some(&failed), false);
+        let at_stage = Desktop::note(given, why.clone(), Stage::Listen, Some(&failed));
+        assert_eq!(at_stage, why, "the hardware desktop's reason is the note");
+        assert!(at_stage.unwrap().starts_with(LISTENING_NOTE_START));
     }
 
     #[test]

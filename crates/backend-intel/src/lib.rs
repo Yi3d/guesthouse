@@ -155,7 +155,9 @@ impl IntelBackend {
     /// Where the guest's desktop is drawn, which decides the drivers each program is given: see
     /// [`stage`]. The daemon sets the stage's own unless a person asks otherwise.
     /// A hardware desktop asked for at a stage that doesn't run everything is given as the software
-    /// desktop: see [`Desktop::at_stage`]. Returns why, when that happens. Set it after the stage.
+    /// desktop: see [`Desktop::at_stage`]. Returns the note for the app ([`Desktop::note`]): why,
+    /// when that happens, or that nothing runs on a software desktop asked for while the stage
+    /// listens. Set it after the stage.
     pub fn set_desktop(&mut self, desktop: Desktop) -> Option<String> {
         let lab_kept = stage::lab_keeps_hardware_desktop(
             std::env::var_os(stage::LAB_HARDWARE_DESKTOP_VARIABLE).as_deref(),
@@ -178,7 +180,7 @@ impl IntelBackend {
             ),
             (Desktop::Hardware, _) => log::info!("{PREFIX} software-desktop off: every driver given"),
         }
-        why
+        Desktop::note(given, why, self.stage(), self.listening.as_ref())
     }
 
     pub fn card(&self) -> &CardFacts {

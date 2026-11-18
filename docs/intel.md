@@ -49,7 +49,23 @@ You can shut the machine down afterwards. If you build from source, `guesthouse-
 
 A start tries the hardware desktop: Windows' desktop compositor and Intel's own drivers on the card, with the Guesthouse display driver showing the picture. That needs the guest's work to run on the card (see the next part). Where it doesn't, because the card is not on `xe`, its self-test failed, or work on the card is switched off, the same start gives the software desktop instead and `daemon.out` says why. If the hardware desktop does not come up, the app falls back by itself to the software desktop for that start and the next ones on the same build, and says why in its log and the bug report.
 
-On the software desktop Windows draws in software on its basic display. Intel's render device is switched off in the guest for that start, so programs in the guest have no GPU; the compositor would otherwise keep asking the card for a driver and draw nothing. `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=1` in the daemon's environment asks for the software desktop, and `=0` for the hardware one.
+On the software desktop Windows draws in software on its basic display. Intel's render device is switched off in the guest for that start, so programs in the guest have no GPU; the compositor would otherwise keep asking the card for a driver and draw nothing. `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=1` in the app's environment asks for the software desktop, and `=0` for the hardware one.
+
+The device stays on with the software desktop only when you ask for work on the card, by setting `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=1` or `GUESTHOUSE_INTEL_RUN_ON_CARD=compute`. Then the screen stays black, because the compositor can't draw, and you reach the guest through the app's agent with `guesthouse-task`. The app's log says "Intel device left on with the software desktop". `compute` is the way to try OpenCL on a machine whose hardware desktop failed. It turns the device back on at that start, and the fallback stays as it was.
+
+What a start gives, by the two switches, whether the machine fell back from the hardware desktop on this build, and the card. "Fell back" means the app's own fallback. "Fell back, asked" means it fell back while `GUESTHOUSE_INTEL_SOFTWARE_DESKTOP=0` was set.
+
+| Run on card | Software desktop | Fell back | Card | Desktop | Intel device | Work on the card |
+|---|---|---|---|---|---|---|
+| unset or `1` | unset | no | real | hardware, watched, falls back if it fails | on | everything |
+| unset or `1` | unset | yes | real | software, drawn | off | none |
+| unset | `0` | no, or fell back with nothing set | real | hardware, tried again | on | everything |
+| unset | `0` | fell back, asked | real | software, drawn | off | none |
+| unset | `1` | any | real | software, black | on | Direct3D 12, Vulkan and compute |
+| `compute` | any | any | real | software, black | on | OpenCL only |
+| `0`, `listen` or an unknown word | any | any | real | software, drawn | off | none |
+| any | any | any | real, but not on `xe` or its self-test failed | software, drawn | off | none |
+| any | any | any | recorded | software, drawn | off | none |
 
 ## Work on the card
 
