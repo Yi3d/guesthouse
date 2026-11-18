@@ -163,7 +163,7 @@ fn serve_on_render_node<B: guesthouse_backend::Backend>(
     configure: impl FnOnce(&mut B),
 ) -> Result<(), Box<dyn std::error::Error>> {
     use guesthouse_core::{Config, MemoryLimits, Session};
-    use guesthouse_daemon::environment::{guest_ram, video_cap};
+    use guesthouse_daemon::environment::{guest_ram, video_cap, within_the_cards};
     use guesthouse_daemon::guest_memory::SharedMemory;
     use guesthouse_daemon::jail::{lock_calls, lock_files};
     use guesthouse_daemon::router::Router;
@@ -177,7 +177,8 @@ fn serve_on_render_node<B: guesthouse_backend::Backend>(
     let locked = lock_files(&needs)?;
     let mut backend: B = start_backend(setup)?;
     configure(&mut backend);
-    let limits = MemoryLimits::new(backend.facts(), video_cap(cap.as_deref()), guest_ram(ram.as_deref()));
+    let cap = within_the_cards(video_cap(cap.as_deref()), backend.video_memory_cap());
+    let limits = MemoryLimits::new(backend.facts(), cap, guest_ram(ram.as_deref()));
     let config = Config::new(limits);
     let mut session = Session::new(backend, memory, config);
     session.timings_mut().set_enabled(env::var_os("GUESTHOUSE_TIMING").is_some());

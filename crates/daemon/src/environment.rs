@@ -20,9 +20,26 @@ pub fn video_cap(value: Option<&str>) -> Option<u64> {
     value.and_then(gibibytes).filter(|&bytes| bytes != 0)
 }
 
+/// The guest's video memory cap: the person's own, and never more than the card itself allows.
+pub fn within_the_cards(asked: Option<u64>, card: Option<u64>) -> Option<u64> {
+    match (asked, card) {
+        (Some(asked), Some(card)) => Some(asked.min(card)),
+        (asked, card) => asked.or(card),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cards_own_cap_holds_whatever_a_person_asks() {
+        assert_eq!(within_the_cards(None, None), None, "as before for a card that sets none");
+        assert_eq!(within_the_cards(Some(8 << 30), None), Some(8 << 30));
+        assert_eq!(within_the_cards(None, Some(6 << 30)), Some(6 << 30));
+        assert_eq!(within_the_cards(Some(8 << 30), Some(6 << 30)), Some(6 << 30));
+        assert_eq!(within_the_cards(Some(4 << 30), Some(6 << 30)), Some(4 << 30));
+    }
 
     #[test]
     fn ram_defaults_when_unset_or_unreadable() {

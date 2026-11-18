@@ -106,6 +106,8 @@ pub struct StandIn {
     pub refused_rings: u32,
     /// The commands the last submission named, as the core passed them on.
     pub last_commands: Option<CommandBuffer>,
+    /// Stands in for a backend whose display driver slots may lie in the guest's own pages.
+    pub slots_in_guest_pages: bool,
 }
 
 #[derive(Debug, Default)]
@@ -183,6 +185,7 @@ impl StandIn {
             busy_starts: 0,
             refused_rings: 0,
             last_commands: None,
+            slots_in_guest_pages: false,
         }
     }
 
@@ -341,6 +344,10 @@ impl Backend for StandIn {
     ) -> Result<(), BackendError> {
         self.preserved.push((from, to, size));
         Ok(())
+    }
+
+    fn slots_may_be_guest_pages(&self) -> bool {
+        self.slots_in_guest_pages
     }
 
     fn create_address_space(&mut self, ranges: &[GpuRange]) -> Result<SpaceId, BackendError> {

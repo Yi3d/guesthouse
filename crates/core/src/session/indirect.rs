@@ -117,12 +117,13 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// it has opened are here too, which is why a size alone can't say what's a slot.
     fn slot_candidates(&self, ring: &Register, space: SpaceId) -> Vec<GuestSlot> {
         let fits = |size: u64| size >= ring.slot_size && size - ring.slot_size <= SLOT_SLACK;
+        let in_guest_pages = self.backend.slots_may_be_guest_pages();
         let mut found: Vec<GuestSlot> = self
             .allocations
             .iter()
             .filter(|(_, allocation)| {
                 fits(allocation.size)
-                    && allocation.guest_address.is_none()
+                    && (in_guest_pages || allocation.guest_address.is_none())
                     && allocation.view.is_none()
                     && allocation.mappings.iter().any(|mapping| mapping.space == space)
             })
@@ -142,8 +143,21 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let mut slots = vec![None; ring.slots as usize];
         for candidate in self.slot_candidates(ring, space) {
             let mut bytes = [0; STAMP_SIZE];
-            let host = &mut services!(self);
-            self.backend.read_memory_start(host, own_space, candidate.memory, &mut bytes)?;
+            // A candidate the guest's CPU has locked lies in the guest's own pages, and its stamp is
+            // read where it is. Only a backend that says its slots may be there has such candidates.
+            let in_guest_pages =
+                self.allocations.get(&candidate.allocation).and_then(|found| found.guest_address);
+            match in_guest_pages {
+                Some(address) => {
+                    if self.memory.read_bytes(address, &mut bytes) != bytes.len() {
+                        continue;
+                    }
+                }
+                None => {
+                    let host = &mut services!(self);
+                    self.backend.read_memory_start(host, own_space, candidate.memory, &mut bytes)?;
+                }
+            }
             let Some(stamp) = Stamp::parse(&bytes) else { continue };
             if stamp.generation == ring.name.generation
                 && let Some(place) = slots.get_mut(stamp.slot as usize)
@@ -409,7 +423,15 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         if !wanted {
             return;
         }
-        if self.frames.viewer_facts.wants_memory {
+        // Slots in the guest's own pages aren't the card's to hand out, so their frames are copied
+        // into slots made here, as for a viewer that asks for its frames in memory.
+        let in_guest_pages = self.frames.indirect.as_ref().is_some_and(|ring| {
+            let locked = |slot: &GuestSlot| {
+                self.allocations.get(&slot.allocation).is_some_and(|found| found.guest_address.is_some())
+            };
+            ring.slots.iter().any(locked)
+        });
+        if self.frames.viewer_facts.wants_memory || in_guest_pages {
             self.make_viewer_slots(None);
             return;
         }

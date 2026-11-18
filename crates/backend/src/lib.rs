@@ -98,6 +98,22 @@ pub trait Backend: Sized {
         Err(BackendError::new("this backend can't read video memory"))
     }
 
+    /// The most video memory this guest may hold, in bytes, when the card itself sets a limit under
+    /// what it told the guest it has: a card the host's desktop also draws on must keep room for it.
+    /// `None` leaves the limit to the person's own setting, or to none.
+    fn video_memory_cap(&self) -> Option<u64> {
+        None
+    }
+
+    /// Whether the display driver's slots may lie in the guest's own pages. A vendor's guest driver
+    /// that has the CPU lock nearly every allocation moves the slots there before the ring is
+    /// registered, and the core then reads their stamps from guest memory and has each frame copied
+    /// out of it. A backend whose slots stay in video memory says no, and a locked allocation is
+    /// then never taken for a slot.
+    fn slots_may_be_guest_pages(&self) -> bool {
+        false
+    }
+
     /// Makes a GPU address space covering `ranges`.
     fn create_address_space(&mut self, ranges: &[GpuRange]) -> Result<SpaceId, BackendError>;
 
