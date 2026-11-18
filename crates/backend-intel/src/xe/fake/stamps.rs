@@ -190,7 +190,7 @@ mod tests {
             offset_or_host_address: 0,
             length: size,
             address,
-            pat_index: 0,
+            pat_index: crate::xe::plan::pat::SHARED_WITH_CPU,
         };
         xe.bind(vm, &op, None).unwrap();
         handle

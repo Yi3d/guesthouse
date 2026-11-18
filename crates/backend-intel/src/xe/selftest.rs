@@ -108,6 +108,8 @@ fn failed(what: &str, error: &io::Error) -> String {
 struct TestBuffer {
     handle: u32,
     map: CpuMap,
+    /// The page-table entry it is bound with, which follows how the CPU caches it.
+    pat_index: u16,
 }
 
 /// Host pages of a shared in-memory file, mapped in this process.
@@ -286,7 +288,7 @@ impl<'a> Run<'a> {
                 return Err(failed("mapping the buffer for the CPU", &error));
             }
         };
-        let mut buffer = TestBuffer { handle, map };
+        let mut buffer = TestBuffer { handle, map, pat_index: pat::for_buffer(request.cpu_caching, usage) };
         let written = pattern(seed, BUFFER_BYTES);
         let mut read = vec![0; written.len()];
         if !(buffer.map.write(0, &written) && buffer.map.read(0, &mut read)) || read != written {
@@ -353,14 +355,14 @@ impl<'a> Run<'a> {
         }
     }
 
-    fn buffer_bind(handle: u32, address: u64, pat_index: u16) -> super::abi::BindOp {
+    fn buffer_bind(buffer: &TestBuffer, address: u64) -> super::abi::BindOp {
         super::abi::BindOp {
             op: super::abi::BIND_MAP,
-            buffer: handle,
+            buffer: buffer.handle,
             offset_or_host_address: 0,
             length: BUFFER_BYTES,
             address,
-            pat_index,
+            pat_index: buffer.pat_index,
         }
     }
 
@@ -370,15 +372,15 @@ impl<'a> Run<'a> {
         }
         let mut failures = Vec::new();
         let mut bound = Vec::new();
-        if let Some(handle) = self.batch.as_ref().map(|buffer| buffer.handle) {
-            match self.bind(Self::buffer_bind(handle, BATCH_AT, pat::CARD)) {
+        if let Some(op) = self.batch.as_ref().map(|buffer| Self::buffer_bind(buffer, BATCH_AT)) {
+            match self.bind(op) {
                 Ok(()) => self.batch_bound = true,
                 Err(why) => failures.push(why),
             }
         }
-        if let Some(handle) = self.system.as_ref().map(|buffer| buffer.handle) {
-            let address = partition::first_heap_32().base;
-            match self.bind(Self::buffer_bind(handle, address, pat::CARD)) {
+        let address = partition::first_heap_32().base;
+        if let Some(op) = self.system.as_ref().map(|buffer| Self::buffer_bind(buffer, address)) {
+            match self.bind(op) {
                 Ok(()) => {
                     self.system_at = Some(address);
                     bound.push(format!("system memory at {address:#x}"));
@@ -386,9 +388,9 @@ impl<'a> Run<'a> {
                 Err(why) => failures.push(why),
             }
         }
-        if let Some(handle) = self.vram.as_ref().map(|buffer| buffer.handle) {
-            let address = partition::standard().base;
-            match self.bind(Self::buffer_bind(handle, address, pat::CARD)) {
+        let address = partition::standard().base;
+        if let Some(op) = self.vram.as_ref().map(|buffer| Self::buffer_bind(buffer, address)) {
+            match self.bind(op) {
                 Ok(()) => {
                     self.vram_at = Some(address);
                     bound.push(format!("card memory at {address:#x}"));
@@ -622,7 +624,7 @@ impl<'a> Run<'a> {
     }
 
     fn broken_batch(&mut self, what: &str, dwords: &[u32]) -> Step {
-        let Some(handle) = self.batch.as_ref().map(|buffer| buffer.handle) else {
+        let Some(op) = self.batch.as_ref().map(|buffer| Self::buffer_bind(buffer, BATCH_AT)) else {
             return Step::Skip("needs the batch buffer".into());
         };
         let Some(engine) = plan::one_engine_per_class(&self.card.engines).first().copied() else {
@@ -632,9 +634,7 @@ impl<'a> Run<'a> {
         let result = (|| -> Result<String, String> {
             let vm = self.xe.create_vm(0).map_err(|error| failed("making an address space", &error))?;
             self.extra_vms.push(vm);
-            self.xe
-                .bind(vm, &Self::buffer_bind(handle, BATCH_AT, pat::CARD), None)
-                .map_err(|error| failed("binding the batch buffer", &error))?;
+            self.xe.bind(vm, &op, None).map_err(|error| failed("binding the batch buffer", &error))?;
             let batch = self.batch.as_mut().ok_or("no batch buffer")?;
             if !(batch.map.write(0, &batch::bytes(dwords)) && batch.map.write(fence_offset, &[0; 8])) {
                 return Err("the batch didn't fit".into());

@@ -29,8 +29,13 @@ impl CardWork {
         })?;
         self.held += request.size;
         let memory = MemoryId(self.new_id());
-        let backing =
-            Backing::Buffer { handle, size: request.size, page: self.placements.page(usage), usage };
+        let backing = Backing::Buffer {
+            handle,
+            size: request.size,
+            page: self.placements.page(usage),
+            usage,
+            cpu_caching: request.cpu_caching,
+        };
         self.blocks.insert(memory, Block { backing, map: None });
         Ok((memory, request.size))
     }

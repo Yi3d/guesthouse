@@ -14,6 +14,7 @@
 use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync};
 use super::batch;
 use super::device::{CpuMap, EngineCycles, Xe};
+use super::plan::pat;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -224,6 +225,8 @@ struct State {
     next_id: u32,
     vms: HashMap<u32, Vm>,
     buffers: HashMap<u32, Arc<Bytes>>,
+    /// How the CPU caches each buffer, which decides the page-table entries it may be bound with.
+    cpu_caching: HashMap<u32, u16>,
     queues: HashMap<u32, Queue>,
     timelines: HashMap<u32, Timeline>,
     fail_at: HashMap<usize, i32>,
@@ -596,6 +599,7 @@ impl Xe for FakeXe {
         let bytes = Bytes::new(usize::try_from(buffer.size).map_err(|_| errno(libc::ENOMEM))?)?;
         let id = state.new_id();
         state.buffers.insert(id, Arc::new(bytes));
+        state.cpu_caching.insert(id, buffer.cpu_caching);
         Ok(id)
     }
 
@@ -603,6 +607,7 @@ impl Xe for FakeXe {
         let mut state = self.state();
         state.enter(Call::CloseBuffer(handle))?;
         // A map or a binding made earlier keeps its own hold on the bytes, as a real one does.
+        state.cpu_caching.remove(&handle);
         state.buffers.remove(&handle).map(drop).ok_or_else(|| errno(libc::ENOENT))
     }
 
@@ -635,6 +640,10 @@ impl Xe for FakeXe {
         let host = match op.op {
             abi::BIND_MAP => {
                 let bytes = state.buffers.get(&op.buffer).ok_or_else(|| errno(libc::ENOENT))?;
+                let write_back = state.cpu_caching.get(&op.buffer) == Some(&abi::CPU_CACHING_WRITE_BACK);
+                if write_back && !pat::coherent(op.pat_index) {
+                    return Err(errno(libc::EINVAL));
+                }
                 let end = op.offset_or_host_address.checked_add(op.length);
                 if end.is_none_or(|end| end > bytes.length as u64) {
                     return Err(errno(libc::EINVAL));
@@ -643,6 +652,7 @@ impl Xe for FakeXe {
                 let host = unsafe { bytes.start.add(op.offset_or_host_address as usize) };
                 Some((host, Some(Arc::clone(bytes))))
             }
+            abi::BIND_MAP_USERPTR if !pat::coherent(op.pat_index) => return Err(errno(libc::EINVAL)),
             abi::BIND_MAP_USERPTR => Some((op.offset_or_host_address as *mut u8, None)),
             abi::BIND_UNMAP => None,
             _ => return Err(errno(libc::EINVAL)),
@@ -809,7 +819,6 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xe::plan::pat;
 
     fn buffer() -> NewBuffer {
         NewBuffer { size: 0x1000, placement: 1, flags: 0, cpu_caching: abi::CPU_CACHING_WRITE_BACK }
@@ -822,7 +831,7 @@ mod tests {
             offset_or_host_address: 0,
             length: 0x1000,
             address,
-            pat_index: pat::CARD,
+            pat_index: pat::SHARED_WITH_CPU,
         }
     }
 
@@ -956,6 +965,32 @@ mod tests {
         let after = Sync::After { timeline: binds, point: 1 };
         assert!(invalid(xe.exec(queue, 0x1_0000, &[after, signal])), "nothing attached to wait for");
         assert!(xe.exec(queue, 0x1_0000, &[signal]).is_ok());
+    }
+
+    /// xe binds a write-back buffer or host pages only with a page-table entry coherent with the
+    /// CPU, and a write-combined buffer with any.
+    #[test]
+    fn a_write_back_buffer_or_host_pages_need_a_coherent_entry() {
+        let mut xe = FakeXe::default();
+        let vm = xe.create_vm(0).unwrap();
+        let invalid = |result: io::Result<()>| result.unwrap_err().raw_os_error() == Some(libc::EINVAL);
+        let write_back = xe.create_buffer(&buffer()).unwrap();
+        let card = BindOp { pat_index: pat::CARD, ..map(write_back, 0x1_0000) };
+        assert!(invalid(xe.bind(vm, &card, None)), "no coherency on a write-back buffer");
+        xe.bind(vm, &map(write_back, 0x1_0000), None).unwrap();
+        let combined = NewBuffer { cpu_caching: abi::CPU_CACHING_WRITE_COMBINED, ..buffer() };
+        let combined = xe.create_buffer(&combined).unwrap();
+        xe.bind(vm, &BindOp { pat_index: pat::CARD, ..map(combined, 0x2_0000) }, None).unwrap();
+        let pages = Box::new([0u8; 0x1000]);
+        let host = BindOp {
+            op: abi::BIND_MAP_USERPTR,
+            buffer: 0,
+            offset_or_host_address: pages.as_ptr() as u64,
+            pat_index: pat::CARD,
+            ..map(0, 0x3_0000)
+        };
+        assert!(invalid(xe.bind(vm, &host, None)), "no coherency on host pages");
+        xe.bind(vm, &BindOp { pat_index: pat::SHARED_WITH_CPU, ..host }, None).unwrap();
     }
 
     #[test]

@@ -18,6 +18,31 @@ pub mod pat {
     pub const SHARED_WITH_CPU: u16 = 1;
     /// For a buffer a display reads.
     pub const SCANOUT: u16 = 6;
+
+    /// The entries with no coherency with the CPU: `__coh_mode` 0 in the kernel's `xe2_pat_table`
+    /// (`drivers/gpu/drm/xe/xe_pat.c`). Past the table's end there is nothing at all.
+    const NOT_COHERENT: [u16; 8] = [0, 3, 6, 8, 10, 12, 13, 14];
+    const ENTRIES: u16 = 20;
+
+    /// Whether entry `index` keeps the card coherent with the CPU at least one way. xe refuses a
+    /// write-back buffer or host pages bound with one that doesn't (`xe_vm_bind_ioctl_validate_bo`,
+    /// `vm_bind_ioctl_check_args`).
+    pub fn coherent(index: u16) -> bool {
+        index < ENTRIES && !NOT_COHERENT.contains(&index)
+    }
+
+    /// The entry a buffer is bound with, from how the CPU caches it and what it's for. One the CPU
+    /// caches write-back needs coherency, which is right for it anyway, as the CPU reads and writes
+    /// it through its caches. A write-combined one is the card's to cache.
+    pub fn for_buffer(cpu_caching: u16, usage: super::BufferUse) -> u16 {
+        if cpu_caching == super::abi::CPU_CACHING_WRITE_BACK {
+            SHARED_WITH_CPU
+        } else if usage == super::BufferUse::Scanout {
+            SCANOUT
+        } else {
+            CARD
+        }
+    }
 }
 
 /// The pages host memory is bound in, whatever the card's own page is.
@@ -111,8 +136,8 @@ impl Placements {
 /// What lies behind a block of memory the backend named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backing {
-    /// A buffer xe made.
-    Buffer { handle: u32, size: u64, page: u64, usage: BufferUse },
+    /// A buffer xe made, with how the CPU caches it (`abi::CPU_CACHING_*`).
+    Buffer { handle: u32, size: u64, page: u64, usage: BufferUse, cpu_caching: u16 },
     /// Host memory, which is the guest's own pages.
     HostPages { address: u64, size: u64 },
 }
@@ -168,13 +193,13 @@ pub fn bind_for(request: &MapRequest, backing: &Backing) -> Result<BindOp, BindR
         return Err(BindRefused::PastTheEnd);
     }
     Ok(match *backing {
-        Backing::Buffer { handle, usage, .. } => BindOp {
+        Backing::Buffer { handle, usage, cpu_caching, .. } => BindOp {
             op: abi::BIND_MAP,
             buffer: handle,
             offset_or_host_address: request.offset,
             length: request.length,
             address: request.address,
-            pat_index: if usage == BufferUse::Scanout { pat::SCANOUT } else { pat::CARD },
+            pat_index: pat::for_buffer(cpu_caching, usage),
         },
         Backing::HostPages { address, .. } => BindOp {
             op: abi::BIND_MAP_USERPTR,
@@ -356,12 +381,57 @@ mod tests {
 
     #[test]
     fn video_memory_is_bound_at_the_guests_address_as_cached_card_memory() {
-        let backing = Backing::Buffer { handle: 9, size: 0x1_0000, page: 0x1000, usage: BufferUse::Card };
+        let backing = Backing::Buffer {
+            handle: 9,
+            size: 0x1_0000,
+            page: 0x1000,
+            usage: BufferUse::Card,
+            cpu_caching: abi::CPU_CACHING_WRITE_COMBINED,
+        };
         let op = bind_for(&request(0x1_4000_0000, 0x2000, 0x4000), &backing).unwrap();
         assert_eq!((op.op, op.buffer, op.pat_index), (abi::BIND_MAP, 9, pat::CARD));
         assert_eq!((op.offset_or_host_address, op.length, op.address), (0x2000, 0x4000, 0x1_4000_0000));
-        let picture = Backing::Buffer { handle: 9, size: 0x1_0000, page: 0x1000, usage: BufferUse::Scanout };
+        let picture = Backing::Buffer {
+            handle: 9,
+            size: 0x1_0000,
+            page: 0x1000,
+            usage: BufferUse::Scanout,
+            cpu_caching: abi::CPU_CACHING_WRITE_COMBINED,
+        };
         assert_eq!(bind_for(&request(0x1_4000_0000, 0, 0x1000), &picture).unwrap().pat_index, pat::SCANOUT);
+    }
+
+    /// Lunar Lake has no memory of its own, so its video memory is write-back system memory, which
+    /// xe binds only with an entry coherent with the CPU.
+    #[test]
+    fn video_memory_in_system_memory_is_bound_coherent_with_the_cpu() {
+        let placements = lunar_lake();
+        let made = placements.buffer(0x1_0000, BufferUse::Card);
+        let backing = Backing::Buffer {
+            handle: 9,
+            size: made.size,
+            page: placements.page(BufferUse::Card),
+            usage: BufferUse::Card,
+            cpu_caching: made.cpu_caching,
+        };
+        let op = bind_for(&request(0x1_4000_0000, 0, 0x1000), &backing).unwrap();
+        assert_eq!(op.pat_index, pat::SHARED_WITH_CPU);
+        assert!(pat::coherent(op.pat_index));
+    }
+
+    #[test]
+    fn every_buffer_is_bound_with_an_entry_xe_takes_for_its_caching() {
+        for placements in [battlemage(), lunar_lake()] {
+            for usage in [BufferUse::Card, BufferUse::Scanout, BufferUse::HostFilled] {
+                let made = placements.buffer(0x1000, usage);
+                let index = pat::for_buffer(made.cpu_caching, usage);
+                let write_back = made.cpu_caching == abi::CPU_CACHING_WRITE_BACK;
+                assert!(!write_back || pat::coherent(index), "{usage:?} on {placements:?}");
+            }
+        }
+        assert!(!pat::coherent(pat::CARD) && !pat::coherent(pat::SCANOUT));
+        assert!(pat::coherent(pat::SHARED_WITH_CPU));
+        assert!(!pat::coherent(20), "past the table");
     }
 
     #[test]
@@ -375,7 +445,13 @@ mod tests {
 
     #[test]
     fn a_mapping_the_kernel_would_refuse_is_refused_first() {
-        let backing = Backing::Buffer { handle: 9, size: 0x2_0000, page: 0x1_0000, usage: BufferUse::Card };
+        let backing = Backing::Buffer {
+            handle: 9,
+            size: 0x2_0000,
+            page: 0x1_0000,
+            usage: BufferUse::Card,
+            cpu_caching: abi::CPU_CACHING_WRITE_COMBINED,
+        };
         let unaligned = BindRefused::Unaligned { page: 0x1_0000 };
         assert_eq!(bind_for(&request(0x1000, 0, 0x1_0000), &backing), Err(unaligned));
         assert_eq!(bind_for(&request(0x1_0000, 0x1000, 0x1_0000), &backing), Err(unaligned));
