@@ -262,7 +262,7 @@ impl CardWork {
         if !read {
             return Err(Refused::Unreadable { address: address + skipped });
         }
-        Ok(batch::ending(&tail))
+        Ok(batch::ending_at(&tail, address + skipped))
     }
 
     /// Sends prepared work. A refusal for now keeps it for the next ring of the same doorbell.

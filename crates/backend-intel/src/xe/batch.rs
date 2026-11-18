@@ -30,6 +30,9 @@ const BATCH_START_IN_VM: u32 = 1 << 8;
 /// `MI_SEMAPHORE_WAIT`, which holds the engine until a value in memory compares as asked. A ring
 /// fed from user mode parks in one where a batch would end.
 const SEMAPHORE_WAIT: u32 = mi(0x1C);
+/// `MI_ARB_CHECK`, a point where the engine may switch away, with or without its pre-parser bits.
+/// It moves nothing.
+const ARB_CHECK: u32 = mi(0x05);
 /// `MI_SEMAPHORE_WAIT | XE_INSTR_NUM_DW(5)`, as the kernel defines it for these cards.
 pub const SEMAPHORE_WAIT_HEADER: u32 = SEMAPHORE_WAIT | (SEMAPHORE_WAIT_DWORDS as u32 - LENGTH_BIAS);
 pub const SEMAPHORE_WAIT_DWORDS: usize = 5;
@@ -220,6 +223,40 @@ pub fn ending(tail: &[u8]) -> Ending {
     }
 }
 
+/// [`ending`] for a batch whose read tail starts at `tail_address`, which also knows one more shape
+/// of ring, seen in the lab from Intel's OpenCL driver (direct submission): a semaphore wait, then
+/// a chain forward into this same batch, past the chain, where nothing waits but padding and
+/// `MI_ARB_CHECK`s. The engine parks in the wait; the driver writes its next work into that
+/// padding before it lets the wait through. A chain back, or anywhere else, is not this.
+pub fn ending_at(tail: &[u8], tail_address: u64) -> Ending {
+    let found = ending(tail);
+    if found != Ending::RunsOn || !tail.len().is_multiple_of(4) {
+        return found;
+    }
+    let dwords: Vec<u32> = tail.as_chunks::<4>().0.iter().map(|bytes| u32::from_le_bytes(*bytes)).collect();
+    let filler = |dword: u32| is(dword, NOOP) || is(dword, ARB_CHECK);
+    let Some(chain) = (0..dwords.len().saturating_sub(BATCH_START_DWORDS - 1))
+        .rev()
+        .find(|&at| is(dwords[at], BATCH_START))
+    else {
+        return found;
+    };
+    let target = u64::from(dwords[chain + 2]) << 32 | u64::from(dwords[chain + 1]);
+    let after_chain = tail_address + 4 * (chain + BATCH_START_DWORDS) as u64;
+    let end = tail_address + 4 * dwords.len() as u64;
+    let into_own_tail = (after_chain..end).contains(&target) && target.is_multiple_of(4);
+    let rest_is_filler = dwords[chain + BATCH_START_DWORDS..].iter().all(|&dword| filler(dword));
+    let waits_first = chain >= SEMAPHORE_WAIT_DWORDS
+        && (0..=chain - SEMAPHORE_WAIT_DWORDS).rev().any(|at| {
+            is_wait(dwords[at]) && chain - (at + SEMAPHORE_WAIT_DWORDS) <= MOST_BETWEEN_WAIT_AND_CHAIN
+        });
+    if into_own_tail && rest_is_filler && waits_first { Ending::Parks } else { found }
+}
+
+/// How many dwords may lie between such a ring's wait and its chain: in the lab, one
+/// (an arbitration switch).
+const MOST_BETWEEN_WAIT_AND_CHAIN: usize = 2;
+
 /// How far after a wait's header its data and its address's low half lie.
 const WAIT_OPERANDS_THAT_CAN_BE_ANYTHING: [usize; 2] = [1, 2];
 
@@ -231,11 +268,64 @@ fn is_wait(dword: u32) -> bool {
 }
 
 /// How many bytes of a batch's end [`ending`] wants: room for a chain and some padding after it.
-pub const ENDING_BYTES: usize = 64;
+pub const ENDING_BYTES: usize = 4096;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ring OpenCL's driver submitted in the lab, at 0x7b_044d_0000, 252 bytes: work started
+    /// elsewhere, then a wait, an arbitration switch, and a chain to its own offset 0x58.
+    fn opencl_ring() -> Vec<u32> {
+        let mut dwords = vec![
+            0x6109_0001,
+            0x6cf1_0000,
+            0x0000_0217,
+            0x7a00_0004,
+            0x0014_0480,
+            0,
+            0,
+            0,
+            0,
+            0x1880_0101,
+            0x044c_0000,
+            0x0000_007b,
+            0x0280_0101,
+            0x0e00_9003,
+            0x0000_0002,
+            0x0457_0000,
+            0x0000_007b,
+            0,
+            0x0480_0001,
+            0x1880_0101,
+            0x044d_0058,
+            0x0000_007b,
+            0x0280_0100,
+        ];
+        dwords.resize(63, 0);
+        dwords
+    }
+
+    #[test]
+    fn a_wait_then_a_chain_into_its_own_padding_is_a_ring() {
+        let ring = bytes(&opencl_ring());
+        assert_eq!(ending(&ring), Ending::RunsOn, "by its end alone");
+        assert_eq!(ending_at(&ring, 0x7b_044d_0000), Ending::Parks);
+        assert_eq!(ending_at(&ring, 0x7b_0440_0000), Ending::RunsOn, "the chain leaves the batch");
+        let mut back = opencl_ring();
+        back[20] = 0x044d_0000;
+        assert_eq!(ending_at(&bytes(&back), 0x7b_044d_0000), Ending::RunsOn, "a chain back loops");
+        let mut no_wait = opencl_ring();
+        no_wait[13] = 0;
+        assert_eq!(ending_at(&bytes(&no_wait), 0x7b_044d_0000), Ending::RunsOn, "no wait, no ring");
+        let mut work_after = opencl_ring();
+        work_after[30] = 0x7a00_0004;
+        assert_eq!(ending_at(&bytes(&work_after), 0x7b_044d_0000), Ending::RunsOn);
+        let early = bytes(&[0x1880_0101, 0x100c, 0, 0x0280_0100]);
+        assert_eq!(ending_at(&early, 0x1000), Ending::RunsOn, "a chain too early for a wait before it");
+        let ends = bytes(&[0x0e00_9003, 2, 0, 0, 0, BATCH_END]);
+        assert_eq!(ending_at(&ends, 0x1000), ending(&ends), "the other shapes are read as before");
+    }
 
     /// The values the kernel's macros give, worked from `xe_mi_commands.h` in Linux 7.2:
     /// `__MI_INSTR(op)` is `op << 23`, `MI_SDI_NUM_QW(1)` is `(2 * 1 + 3 - 2) | BIT(21)`, and
