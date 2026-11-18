@@ -24,6 +24,14 @@ fn running(context: &Context, machine: &Machine, pid: u32) {
     fake_process(context, pid, &[&qemu, "-qmp", &monitor, &disk], &[], "");
 }
 
+/// A slot no VM on this PC is in, for a test that watches its task as a real process in `/proc`. A
+/// slot that is named is kept to, so a real VM in another can't be taken for ours, and naming one a
+/// real VM is in would leave the start no room.
+fn slot_free_on_this_pc(context: &Context) -> guesthouse_daemon::slot::Slot {
+    crate::tasks::free_slot(context)
+        .expect("a VM runs in every slot on this PC, and this test needs one free")
+}
+
 fn said(context: &Context, command: &str) -> (String, std::result::Result<(), Problem>) {
     let mut out = Vec::new();
     let result = run(context, &words(command), &mut out);
@@ -238,8 +246,7 @@ fn a_task_that_fails_ends_the_command_with_its_error() {
     let scratch = Scratch::new();
     let mut context = scratch_context(&scratch);
     context.processes = "/proc".into();
-    // A slot that is named is kept to, so a real VM on this PC in another can't be taken for ours.
-    context.slot = crate::slots::number(3);
+    context.slot = slot_free_on_this_pc(&context);
     make(&context, "work", "Office PC", Kind::Plain);
     context.make_run_folder(None).unwrap();
     let file = context.run_folder(None).join("guesthouse-task.json");
@@ -266,7 +273,7 @@ fn no_wait_returns_once_the_task_is_launched() {
     let scratch = Scratch::new();
     let mut context = scratch_context(&scratch);
     context.processes = "/proc".into();
-    context.slot = crate::slots::number(3);
+    context.slot = slot_free_on_this_pc(&context);
     make(&context, "work", "Office PC", Kind::Plain);
     scratch.program("program/guesthouse-task", "#!/bin/sh\nexit 0\n");
     let (out, result) = said(&context, "start work --no-wait");
