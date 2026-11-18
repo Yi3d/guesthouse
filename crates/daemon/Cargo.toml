@@ -22,6 +22,9 @@ amd = ["dep:guesthouse-backend-amd", "dep:serde_json"]
 # test at the start, and otherwise only logs what the guest's driver sends. With another backend on
 # as well, each run opens the card the app named, the same way.
 intel = ["dep:guesthouse-backend-intel", "dep:serde_json"]
+# For the lab only, never in a build for people: a recorded Intel card with
+# GUESTHOUSE_INTEL_LAB_FAKE_CARD=1 runs the work path against a stand-in for xe. See the Intel backend.
+intel-lab-fake-card = ["intel", "guesthouse-backend-intel/lab-fake-card"]
 
 [dependencies]
 guesthouse-backend.workspace = true

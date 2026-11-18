@@ -8,7 +8,7 @@
 pub mod abi;
 pub mod batch;
 pub mod device;
-#[cfg(test)]
+#[cfg(any(test, feature = "lab-fake-card"))]
 pub(crate) mod fake;
 pub mod plan;
 pub mod selftest;

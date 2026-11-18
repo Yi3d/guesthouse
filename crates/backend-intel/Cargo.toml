@@ -19,6 +19,13 @@ log = "0.4"
 guesthouse-backend-standin.workspace = true
 guesthouse-core.workspace = true
 
+[features]
+# For the lab only, never in a build for people: with a recorded card and
+# GUESTHOUSE_INTEL_LAB_FAKE_CARD=1, the guest's work goes to a stand-in for xe whose buffers are
+# host memory and whose batches end at once, unrun. It tries the work path's plumbing with a real
+# guest on a PC with no Intel card.
+lab-fake-card = []
+
 [[bin]]
 # Prints what the host's xe driver says about the card, for a tester to paste. By itself it only
 # reads. With --run it also runs the host's self-test: a few tiny buffers and batches of its own.

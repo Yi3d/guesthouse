@@ -4,13 +4,19 @@
 //!
 //! What it does on a fault or a hang is what the design expects of xe, not something seen on a
 //! card: the queue is banned, its timeline still signals, and the user fence is left unwritten.
+//!
+//! A buffer's bytes are host memory in a memfd, so a map, an export and a bind all reach the same
+//! bytes. With the `lab-fake-card` feature it is also the lab's card: see [`FakeXe::lab`].
+
+// A lab build uses only part of what the tests do.
+#![cfg_attr(not(test), allow(dead_code))]
 
 use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync};
 use super::batch;
 use super::device::{CpuMap, EngineCycles, Xe};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -59,12 +65,70 @@ impl Call {
     }
 }
 
+/// A buffer's bytes: a memfd, mapped once here for the stand-in's own reads and writes.
+#[derive(Debug)]
+struct Bytes {
+    file: OwnedFd,
+    start: *mut u8,
+    length: usize,
+}
+
+impl Bytes {
+    fn new(length: usize) -> io::Result<Self> {
+        // SAFETY: a fresh memfd with a constant name; the result is checked.
+        let fd = unsafe { libc::memfd_create(c"guesthouse-fake-xe".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the descriptor was just made and is owned by nothing else.
+        let file = unsafe { OwnedFd::from_raw_fd(fd) };
+        let size = libc::off_t::try_from(length).map_err(|_| errno(libc::EINVAL))?;
+        // SAFETY: plain calls on the descriptor made above.
+        if unsafe { libc::ftruncate(file.as_raw_fd(), size) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let start = map(&file, length)?;
+        Ok(Self { file, start, length })
+    }
+}
+
+// SAFETY: plain shared memory and a descriptor, with no thread affinity; writes through it are
+// the stand-in's under its lock, or a map's, as with real buffers.
+unsafe impl Send for Bytes {}
+// SAFETY: as above; `&Bytes` gives out only the address and the descriptor.
+unsafe impl std::marker::Sync for Bytes {}
+
+impl Drop for Bytes {
+    fn drop(&mut self) {
+        // SAFETY: the mapping was made in `new` with this start and length.
+        unsafe { libc::munmap(self.start.cast(), self.length) };
+    }
+}
+
+/// A shared mapping of all of a memfd.
+fn map(file: &OwnedFd, length: usize) -> io::Result<*mut u8> {
+    // SAFETY: a fresh shared mapping of the memfd; nothing else in the process is touched.
+    let start = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            length,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if start == libc::MAP_FAILED { Err(io::Error::last_os_error()) } else { Ok(start.cast()) }
+}
+
 /// What is bound at a range of a VM's addresses.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Bound {
     length: u64,
     /// Where the first byte is in this process.
     host: *mut u8,
+    /// The buffer it is in, kept while bound, as xe keeps a bound buffer. `None` for host pages.
+    buffer: Option<Arc<Bytes>>,
 }
 
 #[derive(Debug, Default)]
@@ -94,12 +158,14 @@ impl Vm {
         for start in touched {
             let bound = self.bound.remove(&start).expect("just listed");
             if start < address {
-                self.bound.insert(start, Bound { length: address - start, host: bound.host });
+                let left = Bound { length: address - start, ..bound.clone() };
+                self.bound.insert(start, left);
             }
             if start + bound.length > end {
                 // SAFETY: still inside the same binding.
                 let host = unsafe { bound.host.add((end - start) as usize) };
-                self.bound.insert(end, Bound { length: start + bound.length - end, host });
+                self.bound
+                    .insert(end, Bound { length: start + bound.length - end, host, buffer: bound.buffer });
             }
         }
     }
@@ -151,9 +217,7 @@ struct State {
     calls: Vec<Call>,
     next_id: u32,
     vms: HashMap<u32, Vm>,
-    buffers: HashMap<u32, Box<[u8]>>,
-    /// The bytes of closed buffers, kept so a map made earlier stays good, as a real one does.
-    closed: Vec<Box<[u8]>>,
+    buffers: HashMap<u32, Arc<Bytes>>,
     queues: HashMap<u32, Queue>,
     timelines: HashMap<u32, Timeline>,
     fail_at: HashMap<usize, i32>,
@@ -163,7 +227,25 @@ struct State {
     faults: Vec<u64>,
     clock_reads: u64,
     names_faults: bool,
+    /// Calls taken, recorded or not.
+    entered: usize,
+    /// The lab's card: see [`FakeXe::lab`].
+    lab: Option<Lab>,
 }
+
+/// What the lab's card does differently, and what it has noticed.
+#[derive(Debug, Default)]
+struct Lab {
+    /// From [`FakeXe::stop_running`] on, batches are finished without running them.
+    runs_nothing: bool,
+    /// Batches and user fences at addresses nothing was bound at: faults on a card.
+    unbound_batches: u64,
+    unbound_fences: u64,
+}
+
+/// How many of each kind of unbound address the lab's card names in the log.
+#[cfg(feature = "lab-fake-card")]
+const LAB_NAMED: u64 = 20;
 
 // SAFETY: the raw pointers are into buffers the state owns, or into host memory a test lent and
 // keeps alive; nothing here is tied to a thread.
@@ -176,9 +258,12 @@ fn errno(code: i32) -> io::Error {
 impl State {
     /// Records a call, and fails it if a test asked for that.
     fn enter(&mut self, call: Call) -> io::Result<()> {
-        let index = self.calls.len();
+        let index = self.entered;
+        self.entered += 1;
         let name = call.name();
-        self.calls.push(call);
+        if self.lab.is_none() {
+            self.calls.push(call);
+        }
         match self.fail_at.get(&index).or_else(|| self.fail_named.get(name)) {
             Some(&code) => Err(errno(code)),
             None => Ok(()),
@@ -268,6 +353,9 @@ impl State {
 
     /// Lets a taken run through: the batch, then the fence, then the signals.
     fn finish(&mut self, run: Held) {
+        if self.lab.as_ref().is_some_and(|lab| lab.runs_nothing) {
+            return self.finish_unrun(run);
+        }
         let Some(queue) = self.queues.get(&run.queue) else { return };
         let vm = self.vms.get(&queue.vm);
         let mut outcome = match vm {
@@ -345,6 +433,20 @@ impl State {
     }
 }
 
+/// Names the first few unbound addresses of a kind in the log.
+fn lab_says(what: &str, address: u64, vm: u32, count: u64) {
+    #[cfg(feature = "lab-fake-card")]
+    if count <= LAB_NAMED {
+        log::warn!(
+            "intel: lab card: a {what} at {address:#x} in VM {vm} has nothing bound there; a card would \
+             fault ({count} so far{})",
+            if count == LAB_NAMED { ", no more named" } else { "" }
+        );
+    }
+    #[cfg(not(feature = "lab-fake-card"))]
+    let _ = (what, address, vm, count);
+}
+
 /// See the module documentation. Clones share one state, so a test keeps one and gives the other
 /// away.
 #[derive(Debug, Clone, Default)]
@@ -353,6 +455,25 @@ pub struct FakeXe(Arc<Mutex<State>>);
 impl FakeXe {
     fn state(&self) -> MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The lab's card. It records no calls, so it keeps no more than a guest holds, and until
+    /// [`Self::stop_running`] it runs the instructions this backend writes, so the self-test
+    /// passes on it as it does in the tests.
+    pub fn lab() -> Self {
+        let xe = Self::default();
+        xe.state().lab = Some(Lab::default());
+        xe
+    }
+
+    /// From now on every batch ends at once, unrun: see [`State::finish_unrun`].
+    pub fn stop_running(&self) {
+        self.state().lab.get_or_insert_with(Lab::default).runs_nothing = true;
+    }
+
+    /// Batches and user fences seen at unbound addresses since [`Self::stop_running`].
+    pub fn unbound(&self) -> (u64, u64) {
+        self.state().lab.as_ref().map_or((0, 0), |lab| (lab.unbound_batches, lab.unbound_fences))
     }
 
     pub fn calls(&self) -> Vec<Call> {
@@ -460,36 +581,36 @@ impl Xe for FakeXe {
         if buffer.size == 0 || buffer.placement == 0 || !buffer.size.is_multiple_of(0x1000) {
             return Err(errno(libc::EINVAL));
         }
+        let bytes = Bytes::new(usize::try_from(buffer.size).map_err(|_| errno(libc::ENOMEM))?)?;
         let id = state.new_id();
-        state.buffers.insert(id, vec![0; buffer.size as usize].into_boxed_slice());
+        state.buffers.insert(id, Arc::new(bytes));
         Ok(id)
     }
 
     fn close_buffer(&mut self, handle: u32) -> io::Result<()> {
         let mut state = self.state();
         state.enter(Call::CloseBuffer(handle))?;
-        let bytes = state.buffers.remove(&handle).ok_or_else(|| errno(libc::ENOENT))?;
-        state.closed.push(bytes);
-        Ok(())
+        // A map or a binding made earlier keeps its own hold on the bytes, as a real one does.
+        state.buffers.remove(&handle).map(drop).ok_or_else(|| errno(libc::ENOENT))
     }
 
     fn map_buffer(&mut self, handle: u32, size: u64) -> io::Result<CpuMap> {
         let mut state = self.state();
         state.enter(Call::MapBuffer(handle))?;
-        let bytes = state.buffers.get_mut(&handle).ok_or_else(|| errno(libc::ENOENT))?;
-        if size as usize > bytes.len() {
+        let bytes = state.buffers.get(&handle).ok_or_else(|| errno(libc::ENOENT))?;
+        if size as usize > bytes.length {
             return Err(errno(libc::EINVAL));
         }
-        // SAFETY: the boxed bytes never move and are kept until the stand-in itself goes, in
-        // `closed` once the buffer is closed.
-        Ok(unsafe { CpuMap::borrowed(bytes.as_mut_ptr(), size as usize) })
+        let start = map(&bytes.file, size as usize)?;
+        // SAFETY: a mapping just made, of `size` bytes, that nothing else holds.
+        Ok(unsafe { CpuMap::owned(start, size as usize) })
     }
 
     fn export_buffer(&mut self, handle: u32) -> io::Result<OwnedFd> {
         let mut state = self.state();
         state.enter(Call::ExportBuffer(handle))?;
-        state.buffers.get(&handle).ok_or_else(|| errno(libc::ENOENT))?;
-        Ok(std::fs::File::open("/dev/null")?.into())
+        let bytes = state.buffers.get(&handle).ok_or_else(|| errno(libc::ENOENT))?;
+        bytes.file.try_clone()
     }
 
     fn bind(&mut self, vm: u32, op: &BindOp, signal: Option<Sync>) -> io::Result<()> {
@@ -501,15 +622,16 @@ impl Xe for FakeXe {
         }
         let host = match op.op {
             abi::BIND_MAP => {
-                let bytes = state.buffers.get_mut(&op.buffer).ok_or_else(|| errno(libc::ENOENT))?;
+                let bytes = state.buffers.get(&op.buffer).ok_or_else(|| errno(libc::ENOENT))?;
                 let end = op.offset_or_host_address.checked_add(op.length);
-                if end.is_none_or(|end| end > bytes.len() as u64) {
+                if end.is_none_or(|end| end > bytes.length as u64) {
                     return Err(errno(libc::EINVAL));
                 }
                 // SAFETY: the offset was just checked against the buffer.
-                Some(unsafe { bytes.as_mut_ptr().add(op.offset_or_host_address as usize) })
+                let host = unsafe { bytes.start.add(op.offset_or_host_address as usize) };
+                Some((host, Some(Arc::clone(bytes))))
             }
-            abi::BIND_MAP_USERPTR => Some(op.offset_or_host_address as *mut u8),
+            abi::BIND_MAP_USERPTR => Some((op.offset_or_host_address as *mut u8, None)),
             abi::BIND_UNMAP => None,
             _ => return Err(errno(libc::EINVAL)),
         };
@@ -519,8 +641,8 @@ impl Xe for FakeXe {
         state.check_syncs(flags, signals)?;
         let space = state.vms.get_mut(&vm).ok_or_else(|| errno(libc::ENOENT))?;
         space.clear(op.address, op.length);
-        if let Some(host) = host {
-            space.bound.insert(op.address, Bound { length: op.length, host });
+        if let Some((host, buffer)) = host {
+            space.bound.insert(op.address, Bound { length: op.length, host, buffer });
         }
         state.attach(signals);
         state.finish_signals(signals);
@@ -613,6 +735,37 @@ impl Xe for FakeXe {
 }
 
 impl State {
+    /// The lab's card ends a run at once without running it: the user fence written, the
+    /// timelines signalled. A batch or fence at an address nothing is bound at would fault on a
+    /// card; it is named in the log and counted, and the run still ends, so one fault doesn't hide
+    /// what comes after. A ring, in a long-running VM, stays parked: nothing here moves its fence.
+    fn finish_unrun(&mut self, run: Held) {
+        let Some(vm_id) = self.queues.get(&run.queue).map(|queue| queue.vm) else { return };
+        let Some(vm) = self.vms.get(&vm_id) else { return };
+        if vm.flags & abi::VM_LONG_RUNNING != 0 {
+            return;
+        }
+        let batch_bound = vm.host(run.batch, 4).is_some();
+        let mut fences_unbound = Vec::new();
+        for sync in &run.syncs {
+            if let Sync::UserFence { address, value } = *sync
+                && Self::store(vm, address, value).is_err()
+            {
+                fences_unbound.push(address);
+            }
+        }
+        let lab = self.lab.get_or_insert_with(Lab::default);
+        if !batch_bound {
+            lab.unbound_batches += 1;
+            lab_says("batch", run.batch, vm_id, lab.unbound_batches);
+        }
+        for address in fences_unbound {
+            lab.unbound_fences += 1;
+            lab_says("user fence", address, vm_id, lab.unbound_fences);
+        }
+        self.finish_signals(&run.syncs);
+    }
+
     /// A bind is in place as soon as the stand-in has taken it, so its point is reached at once.
     fn finish_signals(&mut self, syncs: &[Sync]) {
         for sync in syncs {
@@ -663,6 +816,57 @@ mod tests {
         let mut bytes = [0; 8];
         assert!(map.read(offset, &mut bytes));
         u64::from_le_bytes(bytes)
+    }
+
+    #[test]
+    fn a_map_an_export_and_a_binding_reach_the_same_bytes_and_outlive_the_buffer() {
+        let (mut xe, vm, _queue, mut batch_map, data_map) = rig();
+        assert!(batch_map.write(8, &0x1234_5678_u64.to_le_bytes()));
+        let exported = std::fs::File::from(xe.export_buffer(2).unwrap());
+        let mut read = [0; 8];
+        std::os::unix::fs::FileExt::read_exact_at(&exported, &mut read, 8).unwrap();
+        assert_eq!(u64::from_le_bytes(read), 0x1234_5678, "the export is the buffer's own memfd");
+        let state = xe.state();
+        assert_eq!(State::read_qword(&state.vms[&vm], 0x1_0008), Ok(0x1234_5678));
+        drop(state);
+        xe.close_buffer(2).unwrap();
+        assert_eq!(qword_at(&batch_map, 8), 0x1234_5678, "a map keeps the bytes of a closed buffer");
+        assert_eq!(qword_at(&data_map, 0), 0);
+    }
+
+    #[test]
+    fn the_lab_card_ends_a_batch_unrun_writes_the_fence_and_records_nothing() {
+        let (xe, vm, queue, mut batch_map, data_map) = rig();
+        xe.state().lab = Some(Lab::default());
+        xe.stop_running();
+        // A store that would change the data if it ran, and the fence beside it.
+        let store = batch::store_qword(0x2_0010, 7);
+        let words: Vec<u8> = store.iter().chain(&[batch::BATCH_END]).flat_map(|w| w.to_le_bytes()).collect();
+        assert!(batch_map.write(0, &words));
+        let calls = xe.calls().len();
+        let mut runner = xe.clone();
+        runner.exec(queue, 0x1_0000, &[Sync::UserFence { address: 0x2_0000, value: 5 }]).unwrap();
+        assert_eq!(qword_at(&data_map, 0), 5, "the user fence is written");
+        assert_eq!(qword_at(&data_map, 0x10), 0, "the batch did not run");
+        assert_eq!(xe.calls().len(), calls, "the lab card records no calls");
+        assert_eq!(xe.unbound(), (0, 0));
+        runner.exec(queue, 0x9_0000, &[Sync::UserFence { address: 0x9_0000, value: 6 }]).unwrap();
+        assert_eq!(xe.unbound(), (1, 1), "both would fault on a card and are counted");
+        assert!(!runner.queue_banned(queue).unwrap(), "and the queue goes on");
+        let _ = vm;
+    }
+
+    #[test]
+    fn the_lab_card_leaves_a_ring_parked() {
+        let mut xe = FakeXe::lab();
+        xe.stop_running();
+        let vm = xe.create_vm(abi::VM_LONG_RUNNING).unwrap();
+        let ring = xe.create_buffer(&buffer()).unwrap();
+        xe.bind(vm, &map(ring, 0x1_0000), None).unwrap();
+        let queue = xe.create_queue(vm, EngineInstance { class: 0, instance: 0, gt: 0 }).unwrap();
+        xe.exec(queue, 0x1_0000, &[]).unwrap();
+        assert!(!xe.queue_banned(queue).unwrap());
+        assert_eq!(xe.unbound(), (0, 0));
     }
 
     #[test]

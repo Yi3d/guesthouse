@@ -33,6 +33,8 @@ pub mod card;
 pub mod generation;
 pub mod hwconfig;
 pub mod ioctl;
+#[cfg(feature = "lab-fake-card")]
+mod lab;
 pub mod protocol;
 pub mod recording;
 pub mod stage;
@@ -345,6 +347,26 @@ fn on_a_recorded_card((asked, why): (Stage, Option<Fallback>)) -> (Stage, Option
 }
 
 /// The opener for a card that isn't there.
+/// The lab card's switch, read only in a build that has the lab card.
+fn lab_switch() -> Option<std::ffi::OsString> {
+    #[cfg(feature = "lab-fake-card")]
+    return std::env::var_os(lab::FAKE_CARD_VARIABLE);
+    #[cfg(not(feature = "lab-fake-card"))]
+    None
+}
+
+impl IntelBackend {
+    /// A build without the lab card leaves a recorded card listening, whatever is asked.
+    #[cfg(not(feature = "lab-fake-card"))]
+    fn start_on_lab_card(
+        &mut self,
+        _asked: (Stage, Option<Fallback>),
+        _switch: Option<&std::ffi::OsStr>,
+    ) -> bool {
+        false
+    }
+}
+
 fn no_card() -> std::io::Result<Box<dyn Xe + Send>> {
     Err(std::io::Error::other("there is no card"))
 }
@@ -473,7 +495,10 @@ impl Backend for IntelBackend {
         let mut backend = match recording::recorded_card_file() {
             Some(file) => {
                 let mut backend = Self::from_card(recorded_card(&file, address.as_deref())?)?;
-                backend.start_work_on_card(on_a_recorded_card(asked), no_card, None);
+                let lab_switch = lab_switch();
+                if !backend.start_on_lab_card(asked.clone(), lab_switch.as_deref()) {
+                    backend.start_work_on_card(on_a_recorded_card(asked), no_card, None);
+                }
                 backend
             }
             None => {
@@ -815,6 +840,20 @@ mod tests {
             std::env::temp_dir().join(format!("guesthouse-recorded-{}-{name}.card", std::process::id()));
         std::fs::write(&file, text).unwrap();
         file
+    }
+
+    #[test]
+    #[cfg(not(feature = "lab-fake-card"))]
+    fn a_recorded_card_listens_whatever_the_lab_switch_says_in_a_build_without_the_lab_card() {
+        let mut backend = IntelBackend::from_card(card::tests::lunar_lake()).unwrap();
+        let asked = Stage::asked(None);
+        assert!(!backend.start_on_lab_card(asked.clone(), Some(std::ffi::OsStr::new("1"))));
+        backend.start_work_on_card(on_a_recorded_card(asked), no_card, None);
+        assert_eq!(backend.stage(), Stage::Listen);
+        assert!(matches!(backend.listening, Some(Fallback::RecordedCard)));
+        let (given, why) = Desktop::Hardware.at_stage(backend.stage(), backend.listening.as_ref(), false);
+        assert_eq!(given, Desktop::Software);
+        assert!(why.is_some());
     }
 
     #[test]

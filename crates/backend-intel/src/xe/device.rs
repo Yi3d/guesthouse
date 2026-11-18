@@ -75,6 +75,16 @@ impl CpuMap {
         Self { start, length, owned: false }
     }
 
+    /// A map that unmaps its bytes when dropped.
+    ///
+    /// # Safety
+    ///
+    /// `start` and `length` must be a shared mapping made by mmap that nothing else unmaps.
+    #[cfg(any(test, feature = "lab-fake-card"))]
+    pub(crate) unsafe fn owned(start: *mut u8, length: usize) -> Self {
+        Self { start, length, owned: true }
+    }
+
     pub fn len(&self) -> usize {
         self.length
     }
