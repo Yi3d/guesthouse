@@ -148,7 +148,13 @@ fn serve_intel(
              the hardware desktop instead"
         );
     }
-    serve_on_render_node::<IntelBackend>(slot, project, &setup, needs, |backend| backend.set_desktop(desktop))
+    let run_folder = slot.run_folder(&project);
+    serve_on_render_node::<IntelBackend>(slot, project, &setup, needs, |backend| {
+        let why = backend.set_desktop(desktop);
+        if let Err(error) = guesthouse_daemon::desktop_note::write_note(&run_folder, why.as_deref()) {
+            log::warn!("The note on the guest's desktop couldn't be written: {error}");
+        }
+    })
 }
 
 /// Serves with a backend whose card is reached through one render node, which with what else is in

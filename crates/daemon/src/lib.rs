@@ -7,6 +7,7 @@
 //! [`handover`]. For a QEMU of someone else's it comes as two files instead: see [`memory_files`].
 
 pub mod card_choice;
+pub mod desktop_note;
 pub mod display_note;
 pub mod environment;
 pub mod gpu_note;

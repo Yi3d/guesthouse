@@ -92,6 +92,8 @@ pub struct IntelBackend {
     /// Work on the card, at every stage past listening. `None` is the listening stage: memory and
     /// spaces are [`Books`]' names, and every submission is finished unrun.
     work: Option<CardWork>,
+    /// Why the guest is left listening, when it is.
+    listening: Option<Fallback>,
 }
 
 impl IntelBackend {
@@ -142,6 +144,7 @@ impl IntelBackend {
             started: Instant::now(),
             desktop: Desktop::Hardware,
             work: None,
+            listening: None,
         };
         backend.log_start();
         Ok(backend)
@@ -149,14 +152,31 @@ impl IntelBackend {
 
     /// Where the guest's desktop is drawn, which decides the drivers each program is given: see
     /// [`stage`]. The daemon sets the stage's own unless a person asks otherwise.
-    pub fn set_desktop(&mut self, desktop: Desktop) {
-        self.desktop = desktop;
-        match desktop {
-            Desktop::Software => log::info!(
+    /// A hardware desktop asked for at a stage that doesn't run everything is given as the software
+    /// desktop: see [`Desktop::at_stage`]. Returns why, when that happens. Set it after the stage.
+    pub fn set_desktop(&mut self, desktop: Desktop) -> Option<String> {
+        let lab_kept = stage::lab_keeps_hardware_desktop(
+            std::env::var_os(stage::LAB_HARDWARE_DESKTOP_VARIABLE).as_deref(),
+            recording::recorded_card_file().is_some(),
+        );
+        let (given, why) = desktop.at_stage(self.stage(), self.listening.as_ref(), lab_kept);
+        self.desktop = given;
+        match (given, &why) {
+            (Desktop::Software, Some(why)) => log::warn!(
+                "{PREFIX} software-desktop on, though the hardware desktop was asked: {why}. Nothing the \
+                 compositor sends would run, so it could never draw"
+            ),
+            (Desktop::Software, None) => log::info!(
                 "{PREFIX} software-desktop on: Direct3D 9, 10 and 11 drivers refused, and every driver to the compositor"
             ),
-            Desktop::Hardware => log::info!("{PREFIX} software-desktop off: every driver given"),
+            (Desktop::Hardware, _) if lab_kept && self.stage() != Stage::Everything => log::warn!(
+                "{PREFIX} software-desktop off on a recorded card, as {} asks: a lab run to see the hardware \
+                 desktop fail, as nothing it draws runs",
+                stage::LAB_HARDWARE_DESKTOP_VARIABLE
+            ),
+            (Desktop::Hardware, _) => log::info!("{PREFIX} software-desktop off: every driver given"),
         }
+        why
     }
 
     pub fn card(&self) -> &CardFacts {
@@ -229,6 +249,7 @@ impl IntelBackend {
     ) {
         match self.work_at(asked, open, sysfs) {
             Ok(work) => {
+                self.listening = None;
                 log::info!(
                     "{PREFIX} stage={:?}: the guest's work runs on the card, with at most {} MiB of video \
                      memory; {}=0 turns that off",
@@ -244,6 +265,7 @@ impl IntelBackend {
                     "{PREFIX} stage=Listen {fallback}. Nothing reaches the card: the guest's work is \
                      finished unrun"
                 );
+                self.listening = Some(fallback);
             }
         }
     }
@@ -980,6 +1002,18 @@ mod tests {
         let asked_to_listen = (Stage::Listen, Some(Fallback::AskedFor));
         assert_eq!(on_a_recorded_card(asked_to_listen.clone()), asked_to_listen, "its own reason is kept");
         assert!(no_card().is_err());
+    }
+
+    #[test]
+    fn a_hardware_desktop_asked_of_a_listening_guest_is_given_as_the_software_desktop() {
+        let xe = xe::fake::FakeXe::default();
+        let (mut backend, _) = started(on_a_recorded_card(Stage::asked(None)), &xe);
+        let why = backend.set_desktop(Desktop::Hardware).expect("a reason");
+        assert!(why.contains("layer=card"), "{why}");
+        assert_eq!(backend.desktop, Desktop::Software);
+        let (mut running, _) = started(Stage::asked(None), &xe::fake::FakeXe::default());
+        assert_eq!(running.set_desktop(Desktop::Hardware), None);
+        assert_eq!(running.desktop, Desktop::Hardware);
     }
 
     #[test]

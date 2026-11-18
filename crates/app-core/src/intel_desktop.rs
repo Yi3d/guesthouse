@@ -6,11 +6,16 @@
 //! desktop failed on this build keeps the software one, a recorded card keeps the software one, and
 //! any other gets the stage's. A new build, or a person asking for the hardware desktop after the
 //! stage's own try failed, tries it again.
+//!
+//! Once its daemon is up, a start goes by what the daemon gave: a hardware desktop asked at a stage
+//! where nothing the compositor sends runs is the software desktop, with the daemon's reason in the
+//! run folder. See [`guesthouse_daemon::desktop_note`].
 
 use crate::context::Context;
 use crate::machine::Machine;
 use crate::updates::VERSION;
 use guesthouse_backend_intel::stage::Desktop;
+use guesthouse_daemon::desktop_note::read_note;
 use std::fs;
 use std::path::PathBuf;
 
@@ -67,9 +72,18 @@ fn pick(asked: Option<Desktop>, default: Desktop, fell_back: Option<bool>) -> De
     }
 }
 
-/// The desktop for this start in this process.
+/// The desktop for this start in this process: the software desktop if the daemon gave it, and
+/// otherwise the one chosen.
 pub fn for_start(context: &Context, machine: &Machine) -> Desktop {
+    if given_in_software(context).is_some() {
+        return Desktop::Software;
+    }
     chosen(context, machine, Desktop::asked_in_environment())
+}
+
+/// Why this start's daemon gave the software desktop though the hardware one was asked, if it did.
+pub fn given_in_software(context: &Context) -> Option<String> {
+    read_note(&context.run_folder(None))
 }
 
 #[cfg(test)]
@@ -141,6 +155,24 @@ mod tests {
             "a new build tries again"
         );
         assert_eq!(chosen(&context, &machine, None), STAGE_DESKTOP);
+    }
+
+    #[test]
+    fn a_hardware_desktop_the_daemon_gave_in_software_is_the_software_desktop() {
+        let scratch = Scratch::new();
+        let context = scratch_context(&scratch);
+        let machine = machine(&context);
+        fs::create_dir_all(context.run_folder(None)).unwrap();
+        let note = |why| guesthouse_daemon::desktop_note::write_note(&context.run_folder(None), why).unwrap();
+        note(Some("stage=Listen layer=card"));
+        assert_eq!(given_in_software(&context).as_deref(), Some("stage=Listen layer=card"));
+        assert_eq!(for_start(&context, &machine), Desktop::Software);
+        assert!(!for_start(&context, &machine).has_display_driver());
+        note(None);
+        assert_eq!(
+            for_start(&context, &machine),
+            chosen(&context, &machine, Desktop::asked_in_environment())
+        );
     }
 
     #[test]

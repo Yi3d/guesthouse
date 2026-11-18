@@ -101,6 +101,32 @@ impl Desktop {
     pub fn has_display_driver(self) -> bool {
         self == Self::Hardware
     }
+
+    /// The desktop a guest is given at `stage`, with why it isn't this one if it isn't. The
+    /// hardware desktop needs everything the compositor sends to run: at any stage short of that
+    /// nothing it draws reaches the screen, so the guest gets the software desktop in the same start.
+    /// `why` is the reason the stage is listening, if it is. `lab_kept` is a lab asking for the
+    /// hardware desktop all the same, to see it fail: see [`LAB_HARDWARE_DESKTOP_VARIABLE`].
+    pub fn at_stage(self, stage: Stage, why: Option<&Fallback>, lab_kept: bool) -> (Self, Option<String>) {
+        if self == Self::Software || stage == Stage::Everything || lab_kept {
+            return (self, None);
+        }
+        let reason = match stage {
+            Stage::Compute => format!("stage=Compute: {RUN_VARIABLE}=compute runs compute work only"),
+            _ => format!("stage=Listen {}", why.cloned().unwrap_or(Fallback::AskedFor)),
+        };
+        (Self::Software, Some(reason))
+    }
+}
+
+/// `1` keeps the hardware desktop a person asked for on a recorded card, where nothing runs and so
+/// nothing can be drawn. For a lab only, to bring about a hardware desktop's failures on purpose;
+/// it has no effect on a real card.
+pub const LAB_HARDWARE_DESKTOP_VARIABLE: &str = "GUESTHOUSE_INTEL_LAB_HARDWARE_DESKTOP_ON_RECORDED_CARD";
+
+/// Whether a lab asked for [`LAB_HARDWARE_DESKTOP_VARIABLE`]'s exception, for a recorded card.
+pub fn lab_keeps_hardware_desktop(value: Option<&OsStr>, recorded_card: bool) -> bool {
+    recorded_card && value.is_some_and(|value| value == "1")
 }
 
 /// Names what a guest's work is run on: `0` or `listen` keeps everything off the card, as the first
@@ -276,6 +302,61 @@ mod tests {
         assert_eq!(Desktop::default_for(false), STAGE_DESKTOP);
         assert_eq!(Desktop::default_for(true), Desktop::Software);
     }
+    fn every_fallback() -> [Fallback; 8] {
+        [
+            Fallback::AskedFor,
+            Fallback::UnknownWord("x".into()),
+            Fallback::RecordedCard,
+            Fallback::NotXe("i915".into()),
+            Fallback::NodeNotOpened("denied".into()),
+            Fallback::SelfTestFailed(2),
+            Fallback::NoMemoryRegion,
+            Fallback::TooLittleMemory(1 << 20),
+        ]
+    }
+
+    #[test]
+    fn the_hardware_desktop_is_given_where_everything_runs() {
+        assert_eq!(Desktop::Hardware.at_stage(Stage::Everything, None, false), (Desktop::Hardware, None));
+    }
+
+    #[test]
+    fn a_hardware_desktop_at_the_compute_stage_is_the_software_desktop() {
+        let (given, why) = Desktop::Hardware.at_stage(Stage::Compute, None, false);
+        assert_eq!(given, Desktop::Software);
+        assert!(why.unwrap().contains("stage=Compute"));
+    }
+
+    #[test]
+    fn a_hardware_desktop_left_listening_is_the_software_desktop_with_the_layer_that_refused() {
+        for fallback in every_fallback() {
+            let (given, why) = Desktop::Hardware.at_stage(Stage::Listen, Some(&fallback), false);
+            assert_eq!(given, Desktop::Software, "{fallback}");
+            assert_eq!(why.unwrap(), format!("stage=Listen {fallback}"));
+        }
+        let (_, why) = Desktop::Hardware.at_stage(Stage::Listen, None, false);
+        assert!(why.unwrap().contains("layer=switch"), "listening with no reason is the switch's");
+    }
+
+    #[test]
+    fn the_software_desktop_stays_at_every_stage() {
+        for stage in [Stage::Listen, Stage::Compute, Stage::Everything] {
+            assert_eq!(Desktop::Software.at_stage(stage, None, false), (Desktop::Software, None));
+            assert_eq!(Desktop::Software.at_stage(stage, None, true), (Desktop::Software, None));
+        }
+    }
+
+    #[test]
+    fn a_lab_can_keep_the_hardware_desktop_on_a_recorded_card_only() {
+        let kept = Desktop::Hardware.at_stage(Stage::Listen, Some(&Fallback::RecordedCard), true);
+        assert_eq!(kept, (Desktop::Hardware, None));
+        let one = Some(OsStr::new("1"));
+        assert!(lab_keeps_hardware_desktop(one, true));
+        assert!(!lab_keeps_hardware_desktop(one, false), "never on a real card");
+        assert!(!lab_keeps_hardware_desktop(Some(OsStr::new("yes")), true));
+        assert!(!lab_keeps_hardware_desktop(None, true));
+    }
+
     #[test]
     fn with_nothing_asked_a_guest_gets_the_furthest_stage_and_one_word_turns_it_off() {
         assert_eq!(Stage::asked(None), (FURTHEST_STAGE, None));
@@ -308,16 +389,7 @@ mod tests {
 
     #[test]
     fn every_fallback_names_the_layer_that_refused() {
-        for fallback in [
-            Fallback::AskedFor,
-            Fallback::UnknownWord("x".into()),
-            Fallback::RecordedCard,
-            Fallback::NotXe("i915".into()),
-            Fallback::NodeNotOpened("denied".into()),
-            Fallback::SelfTestFailed(2),
-            Fallback::NoMemoryRegion,
-            Fallback::TooLittleMemory(1 << 20),
-        ] {
+        for fallback in every_fallback() {
             assert!(fallback.to_string().starts_with("layer="), "{fallback}");
         }
         assert!(Fallback::NotXe("i915".into()).to_string().contains("i915"));
