@@ -4,13 +4,16 @@
 //! bytes gets the record. Any other size is refused, as the vendor's kernel driver wouldn't take it.
 //!
 //! The record is built once, from the card and its generation: the platform and core families,
-//! the card's ids, clocks and shape, the feature flags this backend sets, and the GPU address
-//! partition. The shape of the GPU includes its slice arrays, [`super::shape`]. Compression is off,
-//! as the host can't set up compressed memory yet, and the byte that marks the adapter as a virtual
-//! machine's is set. The workaround table is the one Intel's kernel driver would give the card,
+//! the card's ids, clocks and shape, the feature table, and the GPU address partition. The shape of
+//! the GPU includes its slice arrays, [`super::shape`]. For a card Intel's kernel driver knows, the
+//! feature table, the platform words and the hwconfig fields are that driver's,
+//! [`super::card_data`], with this backend's own flags on top. Compression is off, as the host can't
+//! set up compressed memory yet, and the byte that marks the adapter as a virtual machine's is set.
+//! The workaround table is the one Intel's kernel driver would give the card,
 //! [`super::workarounds`]. What is left at zero is listed in [`super::gaps::RECORD`].
 
 use super::bytes::{dword, put_dword, put_qword, put_word};
+use super::card_data;
 use super::features::{self, Feature};
 use super::partition;
 use super::shape::{self, Core};
@@ -54,8 +57,24 @@ mod at {
     pub const PLATFORM_TYPE: usize = 0x218;
     pub const DEVICE_ID: usize = 0x21C;
     pub const REVISION: usize = 0x21E;
+    /// The PCI subsystem vendor and subsystem, a word each.
+    pub const SUBSYSTEM_VENDOR: usize = 0x220;
+    pub const SUBSYSTEM: usize = 0x222;
     pub const GT_TYPE: usize = 0x228;
+    pub const MEDIA_CORE: usize = 0x22C;
+    /// The display, render and media IP versions, each an [`super::IpWord`].
+    pub const DISPLAY_IP: usize = 0x230;
     pub const RENDER_IP: usize = 0x238;
+    pub const MEDIA_IP: usize = 0x23C;
+    /// The PCI revision again, a word.
+    pub const REVISION_AGAIN: usize = 0x240;
+    /// The core family of each IP block: the display's, then four dwords later the render's four
+    /// times, then the media's four times.
+    pub const DISPLAY_IP_CORE: usize = 0x244;
+    pub const RENDER_IP_CORES: usize = 0x254;
+    pub const MEDIA_IP_CORES: usize = 0x264;
+    /// The dword of the feature table that holds the Direct3D 11 interface versions.
+    pub const DDI_VERSIONS: usize = 0x364;
     pub const TIMESTAMP_FREQUENCY: usize = 0x998;
     pub const MIN_RENDER_FREQUENCY: usize = 0x9AC;
     pub const MAX_RENDER_FREQUENCY: usize = 0x9B0;
@@ -145,6 +164,50 @@ const DRIVER_STORE_ENABLED: u32 = 1 << 10;
 const MAX_COMPUTE_ENGINES: u32 = 4;
 /// The GPU address bits from which the card has five levels of page tables.
 const FIVE_LEVEL_ADDRESS_BITS: u64 = 57;
+
+/// GTTYPE_GT1, which Intel's kernel driver gives every card it knows.
+const KNOWN_CARD_GT_TYPE: u32 = 0;
+
+/// Feature bits the driver's table sets that this record keeps clear on every card.
+const KEPT_CLEAR: [Feature; 13] = [
+    // The guest's tiled resources: xe never turns on the hardware's translation table for them,
+    // whether the kernel driver or the user-mode driver keeps it (see `work::choices`); the core has
+    // no request that maps a range to nothing, which null pages are; and tiles mapped through the
+    // page tables need remapping the core has not been shown to give.
+    features::TILE_MAPPED_RESOURCE,
+    features::TRANSLATION_TABLE,
+    features::USER_MODE_TRANSLATION_TABLE,
+    features::NULL_PAGES,
+    // Compression, which stays off as [`features::COMPRESSION`] does: render compression for what
+    // the display shows, and two unnamed bits that the table sets on an Arrow Lake card only when
+    // it sets compression too.
+    features::RENDER_COMPRESSION,
+    features::bit("unnamed bit 684, which goes with compression", 684),
+    features::bit("unnamed bit 686, which goes with compression", 686),
+    // A service of the kernel driver rather than of the card: resetting the function, which the
+    // host does.
+    features::DRIVER_FLR,
+    // Unnamed bits among the memory flags that the table sets only on cards with memory of their
+    // own. Which memory the guest gets there is the core's to say, and nothing says these describe
+    // what it gives: see [`super::gaps::LOCAL_MEMORY`].
+    features::bit("unnamed memory bit 435", 435),
+    features::bit("unnamed memory bit 445", 445),
+    features::bit("unnamed memory bit 462", 462),
+    features::bit("unnamed memory bit 463", 463),
+    features::bit("unnamed memory bit 469", 469),
+];
+
+/// The inputs to the driver's tables that are its defaults rather than the card's, as the log
+/// names them.
+const PCI_CAPABILITIES_DEFAULT: &str = "PCI capabilities as the platform's cards have them";
+const DISPLAY_FUSES_DEFAULT: &str = "every display pipe present";
+const CPU_DEFAULT: &str = "a CPU that is not a Xeon";
+const FUSE_WORD_DEFAULT: &str = "a fuse word xe doesn't report, as zero";
+const SUBSYSTEM_DEFAULT: &str = "a subsystem the driver doesn't single out";
+/// The product family from which the driver reads that fuse word, Battlemage's.
+const FUSE_WORD_FROM_FAMILY: u32 = 1274;
+/// The devices for which the driver singles out some subsystems.
+const SUBSYSTEM_DEVICES: [u16; 2] = [0x7D55, 0x7D51];
 
 /// The bytes a CPU cache line takes on the hosts this runs on.
 const CACHE_LINE_BYTES: u32 = 64;
@@ -361,6 +424,75 @@ pub struct RecordFacts {
     /// The media GT's IP version, which the workaround table is built from. A card with no media
     /// GT has none.
     pub media_ip: Option<IpWord>,
+    /// The PCI subsystem vendor and subsystem, and the PCI class.
+    pub subsystem: (u16, u16),
+    pub pci_class: u32,
+    /// The card's hwconfig, each key with its first value.
+    pub hwconfig: Vec<(u32, u32)>,
+    /// Whether memory on the card may be mapped in 4 KiB pages.
+    pub local_memory_small_pages: bool,
+}
+
+/// How the parts of the record that come from data were built, for the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Telling {
+    pub workarounds: Outcome,
+    pub card_data: CardData,
+}
+
+/// Whether the feature table, platform words and hwconfig fields are the kernel driver's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CardData {
+    Built(DataBuilt),
+    /// The data has no table for this device: those parts are this backend's alone.
+    Uncovered {
+        device: u16,
+        revision: u8,
+        feature_bits: u32,
+    },
+}
+
+/// What the kernel driver's data gave the record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataBuilt {
+    pub platform: &'static str,
+    pub device: u16,
+    pub revision: u8,
+    /// The feature table's set bits, this backend's own included.
+    pub feature_bits: u32,
+    /// The hwconfig keys copied into the record.
+    pub hwconfig_keys: usize,
+    /// The inputs that are defaults rather than the card's.
+    pub defaults: Vec<&'static str>,
+    /// What the data has no value for, left at zero.
+    pub unknown: Vec<String>,
+}
+
+impl std::fmt::Display for DataBuilt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "platform=\"{}\" device={:#06x} pci_rev={:#04x} bits={} hwconfig_keys={} defaults=\"{}\"",
+            self.platform,
+            self.device,
+            self.revision,
+            self.feature_bits,
+            self.hwconfig_keys,
+            self.defaults.join(", ")
+        )?;
+        if !self.unknown.is_empty() {
+            write!(f, " unknown=\"{}\"", self.unknown.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+/// The feature table's set bits.
+pub fn feature_bits(record: &[u8]) -> u32 {
+    record[features::TABLE..features::TABLE + card_data::TABLE_BYTES]
+        .iter()
+        .map(|byte| byte.count_ones())
+        .sum()
 }
 
 /// Builds the record.
@@ -368,8 +500,8 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     build_telling(facts).0
 }
 
-/// Builds the record, and says how its workaround table was built.
-pub fn build_telling(facts: &RecordFacts) -> (Vec<u8>, Outcome) {
+/// Builds the record, and says how its parts that come from data were built.
+pub fn build_telling(facts: &RecordFacts) -> (Vec<u8>, Telling) {
     let mut record = vec![0u8; RECORD_SIZE];
     let platform = &facts.platform;
     for (field, value) in [
@@ -451,9 +583,16 @@ pub fn build_telling(facts: &RecordFacts) -> (Vec<u8>, Outcome) {
             record[block + valid] = 1;
         }
     }
-    // The table reads the feature table, so it comes after it, and the entries this backend
-    // insists on after the table.
-    set_features(&mut record, facts);
+    // The workaround table reads the feature table, so it comes after it, and the entries this
+    // backend insists on after the table.
+    let revision = platform.revision as u8;
+    let card_data = match card_data::table(platform.product_family, platform.device_id, revision) {
+        Some(table) => CardData::Built(fill_from_data(&mut record, facts, &table)),
+        None => {
+            set_features(&mut record, facts);
+            CardData::Uncovered { device: platform.device_id, revision, feature_bits: feature_bits(&record) }
+        }
+    };
     let card = workarounds::Card {
         product_family: platform.product_family,
         device_id: platform.device_id,
@@ -469,11 +608,112 @@ pub fn build_telling(facts: &RecordFacts) -> (Vec<u8>, Outcome) {
     partition::write(block, &partition::ours());
     record[at::FROM_VIRTUAL_MACHINE] = 1;
     record[at::SECURE_VIRTUAL_MACHINE] = 0;
-    (record, outcome)
+    (record, Telling { workarounds: outcome, card_data })
+}
+
+/// The parts of the record the kernel driver's data gives a card it knows: the platform words, the
+/// hwconfig fields and the feature table, with this backend's flags on top of the table.
+fn fill_from_data(record: &mut [u8], facts: &RecordFacts, table: &card_data::Table) -> DataBuilt {
+    let platform = &facts.platform;
+    let data = table.platform;
+    let mut built = DataBuilt {
+        platform: data.name,
+        device: platform.device_id,
+        revision: platform.revision as u8,
+        feature_bits: 0,
+        hwconfig_keys: 0,
+        defaults: Vec::new(),
+        unknown: Vec::new(),
+    };
+
+    // The platform words.
+    put_dword(record, at::PLATFORM_TYPE, data.platform_type);
+    put_dword(record, at::DISPLAY_CORE, data.display_core);
+    put_dword(record, at::GT_TYPE, KNOWN_CARD_GT_TYPE);
+    put_word(record, at::SUBSYSTEM_VENDOR, facts.subsystem.0);
+    put_word(record, at::SUBSYSTEM, facts.subsystem.1);
+    put_word(record, at::REVISION_AGAIN, platform.revision);
+    let media_core = facts.media_ip.and_then(|ip| {
+        let core = card_data::media_core(ip.architecture() as u16, ip.release() as u16);
+        if core.is_none() {
+            built.unknown.push(format!("the media core of media {}.{:02}", ip.architecture(), ip.release()));
+        }
+        core
+    });
+    if let Some(ip) = facts.media_ip {
+        put_dword(record, at::MEDIA_IP, ip.0);
+    }
+    put_dword(record, at::MEDIA_CORE, media_core.unwrap_or(0));
+    // xe doesn't report the display IP: it is the platform's, at revision 0, as the workaround
+    // table takes it.
+    if let Some((architecture, release)) =
+        workarounds::platform_display_ip(platform.product_family, platform.device_id)
+    {
+        put_dword(record, at::DISPLAY_IP, IpWord::new(architecture, release, 0).0);
+        built.defaults.extend([workarounds::DISPLAY_IP_DEFAULT, workarounds::DISPLAY_REVISION_DEFAULT]);
+    }
+    if data.per_ip_cores {
+        put_dword(record, at::DISPLAY_IP_CORE, data.display_core);
+        for slot in 0..4 {
+            put_dword(record, at::RENDER_IP_CORES + slot * 4, platform.render_core);
+            put_dword(record, at::MEDIA_IP_CORES + slot * 4, media_core.unwrap_or(0));
+        }
+    }
+
+    // Every hwconfig key the card gives, where the driver puts it. These come after this backend's
+    // own fields, so a key the card gives wins over what was worked out without it.
+    for &(key, value) in &facts.hwconfig {
+        let places = card_data::hwconfig_places(key);
+        for &place in places {
+            put_dword(record, place, value);
+        }
+        built.hwconfig_keys += usize::from(!places.is_empty());
+    }
+
+    // The feature table: the driver's known bits, but the Direct3D 11 interface versions, which
+    // stay this backend's; then the bits this record keeps clear; then this backend's flags.
+    let ddi_word = (at::DDI_VERSIONS - features::TABLE) / 4;
+    for (word, (&value, &known)) in table.features.iter().zip(&table.known).enumerate() {
+        let known = if word == ddi_word { 0 } else { known };
+        let place = features::TABLE + word * 4;
+        let kept = dword(record, place).unwrap_or(0) & !known;
+        put_dword(record, place, kept | value & known);
+    }
+    if card_data::is_not_vga(facts.pci_class) {
+        for &bit in card_data::not_vga_clears() {
+            features::set(record, features::bit("not VGA-compatible", usize::from(bit)), false);
+        }
+    }
+    for feature in KEPT_CLEAR {
+        features::set(record, feature, false);
+    }
+    set_features(record, facts);
+    features::set(
+        record,
+        features::LOCAL_MEMORY_ALLOWS_4KB,
+        facts.local_memory && facts.local_memory_small_pages,
+    );
+
+    built.defaults.extend([
+        workarounds::GUEST_SETTINGS_DEFAULT,
+        PCI_CAPABILITIES_DEFAULT,
+        DISPLAY_FUSES_DEFAULT,
+        CPU_DEFAULT,
+    ]);
+    if platform.product_family >= FUSE_WORD_FROM_FAMILY {
+        built.defaults.push(FUSE_WORD_DEFAULT);
+    }
+    if SUBSYSTEM_DEVICES.contains(&platform.device_id) {
+        built.defaults.push(SUBSYSTEM_DEFAULT);
+    }
+    built.feature_bits = feature_bits(record);
+    built
 }
 
 /// The flags this backend sets: the memory model the core offers, hardware scheduling, Xe2's
-/// tiling where the card has it, the engines the card has and the preemption Xe2 has. Compression is always off.
+/// tiling where the card has it, the engines the card has and the preemption Xe2 has. Compression
+/// is always off. On a card the kernel driver's data covers these go on top of its table, and where
+/// they differ from it the comment says so.
 ///
 /// Five-level page tables are on only when the card has the address bits for them. The core's
 /// addresses stop at 1 TiB, so a guest told it has five levels still never gets an address that
@@ -485,23 +725,29 @@ fn set_features(record: &mut [u8], facts: &RecordFacts) {
         (features::WDDM2_GPU_MMU, true),
         (features::WDDM2_64KB_PAGES, true),
         // The core's GPU addresses stop at 1 TiB, below where a process's own pointers live, so the
-        // GPU can't share them.
+        // GPU can't share them. A real card says both.
         (features::SVM, false),
         (features::WDDM2_SVM, false),
         (features::LOCAL_MEMORY, facts.local_memory),
         (features::TILE_Y, false),
         (features::HW_SEMAPHORE_64, false),
+        // The kernel driver's own table leaves this clear; Windows sets it later for a card that
+        // schedules in hardware, as every card here is offered to the guest.
         (features::HW_SCHEDULING, true),
         (features::XE2_TILING, facts.xe2_tiling),
+        // A real Xe2 or Xe3 card says this whatever xe gives.
         (features::PML5, facts.address_bits >= FIVE_LEVEL_ADDRESS_BITS),
         (features::WALKER_MTP, compute),
+        // The engines are the ones xe gives. Alchemist G10's table has no compute ring, and every
+        // Alchemist table says more than one compute engine.
         (features::CCS_RING, compute),
         (features::CCS_NODE, compute),
         (features::CCS_MULTI_INSTANCE, facts.compute_engines > 1),
         (features::BLITTER_RING, facts.copy_engine),
         (features::GPGPU_MID_BATCH_PREEMPT, compute),
         (features::GPGPU_THREAD_GROUP_PREEMPT, compute),
-        // Compute-runtime takes mid-thread preemption to be the walker's.
+        // Compute-runtime takes mid-thread preemption to be the walker's. The kernel driver's own
+        // table leaves this clear.
         (features::GPGPU_MID_THREAD_PREEMPT, compute),
     ];
     for (feature, on) in flags {
@@ -510,6 +756,7 @@ fn set_features(record: &mut [u8], facts: &RecordFacts) {
     for feature in features::PIPELINE_LEVELS.into_iter().chain([features::OFFERED_DDI_VERSION]) {
         features::set(record, feature, true);
     }
+    // A real card says compression on every Xe2 and Xe3 card and most others.
     for feature in features::COMPRESSION {
         features::set(record, feature, false);
     }
@@ -624,6 +871,10 @@ pub(crate) mod tests {
             address_bits: 48,
             xe2_tiling: true,
             media_ip: Some(IpWord::new(20, 0, 0)),
+            subsystem: (0, 0),
+            pci_class: 0x03_0000,
+            hwconfig: Vec::new(),
+            local_memory_small_pages: false,
         }
     }
 
@@ -639,7 +890,7 @@ pub(crate) mod tests {
         assert_eq!(dword(&record, at::RENDER_CORE), Some(0x0C09));
         assert_eq!(word(&record, at::DEVICE_ID), Some(0x64A0));
         assert_eq!(word(&record, at::REVISION), Some(4));
-        assert_eq!(dword(&record, at::GT_TYPE), Some(18));
+        assert_eq!(dword(&record, at::GT_TYPE), Some(0), "GTTYPE_GT1, as the kernel driver gives it");
     }
 
     #[test]
@@ -791,9 +1042,10 @@ pub(crate) mod tests {
         2883:2 2888:2 2893:2 2896:8 2913:2 2920:2 2922:4 2924:8 2925:2 2927:2 2928:8 2930:8 2935:6 \
         2943:6 2948:4 2949:2 2950:8 2964:2 3024:1 3039:3 3040:5 3041:9";
     // What Intel's kernel driver gives the other cards in the tests below for the same inputs,
-    // with this backend's feature table (the newest Direct3D 11 interface version alone).
+    // with the feature table this record carries (the newest Direct3D 11 interface version alone).
+    // Lunar Lake's and Panther Lake's entry 2849 goes with a feature bit of their table.
 
-    /// 210 entries.
+    /// 211 entries.
     const LUNAR_LAKE: &str = "\
         91:1 427:1 535:1 705:1 830:1 876:1 925:1 926:1 957:1 968:1 982:1 984:1 1002:1 1022:1 1093:1 \
         1234:1 1249:1 1261:1 1316:1 1385:1 1398:1 1401:1 1402:1 1403:1 1404:1 1406:1 1407:1 1409:1 \
@@ -808,7 +1060,7 @@ pub(crate) mod tests {
         2755:8 2756:6 2757:2 2759:8 2760:4 2763:2 2764:6 2765:2 2768:4 2769:4 2771:2 2773:8 2774:8 \
         2776:4 2777:2 2779:8 2781:2 2782:2 2783:2 2784:2 2785:8 2788:8 2789:2 2790:4 2791:8 2792:2 \
         2793:2 2794:2 2796:8 2799:8 2802:2 2803:2 2811:2 2822:8 2825:8 2826:8 2827:2 2836:1 2838:1 \
-        2843:1 2847:1 2853:8 2854:2 2856:6 2858:8 2864:1 2865:1 2867:2 2869:2 2871:2 2873:8 2874:6 \
+        2843:1 2847:1 2849:1 2853:8 2854:2 2856:6 2858:8 2864:1 2865:1 2867:2 2869:2 2871:2 2873:8 2874:6 \
         2876:2 2877:2 2878:2 2882:4 2888:2 2893:2 2896:8 2899:4 2913:2 2922:4 2924:8 2927:2 2928:8 \
         2930:8 2935:6 2938:4 2943:6 2948:6 2949:2 2964:2 3014:2 3023:1 3024:1 3039:3 3040:5 3041:9";
     /// 248 entries.
@@ -832,7 +1084,7 @@ pub(crate) mod tests {
         2721:2 2733:8 2741:4 2742:8 2743:8 2753:8 2759:8 2774:8 2779:8 2791:8 2796:8 2799:8 2810:2 \
         2822:8 2827:2 2836:1 2839:1 2841:1 2842:1 2843:1 2857:2 2863:2 2865:1 2866:8 2874:6 2880:2 \
         2882:4 2896:8 2921:8 2922:4 2924:8 2928:8 2930:8 2968:8 3024:1 3039:3 3040:5 3041:9";
-    /// 147 entries.
+    /// 148 entries.
     const PANTHER_LAKE: &str = "\
         91:1 427:1 535:1 705:1 830:1 876:1 925:1 926:1 957:1 968:1 982:1 1002:1 1093:1 1234:1 1249:1 \
         1261:1 1316:1 1385:1 1398:1 1401:1 1402:1 1403:1 1404:1 1406:1 1407:1 1409:1 1410:1 1412:1 \
@@ -841,7 +1093,7 @@ pub(crate) mod tests {
         2751:4 2752:2 2755:8 2756:6 2760:4 2761:4 2763:2 2764:6 2768:4 2769:4 2772:8 2773:8 2774:8 \
         2777:2 2779:8 2781:2 2782:2 2783:2 2785:8 2788:8 2789:2 2792:2 2796:8 2797:4 2799:8 2801:8 \
         2802:2 2803:2 2804:2 2812:8 2819:2 2822:8 2825:8 2826:8 2828:4 2831:2 2832:4 2836:1 2838:1 \
-        2843:1 2847:1 2852:2 2853:8 2854:2 2858:8 2859:8 2862:8 2865:1 2869:2 2870:4 2871:2 2874:6 \
+        2843:1 2847:1 2849:1 2852:2 2853:8 2854:2 2858:8 2859:8 2862:8 2865:1 2869:2 2870:4 2871:2 2874:6 \
         2876:2 2877:2 2878:2 2879:8 2883:2 2885:4 2890:2 2891:4 2893:2 2896:8 2903:4 2907:4 2910:8 \
         2911:8 2913:2 2922:4 2924:8 2926:8 2927:2 2928:8 2930:8 2931:4 2935:6 2938:4 2940:4 2943:6 \
         2948:6 2949:2 2952:8 2964:2 2973:2 2977:8 2984:2 3005:8 3013:8 3014:2 3023:1 3030:1 3039:3 \
@@ -951,6 +1203,439 @@ pub(crate) mod tests {
         facts
     }
 
+    /// 8086:5690/rev0, its known bits and which are known.
+    const ALCHEMIST_G10_REV_0_DATA: DataTable = DataTable {
+        values: "\
+            a5d505000000020130405760a0310000000000001520f0075080c40d30e4008205080400200000000500000001000000 \
+            30f7c2ea0950693fc0c51088917780029601000000000000010000002000000000df23ec2e2400000600000005000000 \
+            f300193f00380038437cbb9154e31300bd1b5e609fb7c10722ef8ca43b84087803805803640040000cb7defcff0fee3b \
+            e400c7329f716fe0ffdf059e5f46046ce317fe3f3004800200000000000000001f800000000000002900000000000000 \
+            0100000006000000000000000000000000000000000000000000000000000000050000000000000001000000",
+        known: "\
+            a5dd05000001f70138575760a0310800000000001d20f0075080cc0d34f4418245a81400200100000500000001000000 \
+            30ffe6ea0b79797fc2c51088997780029601000200000000010000002000000000ff33ec3f2710000700000007000000 \
+            f301193f0038c03a57fcfbf157e31300bd1b5f60bff7c10722ef8de4bb8408f827905803640040004cb7deffff0fee3b \
+            e400c7f69f716feafffff59f5f66046cef17fe3f3004800200000000000000001f800100000000002900000000000000 \
+            01000000060000000600000000000000000000000000000000000000000000009d0000000000000001000000",
+    };
+
+    /// 8086:56a0/rev8, its known bits and which are known.
+    const ARC_A770_DATA: DataTable = DataTable {
+        values: "\
+            a5d505000000020130404760a0310000000000001520f0075080c40d30e4008205280400200000000500000001000000 \
+            30f7c2ea0950793fc2451088917780029601000000000000010000002000000000df23ec3f2700000700000005000000 \
+            f300193f00380038437cbb9154e31300bd1b5e609fb7c10722ef8ca43b84087803805803640040000cb7defcff0fee3b \
+            e400c7329f716fe0ffdf059e5f46046ce317fe3f3004800200000000000000001f800000000000002800000000000000 \
+            01000000060000000000000000000000000000000000000000000000000000009d0000000000000001000000",
+        known: "\
+            a5dd05000001f70138575760a0310800000000001d20f0075080cc0d34f4418245a81400200100000500000001000000 \
+            30ffe6ea0b79797fc2451088997780029601000200000000010000002000000000ff33ec3f2710000700000007000000 \
+            f301193f0038c03a57fcfbf157e31300bd1b5f60bff7c10722ef8de4bb8408f827905803640040004cb7deffff0fee3b \
+            e400c7f69f716feafffff59f5f66046cef17fe3f3004800200000000000000001f800100000000002900000000000000 \
+            01000000060000000600000000000000000000000000000000000000000000009d0000000000000001000000",
+    };
+
+    /// 8086:7d55/rev0, its known bits and which are known.
+    const METEOR_LAKE_7D55_DATA: DataTable = DataTable {
+        values: "\
+            34d50500000002412011cf60a0710000000000001d20800f5080ec1d37a4458aa4e8062a200000000100000001000000 \
+            30f7c2ea0950419bc005128891378006900a002000000000010000002000000000df23acdf2300000500000001000000 \
+            f30119fb073cd23a517cb9f17fe31300bd1bde608fb7c19f36ef8da43b84027827a66807a00040000c37c0bcff0fee3b \
+            e400c7323f716fe0ffdf059e5f46042ce317febf3000400200000000000000001f800000000000002900000000000000 \
+            0100000000000000000000000000000000000000000000000000000000000000e30300000000000000000000",
+        known: "\
+            35dd05000001f7413011df60a0710000000000001d20800f5080ec1d37f4458ae4e816aa200100000100000001000000 \
+            30ffe6ea0b7951dbc205128891378006900a002200000000010000002000000000ff33acff2310000500000003000000 \
+            f30119fb073cd23a57fcf9f17fe31300bd1bdf60bff7c19f36ef8de43b8402f827b67807a00040004c37c0bfff0fee3b \
+            e400c7f63f716feafffff5bf5f66042cef17febf3000400200000000000000001f800100000000002900000000000000 \
+            0100000000000000060000000000000000000000000000000000000000000000e30300000000000000000000",
+    };
+
+    /// 8086:7d51, its known bits and which are known.
+    const ARROW_LAKE_H_7D51_DATA: DataTable = DataTable {
+        values: "\
+            34d50500000002412011cf60a0710000000000001d20801f5080ec1d37a4418aa4e8062a200000000100000001000000 \
+            30f7c2ea0950519bc005128891378006900a002000000000010000002000000000df23acdf7300000100000001000000 \
+            f30119fb072eca3a517cb9f17fe31700bd1b5e608fb7c19f36ef8da43b8402f827a66807a80840000c37c0bcff0fee3b \
+            e400c7323f716fe0ffdf059e5f46042ce317febf3000400600000000000000001f800000000000002900000000000000 \
+            0100000000000000000000000000000000000000000000000000000000000000e30300000000000000000000",
+        known: "\
+            35dd05000001f7413011df60a0710000000000001d20801f5080ec1d37f4418aa4e816aa200100000100000001000000 \
+            30ffe6ea0b7951dbc005128891378006900a002200000000010000002000000000ff33acff7310000500000003000000 \
+            f30119fb072eca3a57fcf9f17fe31700bd1b5f60aff7c19f36ef8de43b8402f827b67807a8fe41004c37c0bfff0fee3b \
+            e400c7f63f716feafffff5bf5f66042cef17febf3000400600000000000000001f800100000000002900000000000000 \
+            0100000000000000060000000000000000000000000000000000000000000000e30300000000000000000000",
+    };
+
+    /// 8086:64a0, its known bits and which are known.
+    const LUNAR_LAKE_64A0_DATA: DataTable = DataTable {
+        values: "\
+            34d50500000002012031efe0ae774000000000001d20c0075080ec9d3dac7e8ae6e80426600000000100000001000000 \
+            30f7daea0950719bc705138891178066d10a003001000000010000002000000000df23c01f3304040800000001000000 \
+            f323191b2724ea3a517cb9f147e31700bd1bdee08fb1c11f72eb8da43b4c02f8e71f29eea10840000c37c0bcff0fee3b \
+            ec00c7321f716fe0ffdf059ebf4604ace1b7ff3f3060510600000000000000001f800000000000002900000000000000 \
+            0100000000000000000000000000000000000000000000000000000000000000e30300000000000000000000",
+        known: "\
+            b5dd05000001f7013871ffe0ae774800000000001d20d0075080ec9d3ffc7f8ae6e81626600100000100000001000000 \
+            30fffeea1b7971dbc707138891178066d10a003201000000010000002000000000ff33e07f3314040900000003000000 \
+            f32319fb2724ea3a57fcf9f14fe31700bd1bdfe0aff1c19f76ef8de43b4c02f8e71f39eea1fe41004cb7debfff0fee3b \
+            fc00c7f61f716feafffff5bfbf6604acedb7ff3f3060510600000000000000001f800100000000002900000000000000 \
+            0100000000000000060000000000000000000000000000000000000000000000e30300000000000000000000",
+    };
+
+    /// 8086:b080, its known bits and which are known.
+    const PANTHER_LAKE_B080_DATA: DataTable = DataTable {
+        values: "\
+            34d50500000002012031efe0ae774000000000001d20c01f50806c9d33ac7e8ae6e80626601100000100000001000000 \
+            30f7daea0950711bc7051388911f8066d10a003001000000010000002000000000df23c01f1304041800000001000000 \
+            f327191ba725ea3a517cb9f147e30f00bd1bdee08fb1c19f72eb8da43b4c02f8e71f21eea90850000c3fc0bcff0feefb \
+            ec00c7321f716fe0ffdf059ebf4004ace1b7ff3ff060514e00000000000000001f800000000000002900000000000000 \
+            0100000000000000000000000000000000000000000000000000000000000000e30200000000000000000000",
+        known: "\
+            b5dd05000001f7013871ffe0ae774880000000001d20d01f50806c9d33fc7f8ae6e81626601100000100000001000000 \
+            30fffeea1b79715bc7071388911f8066d10a00b201000000010000002000000000ff33e07f13140c1900000003000000 \
+            f32719fba725ea3a57fcf9f14fe30f00bd1bdfe0aff1c19f76ef8de43b4c12f8e79f35eea9fe51004cbfdebfff0feefb \
+            fc00c7f61f716feafffff5bfbf6404acedb7ff3ff060514e00000000000000001f800100000000002900000000000000 \
+            0100000000000000060000000000000000000000000000000000000000000000e30200000000000000000000",
+    };
+
+    /// 8086:fd80, its known bits and which are known.
+    const WILDCAT_LAKE_FD80_DATA: DataTable = DataTable {
+        values: "\
+            34d505000000c2002031efe0ae774000000000001d20c00750806c9d33ac668ac6a80626611100000100000001000000 \
+            30f7daea0950711bc7051388911f8066d10e003001000000010000002000000000df23c01d1304001800000001000000 \
+            f327191ba725ea3a517cb9f147e30f00bd1bde608fb1c19f72eb8da43b4c02e0e71f21eea90850000c3fc0bcff0feefb \
+            e400c7321f716fe0ffdf059ebe40042ce1b7ff3ff060510600000000000000001f800000000000002900000000000000 \
+            0100000000000000000000000000000000000000000000000000000000000000e30200000000000000000000",
+        known: "\
+            b5dd05000001f7013871ffe0ae774880000000001d20d00750806c9d33fc678ac6e81626611100000100000001000000 \
+            30fffeea1b79715bc7071388911f8066d10e003201000000010000002000000000ff33e07f1314081900000003000000 \
+            f32719fba725ea3a57fcf9f14fe30f00bd1bdf60aff1c19f76ef8de43b4c02f8e79f35eea9fe51004cbfdebfff0feefb \
+            fc00c7f61f716feafffff5bfbf64042cedb7ff3ff060510600000000000000001f800100000000002900000000000000 \
+            0100000000000000060000000000000000000000000000000000000000000000e30200000000000000000000",
+    };
+
+    /// A card's feature table as Intel's kernel driver gives it: the values of its known bits, and
+    /// which bits are known, in hex, the table's first byte first.
+    struct DataTable {
+        values: &'static str,
+        known: &'static str,
+    }
+
+    fn hex(text: &str) -> Vec<u8> {
+        let digits: Vec<u8> = text.bytes().filter(u8::is_ascii_hexdigit).collect();
+        digits
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    /// Every known bit where the record's table is not the driver's: (the driver's value, the
+    /// record's), by the bit's place in the table.
+    fn departures_from(record: &[u8], data: &DataTable) -> BTreeMap<usize, (bool, bool)> {
+        let (values, known) = (hex(data.values), hex(data.known));
+        assert_eq!((values.len(), known.len()), (card_data::TABLE_BYTES, card_data::TABLE_BYTES));
+        let is = |bytes: &[u8], at: usize| bytes[at / 8] >> (at % 8) & 1 == 1;
+        let table = &record[features::TABLE..];
+        (0..card_data::TABLE_BYTES * 8)
+            .filter(|&at| is(&known, at) && is(&values, at) != is(table, at))
+            .map(|at| (at, (is(&values, at), is(table, at))))
+            .collect()
+    }
+
+    fn place(feature: Feature) -> usize {
+        (feature.byte - features::TABLE) * 8 + usize::from(feature.bit)
+    }
+
+    /// A flag where the record departs from the driver's table: the flag, the driver's value and
+    /// the record's.
+    type Departure = (Feature, bool, bool);
+
+    /// The departures named: each flag, with the driver's value and the record's.
+    fn named(departures: &[Departure]) -> BTreeMap<usize, (bool, bool)> {
+        departures.iter().map(|&(feature, data, ours)| (place(feature), (data, ours))).collect()
+    }
+
+    /// The Direct3D 11 interface versions below 0x000B0023, the dword's five low bits, which a real
+    /// card offers and this record does not, as it offers the newest alone.
+    fn older_ddi_versions() -> Vec<Departure> {
+        (0..5)
+            .map(|n| (features::bit("an older Direct3D 11 interface version", 1408 + n), true, false))
+            .collect()
+    }
+
+    /// What every card's record departs from the driver's table in, where the driver says it.
+    fn always_departs() -> Vec<Departure> {
+        let mut departures = vec![
+            (features::SVM, true, false),
+            (features::COMPRESSION[1], true, false),
+            (features::TILE_MAPPED_RESOURCE, true, false),
+            (features::TRANSLATION_TABLE, true, false),
+            (features::USER_MODE_TRANSLATION_TABLE, true, false),
+            (features::NULL_PAGES, true, false),
+            (features::RENDER_COMPRESSION, true, false),
+            (features::DRIVER_FLR, true, false),
+            (features::GPGPU_MID_THREAD_PREEMPT, false, true),
+        ];
+        departures.extend(older_ddi_versions());
+        departures
+    }
+
+    fn unnamed(index: usize) -> Feature {
+        features::bit("unnamed", index)
+    }
+
+    /// The flags the driver's table doesn't know that this backend sets, by name.
+    fn assert_backends_own(record: &[u8], name: &str) {
+        for feature in [features::HW_SCHEDULING, features::WDDM2_64KB_PAGES, features::OFFERED_DDI_VERSION] {
+            assert!(features::is_set(record, feature), "{name}: {}", feature.name);
+        }
+        for feature in [features::WDDM2_SVM, features::HW_SEMAPHORE_64] {
+            assert!(!features::is_set(record, feature), "{name}: {}", feature.name);
+        }
+    }
+
+    fn with(mut facts: RecordFacts, change: impl FnOnce(&mut RecordFacts)) -> RecordFacts {
+        change(&mut facts);
+        facts
+    }
+
+    /// A discrete card: memory of its own, which takes 4 KiB pages only on Battlemage.
+    fn discrete(facts: RecordFacts, small_pages: bool) -> RecordFacts {
+        with(facts, |facts| {
+            facts.local_memory = true;
+            facts.local_memory_small_pages = small_pages;
+        })
+    }
+
+    fn older(facts: RecordFacts) -> RecordFacts {
+        with(facts, |facts| facts.xe2_tiling = false)
+    }
+
+    #[test]
+    fn every_family_gets_the_kernel_drivers_feature_table_but_where_this_record_departs() {
+        let xe2_departures = |memory: &[usize]| {
+            let mut departures = always_departs();
+            departures.extend([
+                (features::COMPRESSION[0], true, false),
+                (features::COMPRESSION[2], true, false),
+                (features::COMPRESSION[3], true, false),
+                (features::PML5, true, false),
+                (unnamed(684), true, false),
+            ]);
+            departures.extend(memory.iter().map(|&index| (unnamed(index), true, false)));
+            departures
+        };
+        let cards: [(&str, RecordFacts, &DataTable, Vec<Departure>); 7] = [
+            (
+                "Alchemist G10 at revision 0",
+                discrete(older(alchemist(0x5690, 0)), false),
+                &ALCHEMIST_G10_REV_0_DATA,
+                {
+                    let mut departures = always_departs();
+                    departures.extend([
+                        // Its compute engine is xe's to give, and xe gives one.
+                        (features::CCS_RING, false, true),
+                        (features::CCS_NODE, false, true),
+                        (features::CCS_MULTI_INSTANCE, true, false),
+                        (unnamed(435), true, false),
+                        (unnamed(445), true, false),
+                        (unnamed(462), true, false),
+                        (unnamed(463), true, false),
+                    ]);
+                    departures
+                },
+            ),
+            ("Arc A770 at revision 8", discrete(older(alchemist(0x56A0, 8)), false), &ARC_A770_DATA, {
+                let mut departures = always_departs();
+                departures.extend([
+                    (features::COMPRESSION[0], true, false),
+                    (features::COMPRESSION[2], true, false),
+                    // G10's table has no compute ring at any revision; xe gives this card one.
+                    (features::CCS_RING, false, true),
+                    (features::CCS_NODE, false, true),
+                    (features::CCS_MULTI_INSTANCE, true, false),
+                    (unnamed(435), true, false),
+                    (unnamed(445), true, false),
+                    (unnamed(462), true, false),
+                ]);
+                departures
+            }),
+            (
+                "Meteor Lake at revision 0",
+                with(
+                    older(card(1272, 0x7D55, IpWord::new(12, 70, 0), Some(IpWord::new(13, 0, 0)))),
+                    |facts| {
+                        facts.platform.revision = 0;
+                    },
+                ),
+                &METEOR_LAKE_7D55_DATA,
+                always_departs(),
+            ),
+            (
+                "Arrow Lake H",
+                older(card(1273, 0x7D51, IpWord::new(12, 74, 0), Some(IpWord::new(13, 0, 0)))),
+                &ARROW_LAKE_H_7D51_DATA,
+                {
+                    let mut departures = always_departs();
+                    departures.extend([
+                        (features::COMPRESSION[0], true, false),
+                        (unnamed(684), true, false),
+                        (unnamed(686), true, false),
+                    ]);
+                    departures
+                },
+            ),
+            (
+                "Lunar Lake",
+                card(1275, 0x64A0, IpWord::new(20, 4, 4), Some(IpWord::new(20, 0, 0))),
+                &LUNAR_LAKE_64A0_DATA,
+                xe2_departures(&[]),
+            ),
+            (
+                "Panther Lake",
+                card(1300, 0xB080, IpWord::new(30, 0, 4), Some(IpWord::new(30, 0, 0))),
+                &PANTHER_LAKE_B080_DATA,
+                xe2_departures(&[]),
+            ),
+            (
+                "Wildcat Lake",
+                card(1300, 0xFD80, IpWord::new(30, 3, 0), Some(IpWord::new(30, 2, 0))),
+                &WILDCAT_LAKE_FD80_DATA,
+                xe2_departures(&[]),
+            ),
+        ];
+        for (name, facts, data, departures) in cards {
+            let (record, telling) = build_telling(&facts);
+            assert_eq!(departures_from(&record, data), named(&departures), "{name}");
+            assert_backends_own(&record, name);
+            let CardData::Built(built) = telling.card_data else { panic!("{name} is covered") };
+            assert_eq!(built.feature_bits, feature_bits(&record), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_card_with_a_class_other_than_vga_loses_the_bit_that_says_it() {
+        let lunar_lake = card(1275, 0x64A0, IpWord::new(20, 4, 4), Some(IpWord::new(20, 0, 0)));
+        let vga = build(&lunar_lake);
+        let other = build(&with(lunar_lake, |facts| facts.pci_class = 0x03_8000));
+        let not_vga = features::bit("not VGA-compatible", 8);
+        assert!(features::is_set(&vga, not_vga) && !features::is_set(&other, not_vga));
+        assert_eq!(feature_bits(&vga), feature_bits(&other) + 1);
+    }
+
+    #[test]
+    fn the_platform_words_are_the_kernel_drivers() {
+        let read = |record: &[u8], at| dword(record, at).unwrap();
+        let lunar_lake =
+            with(card(1275, 0x64A0, IpWord::new(20, 4, 4), Some(IpWord::new(20, 0, 0))), |facts| {
+                facts.subsystem = (0x1028, 0x0C3B);
+            });
+        let record = build(&lunar_lake);
+        assert_eq!(read(&record, at::PLATFORM_TYPE), 2, "mobile");
+        assert_eq!(read(&record, at::DISPLAY_CORE), 0xF00, "display 20.00's");
+        assert_eq!(read(&record, at::RENDER_CORE), 0xC09);
+        assert_eq!(read(&record, at::MEDIA_CORE), 0x1000, "media 20.00's");
+        assert_eq!(read(&record, at::GT_TYPE), 0);
+        assert_eq!(read(&record, at::PCH_FAMILY), 0, "left as it was");
+        assert_eq!(
+            (word(&record, at::SUBSYSTEM_VENDOR), word(&record, at::SUBSYSTEM)),
+            (Some(0x1028), Some(0x0C3B))
+        );
+        assert_eq!(read(&record, at::DISPLAY_IP), IpWord::new(20, 0, 0).0, "the platform's, at revision 0");
+        assert_eq!(read(&record, at::MEDIA_IP), IpWord::new(20, 0, 0).0);
+        assert_eq!(word(&record, at::REVISION_AGAIN), Some(4));
+        assert_eq!(read(&record, at::DISPLAY_IP_CORE), 0xF00);
+        for slot in 0..4 {
+            assert_eq!(read(&record, at::RENDER_IP_CORES + slot * 4), 0xC09);
+            assert_eq!(read(&record, at::MEDIA_IP_CORES + slot * 4), 0x1000);
+        }
+        let a770 = build(&discrete(older(alchemist(0x56A0, 8)), false));
+        assert_eq!((read(&a770, at::PLATFORM_TYPE), read(&a770, at::DISPLAY_CORE)), (1, 0x11), "desktop");
+        assert_eq!(read(&a770, at::DISPLAY_IP), 0, "Alchemist has no IP versions");
+        assert_eq!(read(&a770, at::DISPLAY_IP_CORE), 0, "nor per-IP cores");
+        let meteor_lake =
+            build(&older(card(1272, 0x7D55, IpWord::new(12, 70, 0), Some(IpWord::new(13, 0, 0)))));
+        assert_eq!(
+            (read(&meteor_lake, at::DISPLAY_CORE), read(&meteor_lake, at::MEDIA_CORE)),
+            (0xE00, 0xD00)
+        );
+    }
+
+    #[test]
+    fn a_media_ip_the_data_has_no_core_for_leaves_it_at_zero_and_says_so() {
+        let facts = card(1275, 0x64A0, IpWord::new(20, 4, 4), Some(IpWord::new(20, 9, 0)));
+        let (record, telling) = build_telling(&facts);
+        assert_eq!(dword(&record, at::MEDIA_CORE), Some(0));
+        assert_eq!(dword(&record, at::MEDIA_IP), Some(IpWord::new(20, 9, 0).0));
+        let CardData::Built(built) = telling.card_data else { panic!("covered") };
+        assert_eq!(built.unknown, ["the media core of media 20.09"]);
+        assert!(built.to_string().ends_with(" unknown=\"the media core of media 20.09\""));
+    }
+
+    #[test]
+    fn every_hwconfig_key_goes_where_the_kernel_driver_puts_it_and_wins() {
+        let facts = with(facts(), |facts| {
+            facts.gt.max_eu_per_subslice = 16;
+            facts.hwconfig = vec![(46, 2048), (60, 26), (11, 4), (25, 2), (71, 8), (68, 768), (999, 7)];
+        });
+        let (record, telling) = build_telling(&facts);
+        let read = |at| dword(&record, at).unwrap();
+        assert_eq!(read(0x2180), 2048, "ray tracing stacks per core");
+        assert_eq!(read(0x22FC), 26, "bindless surface offset bits");
+        assert_eq!(read(0x219C), 4, "memory type");
+        assert_eq!((read(0x21A8), read(0x239C)), (2, 2), "the most video engines, in both places");
+        assert_eq!(read(at::MAX_EU_PER_SUBSLICE), 8, "the key, over what was worked out without it");
+        let CardData::Built(built) = telling.card_data else { panic!("covered") };
+        assert_eq!(built.hwconfig_keys, 5, "two keys have no place in the record");
+    }
+
+    #[test]
+    fn the_log_line_names_the_platform_the_bits_and_the_defaults() {
+        let (record, telling) = build_telling(&facts());
+        let CardData::Built(built) = telling.card_data else { panic!("covered") };
+        assert_eq!(
+            built.to_string(),
+            format!(
+                "platform=\"Lunar Lake\" device=0x64a0 pci_rev=0x04 bits={} hwconfig_keys=0 defaults=\"display IP by \
+                 platform, display revision 0, the guest's Windows settings, PCI capabilities as the platform's cards \
+                 have them, every display pipe present, a CPU that is not a Xeon, a fuse word xe doesn't report, as \
+                 zero\"",
+                feature_bits(&record)
+            )
+        );
+        let arrow_lake = older(card(1273, 0x7D51, IpWord::new(12, 74, 0), Some(IpWord::new(13, 0, 0))));
+        let CardData::Built(built) = build_telling(&arrow_lake).1.card_data else { panic!("covered") };
+        assert!(built.defaults.contains(&SUBSYSTEM_DEFAULT) && !built.defaults.contains(&FUSE_WORD_DEFAULT));
+    }
+
+    #[test]
+    fn a_device_the_data_does_not_list_keeps_this_backends_own_feature_table_and_platform_words() {
+        // A Battlemage device the data has no table for, with a hwconfig key it would copy.
+        let facts = with(card(1274, 0xE20D, IpWord::new(20, 1, 0), Some(IpWord::new(13, 1, 1))), |facts| {
+            facts.subsystem = (0x8086, 0x1100);
+            facts.hwconfig = vec![(46, 2048)];
+            facts.local_memory = true;
+            facts.local_memory_small_pages = true;
+        });
+        let (record, telling) = build_telling(&facts);
+        assert_eq!(
+            telling.card_data,
+            CardData::Uncovered { device: 0xE20D, revision: 4, feature_bits: feature_bits(&record) }
+        );
+        // The memory model's three, hardware scheduling, Xe2's tiling, the engines' and preemption's
+        // seven, memory on the card, the four pipeline levels and the one interface version.
+        assert_eq!(feature_bits(&record), 18, "this backend's flags alone");
+        assert!(!features::is_set(&record, features::LOCAL_MEMORY_ALLOWS_4KB));
+        assert_eq!(dword(&record, at::GT_TYPE), Some(18));
+        assert_eq!(dword(&record, at::DISPLAY_CORE), Some(0x0C09), "the generation's");
+        for at in
+            [at::SUBSYSTEM_VENDOR, at::MEDIA_CORE, at::DISPLAY_IP, at::MEDIA_IP, at::DISPLAY_IP_CORE, 0x2180]
+        {
+            assert_eq!(dword(&record, at), Some(0), "{at:#x}");
+        }
+    }
+
     #[test]
     fn the_arc_b580_gets_the_table_intels_kernel_driver_gives_it() {
         let b580 = card(1274, 0xE20B, IpWord::new(20, 1, 0), Some(IpWord::new(13, 1, 1)));
@@ -983,7 +1668,7 @@ pub(crate) mod tests {
         assert_eq!(ours, real);
         assert_eq!(features::workaround(&record, 2964), Some(2), "the render cache's RHWO kept off");
         assert_eq!(record[0x96A] & 0xF, 0x02, "the low half of the byte Direct3D 11 tests");
-        let Outcome::Built(built) = outcome else { panic!("the B580 is covered") };
+        let Outcome::Built(built) = outcome.workarounds else { panic!("the B580 is covered") };
         assert_eq!(built.entries, 194);
     }
 
@@ -1020,7 +1705,7 @@ pub(crate) mod tests {
     fn a_card_whose_ip_the_data_does_not_cover_keeps_only_this_backends_entries() {
         let unknown = card(1274, 0xE20B, IpWord::new(20, 9, 0), Some(IpWord::new(13, 1, 1)));
         let (record, outcome) = build_telling(&unknown);
-        assert_eq!(outcome, Outcome::Uncovered("render 20.09".into()));
+        assert_eq!(outcome.workarounds, Outcome::Uncovered("render 20.09".into()));
         assert_eq!(table_of(&record), BTreeMap::from([(535, 1), (968, 1)]));
     }
 

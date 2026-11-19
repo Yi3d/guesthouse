@@ -1,9 +1,10 @@
 //! The feature bits of the adapter record that this backend sets or clears.
 //!
 //! The record carries a feature table, a long run of one-bit flags saying what the hardware can do.
-//! Only the flags whose place is known are here, under gmmlib's names. The rest of the table stays zero.
-//! The table's workaround counterpart is set entry by entry with [`set_workaround`], from
-//! [`super::workarounds`].
+//! For a card Intel's kernel driver knows, the table is that driver's, [`super::card_data`], with
+//! the flags here set or cleared by this backend on top. The flags here are under gmmlib's names;
+//! a card the data doesn't list gets these alone and the rest of the table stays zero. The table's
+//! workaround counterpart is set entry by entry with [`set_workaround`], from [`super::workarounds`].
 
 /// One flag: the byte it is in, counted from the start of the record, and its bit there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,14 @@ pub struct Feature {
 const fn at(name: &'static str, word: usize, bit: usize) -> Feature {
     Feature { name, byte: word + bit / 8, bit: (bit % 8) as u8 }
 }
+
+/// The flag at bit `index` of the table, counting from its first byte's lowest bit.
+pub const fn bit(name: &'static str, index: usize) -> Feature {
+    at(name, WORD_FIRST, index)
+}
+
+/// Where the table starts in the record.
+pub const TABLE: usize = WORD_FIRST;
 
 /// Where three words of the table start.
 const WORD_FIRST: usize = 0x2B4;
@@ -56,6 +65,18 @@ pub const XE2_TILING: Feature = at("FtrXe2PlusTiling", WORD_C, 0);
 pub const PML5: Feature = at("FtrPml5Support", WORD_C, 16);
 /// The walker's mid-thread preemption.
 pub const WALKER_MTP: Feature = at("FtrWalkerMTP", WORD_B, 19);
+/// Tiled resources mapped through the page tables, the hardware's translation table for them, that
+/// table kept by the user-mode driver, and page-table entries that map nothing.
+pub const TILE_MAPPED_RESOURCE: Feature = at("FtrTileMappedResource", WORD_B, 29);
+pub const TRANSLATION_TABLE: Feature = at("FtrTranslationTable", WORD_B, 30);
+pub const USER_MODE_TRANSLATION_TABLE: Feature = at("FtrUserModeTranslationTable", WORD_B, 31);
+pub const NULL_PAGES: Feature = at("FtrNullPages", WORD_B, 32);
+/// Memory on the card that may be mapped in 4 KiB pages.
+pub const LOCAL_MEMORY_ALLOWS_4KB: Feature = at("FtrLocalMemoryAllows4KB", WORD_C, 4);
+/// The kernel driver's own reset of the function.
+pub const DRIVER_FLR: Feature = at("FtrDriverFLR", WORD_C, 40);
+/// Render compression of surfaces the display shows.
+pub const RENDER_COMPRESSION: Feature = bit("FtrRendComp", 969);
 /// Preemption of compute work at a batch boundary, a thread group boundary and mid-thread.
 pub const GPGPU_MID_BATCH_PREEMPT: Feature = at("FtrGpGpuMidBatchPreempt", WORD_B, 9);
 pub const GPGPU_THREAD_GROUP_PREEMPT: Feature = at("FtrGpGpuThreadGroupLevelPreempt", WORD_B, 10);
@@ -133,7 +154,8 @@ pub fn is_set(record: &[u8], feature: Feature) -> bool {
 /// The one newer Direct3D 11 interface version the record offers: the newest, which carries the
 /// hardware-queue callbacks the compositor needs. With the older ones as well, Intel's OpenGL driver
 /// takes the pixel format and then divides by zero making a context; with this one alone it stays
-/// out and OpenGL falls back to Microsoft's, as it did before any were offered.
+/// out and OpenGL falls back to Microsoft's, as it did before any were offered. A real card offers
+/// every version, the five below 0x000B0023 too.
 pub const OFFERED_DDI_VERSION: Feature = DDI_VERSIONS[DDI_VERSIONS.len() - 1];
 
 #[cfg(test)]
@@ -183,6 +205,13 @@ mod tests {
             PIPELINE_LEVELS[1],
             PIPELINE_LEVELS[2],
             PIPELINE_LEVELS[3],
+            TILE_MAPPED_RESOURCE,
+            TRANSLATION_TABLE,
+            USER_MODE_TRANSLATION_TABLE,
+            NULL_PAGES,
+            LOCAL_MEMORY_ALLOWS_4KB,
+            DRIVER_FLR,
+            RENDER_COMPRESSION,
         ];
         for (at, one) in all.iter().enumerate() {
             for other in &all[at + 1..] {
@@ -191,6 +220,19 @@ mod tests {
         }
         assert_eq!((HW_SCHEDULING.byte, HW_SCHEDULING.bit), (0x2EC + 6, 1));
         assert_eq!((BLITTER_RING.byte, BLITTER_RING.bit), (0x2B4 + 1, 6));
+        // By their bit in the table, as the data counts them.
+        for (feature, index) in [
+            (TILE_MAPPED_RESOURCE, 413),
+            (TRANSLATION_TABLE, 414),
+            (USER_MODE_TRANSLATION_TABLE, 415),
+            (NULL_PAGES, 416),
+            (LOCAL_MEMORY_ALLOWS_4KB, 452),
+            (DRIVER_FLR, 488),
+            (SVM, 411),
+            (HW_SCHEDULING, 497),
+        ] {
+            assert_eq!(feature, bit(feature.name, index), "{}", feature.name);
+        }
     }
 
     #[test]

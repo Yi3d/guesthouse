@@ -205,11 +205,17 @@ fn display_ip(card: &Card) -> Option<(u16, u16)> {
     }
 }
 
+/// The display IP a platform's cards have, for the record's platform words, which xe doesn't report:
+/// the one the table is built from.
+pub fn platform_display_ip(product_family: u32, device_id: u16) -> Option<(u16, u16)> {
+    display_ip(&Card { product_family, device_id, ..Card::default() })
+}
+
 /// The default for an input Linux can't give.
-const DISPLAY_IP_DEFAULT: &str = "display IP by platform";
-const DISPLAY_REVISION_DEFAULT: &str = "display revision 0";
+pub const DISPLAY_IP_DEFAULT: &str = "display IP by platform";
+pub const DISPLAY_REVISION_DEFAULT: &str = "display revision 0";
 const DISPLAY_AUX_DEFAULT: &str = "second display revision 0";
-const GUEST_SETTINGS_DEFAULT: &str = "the guest's Windows settings";
+pub const GUEST_SETTINGS_DEFAULT: &str = "the guest's Windows settings";
 
 /// The table as nibbles, one per entry, and the inputs it was read at.
 struct Table {

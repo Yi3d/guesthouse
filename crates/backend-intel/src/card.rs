@@ -12,6 +12,9 @@ use guesthouse_backend::AdapterEngines;
 use std::fs::{File, OpenOptions};
 use std::io;
 
+/// The smallest page a GPU maps, 4 KiB.
+const SMALL_PAGE: u32 = 0x1000;
+
 /// What the card and its driver say about themselves.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CardFacts {
@@ -107,6 +110,13 @@ impl CardFacts {
     /// How much of the card's own memory the processor can reach, in bytes.
     pub fn reachable_card_memory(&self) -> u64 {
         self.card_regions().map(|region| region.cpu_visible).sum()
+    }
+
+    /// Whether memory on the card takes 4 KiB pages: xe gives every region of it that size as its
+    /// least. A card with none has no such memory.
+    pub fn small_pages_on_card(&self) -> bool {
+        let mut regions = self.card_regions().peekable();
+        regions.peek().is_some() && regions.all(|region| region.min_page_size <= SMALL_PAGE)
     }
 
     fn card_regions(&self) -> impl Iterator<Item = &MemoryRegion> {

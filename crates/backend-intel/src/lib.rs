@@ -89,8 +89,8 @@ pub struct IntelBackend {
     generation: &'static Generation,
     facts: AdapterFacts,
     record: Vec<u8>,
-    /// How the record's workaround table was built, for the log.
-    workarounds: protocol::workarounds::Outcome,
+    /// How the record's parts that come from data were built, for the log.
+    telling: record::Telling,
     books: Books,
     traffic: Traffic,
     started: Instant,
@@ -125,7 +125,7 @@ impl IntelBackend {
             ));
         }
         let shared = card.system_memory() / SHARED_MEMORY_PART;
-        let (record, workarounds) = record::build_telling(&record_facts(&card, generation, shared));
+        let (record, telling) = record::build_telling(&record_facts(&card, generation, shared));
         // A card with memory of its own offers that; one without offers its share of the system's.
         let own = card.card_memory();
         let video_memory = if own > 0 { own } else { shared };
@@ -146,7 +146,7 @@ impl IntelBackend {
             generation,
             facts,
             record,
-            workarounds,
+            telling,
             books: Books::default(),
             traffic: Traffic::default(),
             started: Instant::now(),
@@ -238,7 +238,15 @@ impl IntelBackend {
         if urb.vertex.max == 0 {
             log::warn!("{PREFIX} record-urb-unknown \"the card's hwconfig gives no URB entry limits\"");
         }
-        match &self.workarounds {
+        match &self.telling.card_data {
+            record::CardData::Built(built) => log::info!("{PREFIX} record-features {built}"),
+            record::CardData::Uncovered { device, revision, feature_bits } => log::warn!(
+                "{PREFIX} record-features-uncovered device={device:#06x} pci_rev={revision:#04x} bits={feature_bits} \
+                 \"the kernel driver's data has no feature table for this card, so the feature table, platform \
+                 words and hwconfig fields are this backend's own\""
+            ),
+        }
+        match &self.telling.workarounds {
             protocol::workarounds::Outcome::Built(built) => {
                 log::info!("{PREFIX} record-workarounds {built}");
                 for part in &built.uncovered {
@@ -254,7 +262,8 @@ impl IntelBackend {
             ),
         }
         log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
-        for gap in gaps::unset(shape::filled(&self.record)) {
+        let from_data = matches!(self.telling.card_data, record::CardData::Built(_));
+        for gap in gaps::unset(shape::filled(&self.record), from_data) {
             log::info!("{PREFIX} record-gap \"{gap}\"");
         }
         if self.card.config.has_vram() {
@@ -504,6 +513,15 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         address_bits: card.config.va_bits,
         xe2_tiling: generation.xe2_tiling,
         media_ip: card.media_gt().map(|gt| ip(Some(gt))),
+        subsystem: (card.pci.subsystem_vendor, card.pci.subsystem_device),
+        pci_class: card.pci.class,
+        hwconfig: card
+            .hwconfig
+            .entries
+            .iter()
+            .filter_map(|entry| Some((entry.key, *entry.values.first()?)))
+            .collect(),
+        local_memory_small_pages: card.small_pages_on_card(),
     }
 }
 

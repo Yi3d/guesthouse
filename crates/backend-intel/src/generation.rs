@@ -42,6 +42,9 @@ pub struct Generation {
     /// PLATFORM_TYPE.
     pub platform_type: u32,
     /// GTTYPE. Newer platforms leave it undefined.
+    ///
+    /// The display core, the platform type and the GT type are the record's only for a card the
+    /// kernel driver's data doesn't list: one it lists gets that driver's, [`crate::protocol::card_data`].
     pub gt_type: u32,
     /// Hardware threads in each EU, for a card whose hwconfig doesn't say.
     pub threads_per_eu: u32,
