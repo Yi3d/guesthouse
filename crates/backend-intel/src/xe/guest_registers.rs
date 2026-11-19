@@ -26,7 +26,7 @@ const fn plain(register: u32, value: u32) -> GuestWrite {
 
 /// What the guest's driver writes at the start of its render work, in its order. The register at
 /// 0x6204 it also sets to 0x20202020 in most later batches.
-pub const RENDER_WRITES: [GuestWrite; 12] = [
+pub const RENDER_WRITES: [GuestWrite; 13] = [
     masked(0x20D8, 0x0010_0010),
     masked(0x20E4, 0x0006_0000),
     masked(0x20EC, 0x8000_0000),
@@ -39,6 +39,9 @@ pub const RENDER_WRITES: [GuestWrite; 12] = [
     masked(0x7010, 0x4000_4000),
     plain(0x221C, 0x0000_0001),
     plain(0x23B4, 0x0000_0010),
+    // With the card's whole feature table in the record the driver sets its preemption choice
+    // here, where it set 0x20E4 and 0x20EC before.
+    masked(0x2580, 0x8006_8004),
 ];
 
 /// What a read leaves in memory when the register can't be read: nothing is written over this.
