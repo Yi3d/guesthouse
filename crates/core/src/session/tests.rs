@@ -1376,6 +1376,20 @@ mod mappings {
     }
 
     #[test]
+    fn a_range_comes_back_once_an_update_unmaps_the_guest_s_own_page_in_it() {
+        use super::address_reuse::{map_buffer, padded_buffer};
+        let mut session = session();
+        let (base, buffer, _) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        let (elsewhere, status) = map_buffer(&mut session, PROCESS);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(elsewhere, base);
+        let (sync, _, _) = create_fence(&mut session, 0);
+        update(&mut session, sync, 0, &[operation(1, base + 0x87_0000, 0x1_0000, 0, 0)]);
+        assert_eq!(map_buffer(&mut session, PROCESS), (base, SUCCESS));
+    }
+
+    #[test]
     fn an_update_copies_mappings_and_skips_holes() {
         let mut session = session();
         let (_, handle) = allocate(&mut session, private(0x2000));
@@ -2704,6 +2718,61 @@ mod address_reuse {
         assert_eq!(reserve(&mut session, 0x10000), reserved);
         let (_, handle) = allocate(&mut session, private(0x1000));
         assert_eq!(map(&mut session, handle, 0, 0, 0).0, mapped);
+    }
+
+    /// Intel's driver asks to map a page more than a buffer holds, then maps a page of its own over
+    /// that last page. Returns where the buffer went, its resource, and the page's resource.
+    pub(super) fn padded_buffer(session: &mut TestSession) -> (u64, u32, u32) {
+        let (buffer_resource, buffer) = allocate(session, private(0x87_0000));
+        let (base, status) = map(session, buffer, 0, 0, 0x880);
+        assert_eq!(status, SUCCESS);
+        let (pad_resource, pad) = allocate(session, private(0x1_0000));
+        assert_eq!(map(session, pad, base + 0x87_0000, 0, 0x10), (base + 0x87_0000, SUCCESS));
+        (base, buffer_resource, pad_resource)
+    }
+
+    /// A buffer as [`padded_buffer`] makes, mapped where the host chooses.
+    pub(super) fn map_buffer(session: &mut TestSession, process: u32) -> (u64, u32) {
+        let mut request = create_message(0, &[private(0x87_0000)]);
+        set_u32(&mut request, 8, process);
+        let reply = send(session, &request);
+        assert_eq!(status_of(&reply), SUCCESS);
+        let mut request = message(Command::MapGpuAddresses, 0x50);
+        set_u32(&mut request, 8, process);
+        set_u32(&mut request, 0x38, u32_at(&reply, 0x10).unwrap());
+        set_u64(&mut request, 0x48, 0x880);
+        let reply = send(session, &request);
+        (u64_at(&reply, 0).unwrap(), u32_at(&reply, 16).unwrap())
+    }
+
+    #[test]
+    fn a_range_with_the_guest_s_own_page_in_it_is_not_handed_out_again() {
+        let mut session = session();
+        let (base, buffer, _) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        let (address, status) = map_buffer(&mut session, PROCESS);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(address, base, "the guest's page is still at {:#x}", base + 0x87_0000);
+    }
+
+    #[test]
+    fn a_range_comes_back_once_the_guest_s_own_page_in_it_goes() {
+        let mut session = session();
+        let (base, buffer, pad) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        assert_eq!(map_buffer(&mut session, PROCESS).1, SUCCESS);
+        destroy(&mut session, pad, &[]);
+        assert_eq!(map_buffer(&mut session, PROCESS), (base, SUCCESS));
+    }
+
+    #[test]
+    fn the_guest_s_own_page_in_a_range_keeps_it_from_other_processes_too() {
+        let mut session = session();
+        let (base, buffer, _) = padded_buffer(&mut session);
+        destroy(&mut session, buffer, &[]);
+        let (address, status) = map_buffer(&mut session, PROCESS + 0x1000);
+        assert_eq!(status, SUCCESS);
+        assert_ne!(address, base, "an address handed out has to work in every space");
     }
 }
 

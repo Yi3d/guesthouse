@@ -8,7 +8,7 @@
 use super::{Handled, Session, answer_status};
 use crate::deferred::DeferredAction;
 use crate::gpu_addresses::{ALLOCATION_ALIGN, AddressUse, GPU_RANGES, Window};
-use crate::tables::ReservedRange;
+use crate::tables::{Mapping, ReservedRange};
 use guesthouse_backend::{Backend, GuestMemory, MemoryKind, RangeView, SpaceId};
 use guesthouse_messages::address::{ReserveRequest, freed_address};
 use guesthouse_messages::wire::{align_up, put_u64};
@@ -35,18 +35,31 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// they stay mapped in the backend until then.
     pub(super) fn taken_in(&self, space: SpaceId) -> Vec<(u64, u64)> {
         let reserved = self.reserved_addresses.iter().filter(|range| range.space == space);
-        let live = self.allocations.values().flat_map(|allocation| &allocation.mappings);
-        let freed = self.deferred.iter().filter_map(|item| match &item.action {
-            DeferredAction::FreeAllocation(freed) => Some(freed),
-            _ => None,
-        });
-        let waiting = freed.flat_map(|freed| &freed.mappings);
-        let mapped = live.chain(waiting).filter(|mapping| mapping.space == space);
+        let mapped = self.mappings_held().filter(|mapping| mapping.space == space);
         reserved
             .map(|range| (range.address, range.address + range.size))
             .chain(mapped.map(|mapping| (mapping.address, mapping.address + mapping.length)))
             .chain(self.gpu_addresses.host_ranges().iter().copied())
             .collect()
+    }
+
+    /// Every mapping still in the backend, in every space: the live ones, and those of allocations
+    /// whose free waits for the GPU.
+    fn mappings_held(&self) -> impl Iterator<Item = &Mapping> {
+        let live = self.allocations.values().flat_map(|allocation| &allocation.mappings);
+        let freed = self.deferred.iter().filter_map(|item| match &item.action {
+            DeferredAction::FreeAllocation(freed) => Some(freed),
+            _ => None,
+        });
+        live.chain(freed.flat_map(|freed| &freed.mappings))
+    }
+
+    /// What is mapped in any space, as (start, end), which new hand-outs step over. Addresses handed
+    /// out have to work in whichever space they end up in, and a guest maps pages of its own where it
+    /// likes, even inside a range that was handed out for something else.
+    pub(super) fn mapped_anywhere(&self) -> Vec<(u64, u64)> {
+        let mapped = self.mappings_held().filter(|mapping| mapping.length != 0);
+        mapped.map(|mapping| (mapping.address, mapping.address + mapping.length)).collect()
     }
 
     /// The exact range asked for, if it is in the ranges and free in this space.
@@ -66,7 +79,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// Somewhere in the window. Returns the address, and whether it was placed and not handed out.
     fn find_room(&mut self, window: Window, size: u64, space: SpaceId) -> Option<(u64, bool)> {
         let usage = AddressUse::Reserved;
-        if let Some(base) = self.gpu_addresses.take_within(size, ALLOCATION_ALIGN, usage, window) {
+        let mapped = self.mapped_anywhere();
+        if let Some(base) = self.gpu_addresses.take_clear_of(size, ALLOCATION_ALIGN, usage, window, &mapped) {
             return Some((base, false));
         }
         if !self.gpu_addresses.reaches(window) {

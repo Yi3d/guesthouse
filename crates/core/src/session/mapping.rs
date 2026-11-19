@@ -182,9 +182,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
     }
 
-    /// Addresses for a mapping the host places, inside the guest's window. New addresses are
-    /// handed out in order, so a window below the next new one is searched in this space alone,
-    /// and what is found there is placed, so nothing is handed out over it.
+    /// Addresses for a mapping the host places, inside the guest's window, clear of anything mapped
+    /// in any space. New addresses are handed out in order, so a window below the next new one is
+    /// searched in this space alone, and what is found there is placed, so nothing is handed out
+    /// over it.
     fn choose_address(
         &mut self,
         size: u64,
@@ -193,7 +194,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         window: Window,
         space: SpaceId,
     ) -> Option<u64> {
-        if let Some(base) = self.gpu_addresses.take_within(size, align, usage, window) {
+        let mapped = self.mapped_anywhere();
+        if let Some(base) = self.gpu_addresses.take_clear_of(size, align, usage, window, &mapped) {
             return Some(base);
         }
         let taken = self.taken_in(space);
