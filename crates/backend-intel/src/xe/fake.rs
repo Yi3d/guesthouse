@@ -251,6 +251,8 @@ struct State {
     /// How xe answers a queue keyed by binding table: see [`FakeXe::without_keying`] and
     /// [`FakeXe::refuse_keying`].
     keying_refused: Option<i32>,
+    /// Takes the property and sets nothing for it: see [`FakeXe::ignore_keying`].
+    keying_ignored: bool,
 }
 
 /// The register whose bit [`STATE_CACHE_PERF_FIX_OFF`] keys the render colour cache by binding
@@ -423,8 +425,8 @@ impl State {
         // The register is the queue's context's, so it reads as its queue was made.
         let bit = self.registers.values.entry(COMMON_SLICE_CHICKEN3).or_default();
         match queue.keying {
-            Keying::BindingTableAndIndex => *bit |= STATE_CACHE_PERF_FIX_OFF,
-            Keying::BindingIndex => *bit &= !STATE_CACHE_PERF_FIX_OFF,
+            Keying::BindingTableAndIndex if !self.keying_ignored => *bit |= STATE_CACHE_PERF_FIX_OFF,
+            _ => *bit &= !STATE_CACHE_PERF_FIX_OFF,
         }
         let vm = self.vms.get(&queue.vm);
         let mut outcome = match vm {
@@ -640,6 +642,12 @@ impl FakeXe {
     /// Refuses a queue keyed by binding table with `code`, and only such a queue.
     pub fn refuse_keying(&self, code: i32) {
         self.state().keying_refused = Some(code);
+    }
+
+    /// Takes a queue keyed by binding table and sets nothing for it, as a kernel whose property
+    /// doesn't reach the card would.
+    pub fn ignore_keying(&self) {
+        self.state().keying_ignored = true;
     }
 
     pub fn set_names_faults(&self, names: bool) {

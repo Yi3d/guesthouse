@@ -922,6 +922,7 @@ mod tests {
             failed: failed.len() as u32,
             skipped: 0,
             failed_steps: failed.iter().map(|step| (*step).to_owned()).collect(),
+            cache_keyed: false,
         }
     }
 
@@ -937,7 +938,7 @@ mod tests {
 
     #[test]
     fn a_failed_video_engine_copy_clock_or_cleanup_lets_work_run() {
-        for step in ["engine vcs0", "engine vecs0", "copy", "clock", "cleanup"] {
+        for step in ["engine vcs0", "engine vecs0", "copy", "clock", "cleanup", "render cache keying"] {
             assert_eq!(self_test_verdict(&summary_with(&[step])), Ok(()), "{step}");
         }
         assert_eq!(

@@ -3,7 +3,8 @@
 //! It makes a VM, three small pieces of memory of the kinds a guest's work uses (system memory, the
 //! card's own, and host pages of a shared file), binds them at the addresses a guest uses, runs one
 //! tiny batch on each engine class with a fence the card writes, copies with the copy engine, reads
-//! the engine clock, and frees everything. Each step prints `PASS`, `FAIL` with what the kernel
+//! the engine clock, makes a render queue with its colour cache keyed by binding table where xe
+//! offers that, and frees everything. Each step prints `PASS`, `FAIL` with what the kernel
 //! said, or `SKIP` with what it was waiting on, and a failed step doesn't stop the ones that don't
 //! need it.
 //!
@@ -45,6 +46,12 @@ const FENCE_OFFSET: u64 = 0x800;
 const COPY_OFFSET: u64 = 0x1_0000;
 /// Where the register reads land in the low host pages, past the copy: two dwords a write.
 const REGISTERS_OFFSET: u64 = 0x2_0000;
+/// Where the keyed render queue's store lands in the low host pages, and its register read after it.
+const KEYING_OFFSET: u64 = 0x2_1000;
+const KEYING_REGISTER_OFFSET: u64 = KEYING_OFFSET + 8;
+/// The register xe sets at the start of a render queue keyed by binding table, and the bit.
+const COMMON_SLICE_CHICKEN3: u32 = 0x7304;
+const STATE_CACHE_PERF_FIX_OFF: u32 = 1 << 13;
 
 /// How long a run that should finish at once is waited for.
 const RUN_PATIENCE: Duration = Duration::from_secs(2);
@@ -72,6 +79,9 @@ pub struct Summary {
     pub skipped: u32,
     /// The names of the steps that failed, in the order they ran.
     pub failed_steps: Vec<String>,
+    /// Whether the step `render cache keying` passed: xe made a render queue keyed by binding
+    /// table and ran a batch on it.
+    pub cache_keyed: bool,
 }
 
 impl Summary {
@@ -98,6 +108,7 @@ const ENGINES_WORK_NEEDS: [&str; 3] = ["engine rcs", "engine ccs", "engine bcs"]
 /// clock reading and the cleanup aren't among them, nor the break steps, nor `copy`: nothing on the
 /// work path sends its hand-written copy instruction (frame copies are the CPU's), so its failure
 /// is a warning only.
+/// Nor `render cache keying`: without it the guest's driver is told to flush for itself.
 const STEPS_WORK_NEEDS: [&str; 4] = ["vm", "buffers", "userptr", "binds"];
 
 /// Whether a failure of `step` keeps the guest's work off the card.
@@ -476,18 +487,26 @@ impl<'a> Run<'a> {
         if batch.map.write(0, &batch::bytes(dwords)) { Ok(()) } else { Err("the batch didn't fit".into()) }
     }
 
-    /// Sends the batch on a new queue of one engine and waits for it. Returns the queue.
+    /// Sends the batch on a new queue of one engine. Returns the queue.
     fn run_batch(
         &mut self,
         vm: u32,
         engine: EngineInstance,
         fence: Option<(u64, u64)>,
     ) -> Result<u32, String> {
+        self.run_batch_keyed(vm, engine, fence, Keying::BindingIndex)
+    }
+
+    fn run_batch_keyed(
+        &mut self,
+        vm: u32,
+        engine: EngineInstance,
+        fence: Option<(u64, u64)>,
+        keying: Keying,
+    ) -> Result<u32, String> {
         let done = self.done.ok_or("no sync object")?;
-        let queue = self
-            .xe
-            .create_queue(vm, engine, Keying::BindingIndex)
-            .map_err(|error| failed("making a queue", &error))?;
+        let queue =
+            self.xe.create_queue(vm, engine, keying).map_err(|error| failed("making a queue", &error))?;
         self.queues.push(queue);
         self.done_point += 1;
         let done = Point { timeline: done, point: self.done_point };
@@ -682,6 +701,88 @@ impl<'a> Run<'a> {
                 .collect();
             Ok(said.join(", "))
         })();
+        result.into()
+    }
+
+    /// A render queue with its colour cache keyed by binding table and index, made as the guest's
+    /// render queues are when this passes: a store and the fence, and a read of the register xe
+    /// sets for such a queue. A register a batch can't read is no failure, as many can't be; one
+    /// that reads without the bit is. The record tells the guest's driver the cache is keyed so
+    /// only when this passed: see [`Summary::cache_keyed`].
+    fn cache_keying(&mut self) -> Step {
+        if !self.card.config.offers_cache_keying() {
+            return Step::Skip("this kernel's xe doesn't offer it; Linux v7.1 and later do".into());
+        }
+        let engine = plan::one_engine_per_class(&self.card.engines)
+            .into_iter()
+            .find(|engine| engine.class == Engine::RENDER);
+        let Some(engine) = engine else {
+            return Step::Skip("the card lists no render engine".into());
+        };
+        let (Some(vm), Some(fence_at), true, true) =
+            (self.vm, self.fence_address(), self.host_low, self.batch_bound)
+        else {
+            return Step::Skip(
+                "needs the address space, the low host pages and the batch buffer bound".into(),
+            );
+        };
+        let mark = STORE_MARK | 0x4B;
+        let fence_value = FENCE_MARK | 0x4B;
+        let mut dwords = batch::store_qword(HOST_LOW + KEYING_OFFSET, mark).to_vec();
+        dwords.extend(batch::store_register(COMMON_SLICE_CHICKEN3, HOST_LOW + KEYING_REGISTER_OFFSET));
+        dwords.push(batch::BATCH_END);
+        let result = (|| -> Result<String, String> {
+            let mut host = self.host.as_ref().ok_or("no host pages")?.map();
+            let blank = [[0; 8].as_slice(), &guest_registers::UNREAD.to_le_bytes()].concat();
+            if !host.write(KEYING_OFFSET, &blank) {
+                return Err("the host pages hold no room for the store".into());
+            }
+            self.write_batch(&dwords)?;
+            let queue = self.run_batch_keyed(
+                vm,
+                engine,
+                Some((fence_at, fence_value)),
+                Keying::BindingTableAndIndex,
+            )?;
+            if !self.wait_done(RUN_PATIENCE)? {
+                return Err(format!("the batch had not finished after {RUN_PATIENCE:?}"));
+            }
+            match self.xe.queue_banned(queue) {
+                Ok(false) => {}
+                Ok(true) => return Err("xe banned the queue: its job faulted or hung".into()),
+                Err(error) => return Err(failed("asking whether the queue is banned", &error)),
+            }
+            self.close_queue(queue);
+            let fence = read_qword(&host, FENCE_OFFSET);
+            if fence != Some(fence_value) {
+                return Err(format!(
+                    "the card did not write the fence: {:#x} where {fence_value:#x} was expected",
+                    fence.unwrap_or(0)
+                ));
+            }
+            let stored = read_qword(&host, KEYING_OFFSET);
+            if stored != Some(mark) {
+                return Err(format!("the store did not land: read {:#x}", stored.unwrap_or(0)));
+            }
+            let mut read = [0; 4];
+            if !host.read(KEYING_REGISTER_OFFSET, &mut read) {
+                return Err("the register read could not be read back".into());
+            }
+            let register = u32::from_le_bytes(read);
+            if register == guest_registers::UNREAD {
+                Ok(format!("{COMMON_SLICE_CHICKEN3:#x} can't be read from a batch, so its bit isn't seen"))
+            } else if register & STATE_CACHE_PERF_FIX_OFF != 0 {
+                Ok(format!("{COMMON_SLICE_CHICKEN3:#x} reads {register:#x}, with the bit set"))
+            } else {
+                Err(format!(
+                    "xe made the queue and ran its batch, but {COMMON_SLICE_CHICKEN3:#x} reads {register:#x}, \
+                     without bit 13"
+                ))
+            }
+        })();
+        if result.is_ok() {
+            self.summary.cache_keyed = true;
+        }
         result.into()
     }
 
@@ -897,6 +998,7 @@ pub fn run(
     run.step("copy", Run::copy);
     run.step("clock", Run::clock);
     run.step("guest registers", Run::guest_registers);
+    run.step("render cache keying", Run::cache_keying);
     if options.break_steps {
         if confirm_break(input, run.out) {
             run.step("fault", Run::fault);
@@ -1008,13 +1110,84 @@ mod tests {
     }
 
     #[test]
+    fn a_render_queue_keyed_by_binding_table_is_made_and_run_where_xe_offers_it() {
+        let xe = FakeXe::default();
+        let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        let line = said.lines().find(|line| line.starts_with("PASS render cache keying")).expect("{said}");
+        assert!(line.ends_with("0x7304 can't be read from a batch, so its bit isn't seen"), "{line}");
+        assert!(summary.cache_keyed);
+        let keyed: Vec<Call> = xe
+            .calls_named("create_queue")
+            .into_iter()
+            .filter(|call| {
+                matches!(call, Call::CreateQueue { keying: abi::Keying::BindingTableAndIndex, .. })
+            })
+            .collect();
+        assert_eq!(keyed.len(), 1, "the step's own queue alone");
+        let Call::CreateQueue { engine, .. } = keyed[0] else { unreachable!() };
+        assert_eq!(engine.class, Engine::RENDER);
+        assert_eq!(xe.live(), 0);
+
+        // Where a batch can read the register, it is read with the bit xe set.
+        let xe = FakeXe::default();
+        xe.reach_registers(&[COMMON_SLICE_CHICKEN3]);
+        let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        assert!(
+            said.contains("PASS render cache keying")
+                && said.contains("0x7304 reads 0x2000, with the bit set")
+        );
+        assert!(summary.cache_keyed);
+    }
+
+    #[test]
+    fn a_kernel_without_the_keying_skips_it_and_one_that_refuses_it_fails_it_alone() {
+        let xe = FakeXe::default();
+        let (summary, said) = run_on(&xe, &card::tests::lunar_lake(), Options::default(), "");
+        assert!(said.contains("SKIP render cache keying: this kernel's xe doesn't offer it"), "{said}");
+        assert!(!summary.cache_keyed && summary.all_passed());
+        assert!(
+            !xe.calls().iter().any(|call| matches!(
+                call,
+                Call::CreateQueue { keying: abi::Keying::BindingTableAndIndex, .. }
+            ))
+        );
+
+        // The flag says yes, and the kernel turns the property down all the same.
+        let xe = FakeXe::default();
+        xe.without_keying();
+        let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        assert!(said.contains("FAIL render cache keying: making a queue:"), "{said}");
+        assert_eq!(summary.failed_steps, ["render cache keying"], "{said}");
+        assert!(!summary.cache_keyed && summary.failed_that_work_needs().is_empty());
+        assert_eq!(xe.live(), 0);
+    }
+
+    #[test]
+    fn a_keyed_queue_whose_register_reads_without_the_bit_fails_the_step() {
+        let xe = FakeXe::default();
+        xe.reach_registers(&[COMMON_SLICE_CHICKEN3]);
+        xe.ignore_keying();
+        let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
+        assert!(
+            said.contains(
+                "FAIL render cache keying: xe made the queue and ran its batch, but 0x7304 reads 0x0"
+            )
+        );
+        assert!(!summary.cache_keyed);
+    }
+
+    #[test]
     fn a_refused_user_fence_fails_each_engine_step_and_says_what_xe_said() {
         let xe = FakeXe::default();
         xe.fail("exec", libc::EOPNOTSUPP);
         let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
         assert!(said.contains("FAIL engine ccs0: sending the batch:"), "{said}");
         assert!(said.contains("this kernel's xe doesn't support it"), "{said}");
-        assert_eq!(summary.failed, 6, "four engines, the copy and the guest registers: {said}");
+        assert_eq!(
+            summary.failed, 7,
+            "four engines, the copy, the guest registers and the render cache keying: {said}"
+        );
+        assert!(!summary.cache_keyed);
         assert_eq!(xe.live(), 0);
     }
 
@@ -1023,7 +1196,15 @@ mod tests {
         let xe = FakeXe::default();
         xe.fail("exec", libc::EOPNOTSUPP);
         let (summary, said) = run_on(&xe, &card::tests::battlemage(), Options::default(), "");
-        let steps = ["engine rcs0", "engine bcs0", "engine vcs0", "engine ccs0", "copy", "guest registers"];
+        let steps = [
+            "engine rcs0",
+            "engine bcs0",
+            "engine vcs0",
+            "engine ccs0",
+            "copy",
+            "guest registers",
+            "render cache keying",
+        ];
         let mut in_order: Vec<String> = steps.iter().map(|step| (*step).to_owned()).collect();
         in_order.sort_by_key(|step| said.find(&format!("FAIL {step}:")));
         assert_eq!(summary.failed_steps, in_order, "{said}");
@@ -1031,9 +1212,12 @@ mod tests {
         assert_eq!(
             needed,
             ["engine rcs0", "engine bcs0", "engine ccs0"],
-            "all but the video engine, the copy and the guest registers"
+            "all but the video engine, the copy, the guest registers and the render cache keying"
         );
-        assert_eq!(summary.failed_that_work_does_without(), ["engine vcs0", "copy", "guest registers"]);
+        assert_eq!(
+            summary.failed_that_work_does_without(),
+            ["engine vcs0", "copy", "guest registers", "render cache keying"]
+        );
     }
 
     #[test]
