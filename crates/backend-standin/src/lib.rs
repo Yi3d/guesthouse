@@ -67,6 +67,8 @@ pub struct StandIn {
     /// Set to say that any two different driver protection values need different mappings.
     pub protections_differ: bool,
     pub preserved: Vec<(MemoryId, MemoryId, u64)>,
+    /// Set to say that video memory nothing has written reads as zero.
+    pub new_memory_is_zero: bool,
     pub copies: Vec<StagingCopy>,
     pub slot_copies: Vec<SlotCopy>,
     /// Copies that would have gone past what's mapped at their addresses, as an engine would run them.
@@ -166,6 +168,7 @@ impl StandIn {
             mapped_protections: Vec::new(),
             protections_differ: false,
             preserved: Vec::new(),
+            new_memory_is_zero: false,
             copies: Vec::new(),
             slot_copies: Vec::new(),
             copies_past_their_memory: Vec::new(),
@@ -335,6 +338,10 @@ impl Backend for StandIn {
 
     fn release_memory(&mut self, memory: MemoryId) {
         assert!(self.live_memory.remove(&memory), "{memory:?} was freed twice or never made");
+    }
+
+    fn new_video_memory_is_zero(&self) -> bool {
+        self.new_memory_is_zero
     }
 
     fn preserve_contents(

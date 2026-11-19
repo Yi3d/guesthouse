@@ -109,6 +109,18 @@ fn a_guests_first_steps_make_real_things_and_its_batch_is_sent_with_its_fence() 
         "the card is asked to write the guest's fence: {syncs:?}"
     );
     assert_eq!(session.memory().read_u64(fence), Ok(0), "and the host has not written it");
+
+    // Memory made and mapped after that work, and locked before any more, was written by nothing.
+    // It moves with no read of the card's memory, which is slow enough to stop the desktop.
+    session.memory_mut().write_u64(fence, 1).unwrap();
+    let _ = session.poll(std::time::Instant::now());
+    let fresh = u32_at(&allocate(&mut session, &render_target()), 0x10).unwrap();
+    set_u32(&mut map, 0x38, fresh);
+    assert_ne!(u64_at(&send(&mut session, &map), 0).unwrap(), 0);
+    let read_before = xe.calls_named("map_buffer").len();
+    set_u32(&mut lock, 0x1C, fresh);
+    assert_eq!(u32_at(&send(&mut session, &lock), 0), Ok(SUCCESS));
+    assert_eq!(xe.calls_named("map_buffer").len(), read_before, "the CPU never looked at the buffer");
 }
 
 #[test]

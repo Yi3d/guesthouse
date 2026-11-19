@@ -391,8 +391,16 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         }
     }
 
+    /// Notes that a queue's work may have written what is mapped in its address space.
+    fn space_written(&mut self, queue: u32) {
+        if let Some(record) = self.queues.get(&queue) {
+            *self.space_writes.entry(record.space).or_insert(0) += 1;
+        }
+    }
+
     /// Rings a doorbell. False if the backend refused it for now, and it must be rung again.
     fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) -> bool {
+        self.space_written(queue);
         match self.backend.ring_doorbell(queue, doorbell) {
             Ok(Doorbell::Rung) => {
                 self.timings.mark(Stage::Rung);
@@ -407,6 +415,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 self.timings.mark(Stage::Rung);
                 if let Some(record) = self.queues.get_mut(&queue) {
                     record.stays = true;
+                    self.ring_spaces.insert(record.space);
                 }
             }
             Ok(Doorbell::NotYet) => return false,
@@ -686,6 +695,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             WorkStart::Finished => GpuTook::Nothing,
             WorkStart::Ran => {
                 self.work_started += 1;
+                self.space_written(queue);
                 GpuTook::Nothing
             }
             WorkStart::Busy => GpuTook::NoRoom,
@@ -695,6 +705,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             }
             WorkStart::Started { doorbell, work } => {
                 self.work_started += 1;
+                self.space_written(queue);
                 self.queues.get_mut(&queue).expect("read above").last_fence = Some(value);
                 self.ring_or_hold(queue, doorbell, fence, value);
                 GpuTook::Work(work)

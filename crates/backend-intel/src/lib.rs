@@ -707,6 +707,11 @@ impl Backend for IntelBackend {
         }
     }
 
+    /// xe clears every buffer it makes, and each allocation here gets a buffer of its own.
+    fn new_video_memory_is_zero(&self) -> bool {
+        true
+    }
+
     fn read_memory_start(
         &mut self,
         _host: &mut dyn HostServices,

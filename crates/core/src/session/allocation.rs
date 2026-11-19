@@ -358,6 +358,17 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         true
     }
 
+    /// Whether nothing can have written an allocation's video memory: no work was started in any
+    /// address space since it was first mapped there, none of them runs work unseen, and it was
+    /// never mapped in the daemon's own space, where the daemon's copies write.
+    fn never_written(&self, handle: u32) -> bool {
+        self.allocations[&handle].mapped_at.iter().all(|(space, writes)| {
+            Some(*space) != self.own_space
+                && !self.ring_spaces.contains(space)
+                && self.space_writes.get(space).copied().unwrap_or(0) == *writes
+        })
+    }
+
     /// Gives the guest's CPU access. The first lock moves the allocation from video memory to pages
     /// shared with the guest, at the same GPU addresses.
     pub(super) fn lock_for_cpu(&mut self, message: &[u8], out: &mut Vec<u8>) -> Handled {
@@ -393,7 +404,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             lock_answer(Status::NO_MEMORY, 0, out);
             return Ok(());
         };
-        if used_before {
+        // Video memory nothing has written holds zeroes, and so do zeroed pages, without the copy.
+        let untouched = preserve && self.backend.new_video_memory_is_zero() && self.never_written(handle);
+        let started = Instant::now();
+        if used_before || untouched {
             // Another allocation's data must not reach this one.
             self.memory.zero(address, size)?;
         }
@@ -402,10 +416,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         let shared = self.adopt_guest_pages(host_address, pages_size)?;
         let has_mappings = !self.allocations[&handle].mappings.is_empty();
         let own = if has_mappings { Some(self.own_space()?) } else { None };
-        if let (true, Some(own)) = (preserve, own) {
+        if let (true, false, Some(own)) = (preserve, untouched, own) {
             let host = &mut super::services!(self);
             self.backend.preserve_contents(host, own, memory, shared, size)?;
         }
+        let copied = started.elapsed();
         for mapping in &self.allocations[&handle].mappings {
             self.log_unmap_in_flight("a first lock", mapping.address, mapping.length);
         }
@@ -437,6 +452,14 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         allocation.memory = Some(shared);
         allocation.guest_address = Some(address);
         self.backend.release_memory(memory);
+        if preserve {
+            log::debug!(
+                "first lock of {handle:#x}: {size:#x} bytes {} in {:.1} ms, {:.1} ms in all",
+                if untouched { "left as zeroes, as nothing had written them" } else { "copied" },
+                copied.as_secs_f64() * 1000.0,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         lock_answer(Status::SUCCESS, address, out);
         Ok(())
     }

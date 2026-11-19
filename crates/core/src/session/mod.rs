@@ -178,6 +178,12 @@ pub struct Session<B, M> {
     pub(crate) copies_refused: u64,
     /// Submissions that reached the GPU, which may have written any memory mapped for it since.
     pub(crate) work_started: u64,
+    /// For each address space, how many times something was started that may have written the
+    /// memory mapped in it. Work that never ends in a space puts it in `ring_spaces` instead.
+    pub(crate) space_writes: HashMap<SpaceId, u64>,
+    /// Address spaces where work has run that the guest feeds without a word here, so what it
+    /// writes and when is not known.
+    pub(crate) ring_spaces: HashSet<SpaceId>,
     /// How many queues of each address space have stopped answering since it last came off the GPU.
     pub(crate) failed_queues: HashMap<SpaceId, u32>,
     pub(crate) faults: FaultRate,
@@ -260,6 +266,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             unknown_commands: HashSet::new(),
             copies_refused: 0,
             work_started: 0,
+            space_writes: HashMap::new(),
+            ring_spaces: HashSet::new(),
             failed_queues: HashMap::new(),
             faults: FaultRate::new(),
             mapped_addresses: HashMap::new(),

@@ -43,6 +43,9 @@ pub struct Allocation {
     pub mappings: Vec<Mapping>,
     /// When it was first mapped, counting mapped allocations.
     pub first_mapped: Option<u64>,
+    /// Each address space it has ever been mapped in, with how much may have written through that
+    /// space when it first was. A mapping that goes leaves its entry, as what was written stays.
+    pub mapped_at: Vec<(SpaceId, u64)>,
     pub gpu_cached: bool,
     /// The guest made it to be shown, as DWM's buffers and a fullscreen program's are. Kept as the
     /// guest asked, whatever the answer said.

@@ -998,6 +998,66 @@ mod allocations {
         assert_eq!(lock(&mut session, written).0, Status::SUCCESS.0);
         assert_eq!(session.backend().preserved.len(), 1);
     }
+
+    /// A session whose work runs to the end at once, on a card whose new memory is zero.
+    fn on_zeroing_card() -> (TestSession, u32) {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        session.backend_mut().run_work_at_once = true;
+        session.backend_mut().new_memory_is_zero = true;
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        (session, queue)
+    }
+
+    #[test]
+    fn memory_nothing_wrote_since_it_was_mapped_moves_without_a_copy() {
+        let (mut session, queue) = on_zeroing_card();
+        submit(&mut session, queue, 1);
+        let (_, fresh) = allocate(&mut session, private(0x1000));
+        map(&mut session, fresh, 0, 0, 0);
+        let (status, address) = lock(&mut session, fresh);
+        assert_eq!(status, Status::SUCCESS.0);
+        assert!(session.backend().preserved.is_empty(), "the work ran before it was mapped");
+        let mut pages = [0xFFu8; 0x1000];
+        session.memory_mut().read_bytes(address, &mut pages);
+        assert_eq!(pages, [0u8; 0x1000], "and the guest reads what new video memory holds");
+    }
+
+    #[test]
+    fn memory_mapped_while_work_ran_is_copied_however_it_was_mapped_since() {
+        let (mut session, queue) = on_zeroing_card();
+        let (_, written) = allocate(&mut session, private(0x1000));
+        map(&mut session, written, 0, 0, 0);
+        submit(&mut session, queue, 1);
+        // A second mapping, made after the work, doesn't make the first one's time forgotten.
+        map(&mut session, written, 0, 0, 0);
+        assert_eq!(lock(&mut session, written).0, Status::SUCCESS.0);
+        assert_eq!(session.backend().preserved.len(), 1, "the work may have written it");
+    }
+
+    #[test]
+    fn memory_in_a_space_with_work_that_never_ends_is_always_copied() {
+        let (mut session, queue) = on_zeroing_card();
+        session.backend_mut().run_work_at_once = false;
+        session.backend_mut().work_stays = true;
+        submit(&mut session, queue, 1);
+        let (_, fresh) = allocate(&mut session, private(0x1000));
+        map(&mut session, fresh, 0, 0, 0);
+        assert_eq!(lock(&mut session, fresh).0, Status::SUCCESS.0);
+        assert_eq!(session.backend().preserved.len(), 1, "the ring writes without a word here");
+    }
+
+    #[test]
+    fn a_card_whose_new_memory_is_not_known_to_be_zero_is_always_copied() {
+        let (mut session, queue) = on_zeroing_card();
+        session.backend_mut().new_memory_is_zero = false;
+        submit(&mut session, queue, 1);
+        let (_, fresh) = allocate(&mut session, private(0x1000));
+        map(&mut session, fresh, 0, 0, 0);
+        assert_eq!(lock(&mut session, fresh).0, Status::SUCCESS.0);
+        assert_eq!(session.backend().preserved.len(), 1);
+    }
 }
 
 mod mappings {

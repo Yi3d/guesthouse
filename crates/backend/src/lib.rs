@@ -85,6 +85,12 @@ pub trait Backend: Sized {
         size: u64,
     ) -> Result<(), BackendError>;
 
+    /// Whether video memory nothing has written yet reads as zero. Then an allocation that moves
+    /// before anything could have written it needs no copy, as zeroed pages hold the same.
+    fn new_video_memory_is_zero(&self) -> bool {
+        false
+    }
+
     /// Reads the first bytes of memory the GPU may have written, for telling one buffer from
     /// another. It may wait a moment, like [`Backend::preserve_contents`], and nothing else needing
     /// the copy engine is running. At most one small page.

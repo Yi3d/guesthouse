@@ -171,6 +171,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             allocation.first_mapped = Some(self.mapped_so_far);
             self.mapped_so_far += 1;
         }
+        if !allocation.mapped_at.iter().any(|&(space, _)| space == mapping.space) {
+            let writes = self.space_writes.get(&mapping.space).copied().unwrap_or(0);
+            allocation.mapped_at.push((mapping.space, writes));
+        }
         allocation.mappings.push(mapping);
     }
 
