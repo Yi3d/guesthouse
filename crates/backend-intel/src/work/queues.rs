@@ -8,7 +8,7 @@
 use super::choices::{self, Rings};
 use super::{CardWork, engines};
 use crate::protocol::command_header::{Header, Length};
-use crate::xe::abi::Sync;
+use crate::xe::abi::{Keying, Sync};
 use crate::xe::batch::{self, Ending};
 use crate::xe::plan::{self, Backing, ExecVerdict, Point};
 use guesthouse_backend::{BackendError, CommandBuffer, Doorbell, HostServices, SpaceId, Work, WorkStart};
@@ -209,7 +209,7 @@ impl CardWork {
                         let vm = self.ring_vm(space).map_err(|error| Refused::Xe(error.to_string()))?;
                         let made = self
                             .xe
-                            .create_queue(vm, engine)
+                            .create_queue(vm, engine, Keying::BindingIndex)
                             .map_err(|error| Refused::Xe(error.to_string()))?;
                         self.queues.get_mut(&work.queue).expect("made above").ring = Some(made);
                         made
@@ -285,7 +285,7 @@ impl CardWork {
         engine: crate::xe::abi::EngineInstance,
     ) -> std::io::Result<(u32, u32)> {
         let done = self.xe.create_syncobj()?;
-        match self.xe.create_queue(vm, engine) {
+        match self.xe.create_queue(vm, engine, Keying::BindingIndex) {
             Ok(queue) => Ok((queue, done)),
             Err(error) => {
                 let _ = self.xe.destroy_syncobj(done);

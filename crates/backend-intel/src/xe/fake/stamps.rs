@@ -221,7 +221,9 @@ mod tests {
             (0..2).map(|i| buffer(&mut xe, vm, SLOT, 0x2000_0000 + i * 0x100_0000)).collect();
         let upload = buffer(&mut xe, vm, 0x1000, 0x3000_0000);
         let batch = buffer(&mut xe, vm, 0x1000, 0x3001_0000);
-        let queue = xe.create_queue(vm, abi::EngineInstance { class: 0, instance: 0, gt: 0 }).unwrap();
+        let queue = xe
+            .create_queue(vm, abi::EngineInstance { class: 0, instance: 0, gt: 0 }, abi::Keying::BindingIndex)
+            .unwrap();
 
         let mut map = xe.map_buffer(upload, 0x1000).unwrap();
         map.write(0x44, &as_the_driver_sends::stamp(Stamp { generation: 1, slot: 0 }));
@@ -248,7 +250,9 @@ mod tests {
         xe.stop_running();
         let vm = xe.create_vm(0).unwrap();
         let upload = buffer(&mut xe, vm, 0x1000, 0x3000_0000);
-        let queue = xe.create_queue(vm, abi::EngineInstance { class: 0, instance: 0, gt: 0 }).unwrap();
+        let queue = xe
+            .create_queue(vm, abi::EngineInstance { class: 0, instance: 0, gt: 0 }, abi::Keying::BindingIndex)
+            .unwrap();
         let mut map = xe.map_buffer(upload, 0x1000).unwrap();
         // As the guest did: 800x600 as generations 1 and 2, then 1920x1080 as generation 1 again,
         // each ring's stamps where the last ones were.

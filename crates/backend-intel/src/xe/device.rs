@@ -4,7 +4,7 @@
 //! [`XeCard`] is the real one. It packs each request with [`super::abi`], makes the call, and reads
 //! the answer. It decides nothing.
 
-use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync, VmFault};
+use super::abi::{self, BindOp, EngineInstance, Keying, NewBuffer, Sync, VmFault};
 use crate::ioctl::drm_ioctl;
 use crate::protocol::bytes::{dword, qword};
 use std::fs::File;
@@ -35,7 +35,9 @@ pub trait Xe {
     /// Changes a VM's mappings. With `signal` given the call returns at once and that point is
     /// signalled when the change is in place.
     fn bind(&mut self, vm: u32, op: &BindOp, signal: Option<Sync>) -> io::Result<()>;
-    fn create_queue(&mut self, vm: u32, engine: EngineInstance) -> io::Result<u32>;
+    /// Makes a queue of one engine in a VM. [`Keying::BindingTableAndIndex`] is for a render
+    /// engine only, and a kernel before Linux v7.1 refuses it.
+    fn create_queue(&mut self, vm: u32, engine: EngineInstance, keying: Keying) -> io::Result<u32>;
     fn destroy_queue(&mut self, queue: u32) -> io::Result<()>;
     /// Whether xe has banned a queue, which it does to one whose work hung or faulted.
     fn queue_banned(&mut self, queue: u32) -> io::Result<bool>;
@@ -245,9 +247,14 @@ impl Xe for XeCard {
         self.call(abi::VM_BIND, &mut abi::bind::request(vm, op, address, count))
     }
 
-    fn create_queue(&mut self, vm: u32, engine: EngineInstance) -> io::Result<u32> {
+    fn create_queue(&mut self, vm: u32, engine: EngineInstance, keying: Keying) -> io::Result<u32> {
         let mut instance = engine.bytes();
-        let mut request = abi::queue::create(vm, instance.as_mut_ptr() as u64);
+        let mut extension = abi::queue::keyed_by_table();
+        let extensions = match keying {
+            Keying::BindingIndex => 0,
+            Keying::BindingTableAndIndex => extension.as_mut_ptr() as u64,
+        };
+        let mut request = abi::queue::create(vm, instance.as_mut_ptr() as u64, extensions);
         self.call(abi::EXEC_QUEUE_CREATE, &mut request)?;
         Ok(answer(&request, abi::queue::CREATED_ID))
     }

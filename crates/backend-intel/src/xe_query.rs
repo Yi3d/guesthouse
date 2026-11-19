@@ -72,6 +72,10 @@ pub struct Config {
 impl Config {
     /// The card has memory of its own, DRM_XE_QUERY_CONFIG_FLAG_HAS_VRAM.
     pub const HAS_VRAM: u64 = 1 << 0;
+    /// A render queue can be made with its colour cache keyed by binding table and index,
+    /// DRM_XE_QUERY_CONFIG_FLAG_HAS_DISABLE_STATE_CACHE_PERF_FIX. Linux v7.1 and later say so on
+    /// every card.
+    pub const HAS_CACHE_KEYING: u64 = 1 << 4;
     const REVISION_AND_DEVICE: usize = 0;
     const FLAGS: usize = 1;
     const MIN_ALIGNMENT: usize = 2;
@@ -97,6 +101,10 @@ impl Config {
 
     pub fn has_vram(&self) -> bool {
         self.flags & Self::HAS_VRAM != 0
+    }
+
+    pub fn offers_cache_keying(&self) -> bool {
+        self.flags & Self::HAS_CACHE_KEYING != 0
     }
 }
 
@@ -333,7 +341,9 @@ pub(crate) mod tests {
         });
         let config = Config::parse(&answer);
         assert_eq!((config.device_id, config.revision), (0x64A0, 4));
-        assert!(config.has_vram());
+        assert!(config.has_vram() && !config.offers_cache_keying());
+        assert_eq!(Config::HAS_CACHE_KEYING, 0x10, "the header's 1 << 4");
+        assert!(Config { flags: 0x3F, ..config }.offers_cache_keying());
         assert_eq!((config.min_alignment, config.va_bits, config.max_queue_priority), (0x1000, 48, 2));
     }
 

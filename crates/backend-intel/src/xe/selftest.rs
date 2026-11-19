@@ -11,7 +11,7 @@
 //! steps, a fault and a hang, are made on purpose to see xe recover. They can disturb the desktop
 //! on the same card, so they run only when asked for and after a typed yes: see [`Options`].
 
-use super::abi::{EngineInstance, Sync};
+use super::abi::{EngineInstance, Keying, Sync};
 use super::batch;
 use super::device::{CpuMap, Xe};
 use super::guest_registers::{self, GuestWrite};
@@ -484,7 +484,10 @@ impl<'a> Run<'a> {
         fence: Option<(u64, u64)>,
     ) -> Result<u32, String> {
         let done = self.done.ok_or("no sync object")?;
-        let queue = self.xe.create_queue(vm, engine).map_err(|error| failed("making a queue", &error))?;
+        let queue = self
+            .xe
+            .create_queue(vm, engine, Keying::BindingIndex)
+            .map_err(|error| failed("making a queue", &error))?;
         self.queues.push(queue);
         self.done_point += 1;
         let done = Point { timeline: done, point: self.done_point };

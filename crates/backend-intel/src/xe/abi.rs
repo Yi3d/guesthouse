@@ -67,6 +67,8 @@ pub const EXEC_SIZE: usize = 56;
 pub const SYNC_SIZE: usize = 48;
 /// `struct drm_xe_engine_class_instance`.
 pub const ENGINE_INSTANCE_SIZE: usize = 8;
+/// `struct drm_xe_ext_set_property`, the extension a queue's creation points at to set a property.
+pub const EXT_SET_PROPERTY_SIZE: usize = 48;
 /// `struct drm_xe_query_engine_cycles`.
 pub const ENGINE_CYCLES_SIZE: usize = 40;
 pub const GEM_CLOSE_SIZE: usize = 8;
@@ -128,6 +130,24 @@ pub const SYNC_SIGNAL: u32 = 1 << 0;
 
 /// `DRM_XE_EXEC_QUEUE_GET_PROPERTY_BAN`.
 pub const QUEUE_PROPERTY_BAN: u32 = 0;
+
+/// `DRM_XE_EXEC_QUEUE_EXTENSION_SET_PROPERTY`, the one extension a queue's creation takes.
+pub const QUEUE_EXTENSION_SET_PROPERTY: u32 = 0;
+/// `DRM_XE_EXEC_QUEUE_SET_DISABLE_STATE_CACHE_PERF_FIX`: the queue's render colour cache is keyed
+/// by binding table and binding index rather than by the index alone. xe takes it for a render
+/// queue only, from Linux v7.1.
+pub const QUEUE_PROPERTY_CACHE_KEYED_BY_TABLE: u32 = 6;
+
+/// How a render queue's colour cache tells one surface from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Keying {
+    /// By binding index alone, which is how xe makes a queue unless asked otherwise. A binding
+    /// that comes to name another surface then needs a render target cache flush.
+    #[default]
+    BindingIndex,
+    /// By binding table and index, [`QUEUE_PROPERTY_CACHE_KEYED_BY_TABLE`]. Render queues only.
+    BindingTableAndIndex,
+}
 
 /// `DRM_XE_VM_GET_PROPERTY_FAULTS`.
 pub const VM_PROPERTY_FAULTS: u32 = 0;
@@ -294,6 +314,7 @@ impl EngineInstance {
 /// `struct drm_xe_exec_queue_create`, `_destroy` and `_get_property`.
 pub mod queue {
     use super::*;
+    const EXTENSIONS: usize = 0;
     const WIDTH: usize = 8;
     const PLACEMENTS: usize = 10;
     const VM: usize = 12;
@@ -304,15 +325,34 @@ pub mod queue {
     const PROPERTY: usize = 12;
     pub const PROPERTY_VALUE: usize = 16;
 
+    /// Inside `struct drm_xe_ext_set_property`: the base's next extension and name, then the
+    /// property and its value.
+    const NEXT_EXTENSION: usize = 0;
+    const EXTENSION_NAME: usize = 8;
+    const EXTENSION_PROPERTY: usize = 16;
+    const EXTENSION_VALUE: usize = 24;
+
     /// A queue of one engine that takes one batch at a time. `instances` is the address of that
-    /// engine's [`EngineInstance::bytes`].
-    pub fn create(vm: u32, instances: u64) -> [u8; EXEC_QUEUE_CREATE_SIZE] {
+    /// engine's [`EngineInstance::bytes`], and `extensions` that of the first extension, or zero.
+    pub fn create(vm: u32, instances: u64, extensions: u64) -> [u8; EXEC_QUEUE_CREATE_SIZE] {
         let mut request = [0; EXEC_QUEUE_CREATE_SIZE];
+        put_qword(&mut request, EXTENSIONS, extensions);
         put_word(&mut request, WIDTH, BATCHES_PER_EXEC);
         put_word(&mut request, PLACEMENTS, 1);
         put_dword(&mut request, VM, vm);
         put_qword(&mut request, INSTANCES, instances);
         request
+    }
+
+    /// The extension that keys a render queue's colour cache by binding table and index, the
+    /// last in its chain.
+    pub fn keyed_by_table() -> [u8; EXT_SET_PROPERTY_SIZE] {
+        let mut extension = [0; EXT_SET_PROPERTY_SIZE];
+        put_qword(&mut extension, NEXT_EXTENSION, 0);
+        put_dword(&mut extension, EXTENSION_NAME, QUEUE_EXTENSION_SET_PROPERTY);
+        put_dword(&mut extension, EXTENSION_PROPERTY, QUEUE_PROPERTY_CACHE_KEYED_BY_TABLE);
+        put_qword(&mut extension, EXTENSION_VALUE, 1);
+        extension
     }
 
     pub fn destroy(queue: u32) -> [u8; EXEC_QUEUE_DESTROY_SIZE] {
@@ -617,6 +657,7 @@ mod tests {
         assert_eq!(Sync::UserFence { address: 0, value: 0 }.bytes().len(), 48);
         assert_eq!(EngineInstance { class: 0, instance: 0, gt: 0 }.bytes().len(), 8);
         assert_eq!(engine_cycles::request(EngineInstance { class: 0, instance: 0, gt: 0 }).len(), 40);
+        assert_eq!(queue::keyed_by_table().len(), 48);
     }
 
     /// The command numbers, read from the header itself where a PC has it. A build image may not.
@@ -650,6 +691,11 @@ mod tests {
             ("DRM_XE_GEM_CPU_CACHING_WC", u64::from(CPU_CACHING_WRITE_COMBINED)),
             ("DRM_XE_DEVICE_QUERY_ENGINE_CYCLES", u64::from(QUERY_ENGINE_CYCLES)),
             ("DRM_XE_EXEC_QUEUE_GET_PROPERTY_BAN", u64::from(QUEUE_PROPERTY_BAN)),
+            ("DRM_XE_EXEC_QUEUE_EXTENSION_SET_PROPERTY", u64::from(QUEUE_EXTENSION_SET_PROPERTY)),
+            (
+                "DRM_XE_EXEC_QUEUE_SET_DISABLE_STATE_CACHE_PERF_FIX",
+                u64::from(QUEUE_PROPERTY_CACHE_KEYED_BY_TABLE),
+            ),
         ] {
             // A header too old to name one is no reason to fail: the numbers above are pinned.
             if let Some(theirs) = defined(name) {
@@ -717,12 +763,31 @@ mod tests {
 
     #[test]
     fn a_queue_is_one_engine_wide_in_one_vm() {
-        let request = queue::create(9, 0x6000);
+        let request = queue::create(9, 0x6000, 0);
         assert_eq!((word(&request, 8), word(&request, 10)), (Some(1), Some(1)));
         assert_eq!((dword(&request, 12), qword(&request, 24)), (Some(9), Some(0x6000)));
+        assert_eq!(qword(&request, 0), Some(0), "no extension");
         assert_eq!(EngineInstance { class: 4, instance: 0, gt: 1 }.bytes(), [4, 0, 0, 0, 1, 0, 0, 0]);
         let property = queue::property(6, QUEUE_PROPERTY_BAN);
         assert_eq!((dword(&property, 8), dword(&property, 12)), (Some(6), Some(0)));
+    }
+
+    /// Sizes and offsets as a C program printed them against this PC's `xe_drm.h` (Linux v7.1's
+    /// headers): `struct drm_xe_ext_set_property` is 48 bytes, its base's `next_extension` at 0,
+    /// `name` at 8, `pad` at 12, then `property` at 16, `pad` at 20, `value` at 24 and `reserved`
+    /// at 32; `extensions` is at 0 of `struct drm_xe_exec_queue_create`. The property is 6, the
+    /// extension 0.
+    #[test]
+    fn a_queue_keyed_by_binding_table_points_at_one_set_property_extension() {
+        let extension = queue::keyed_by_table();
+        assert_eq!(qword(&extension, 0), Some(0), "the last extension");
+        assert_eq!((dword(&extension, 8), dword(&extension, 12)), (Some(0), Some(0)), "set property");
+        assert_eq!((dword(&extension, 16), dword(&extension, 20)), (Some(6), Some(0)));
+        assert_eq!(qword(&extension, 24), Some(1), "turned on");
+        assert_eq!((qword(&extension, 32), qword(&extension, 40)), (Some(0), Some(0)), "reserved");
+        let request = queue::create(9, 0x6000, 0x7000);
+        assert_eq!(qword(&request, 0), Some(0x7000));
+        assert_eq!((dword(&request, 12), qword(&request, 24)), (Some(9), Some(0x6000)));
     }
 
     /// Sizes and offsets as `static_assert`s in a C file against `xe_drm.h` of Linux v7.2 held.

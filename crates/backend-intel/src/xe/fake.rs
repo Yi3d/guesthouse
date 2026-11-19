@@ -11,7 +11,7 @@
 // A lab build uses only part of what the tests do.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use super::abi::{self, BindOp, EngineInstance, NewBuffer, Sync, VmFault};
+use super::abi::{self, BindOp, EngineInstance, Keying, NewBuffer, Sync, VmFault};
 use super::batch;
 use super::device::{CpuMap, EngineCycles, Xe};
 use super::plan::pat;
@@ -31,7 +31,7 @@ pub enum Call {
     MapBuffer(u32),
     ExportBuffer(u32),
     Bind { vm: u32, op: BindOp, signal: Option<Sync> },
-    CreateQueue { vm: u32, engine: EngineInstance },
+    CreateQueue { vm: u32, engine: EngineInstance, keying: Keying },
     DestroyQueue(u32),
     QueueBanned(u32),
     Exec { queue: u32, batch: u64, syncs: Vec<Sync> },
@@ -184,6 +184,7 @@ impl Vm {
 struct Queue {
     vm: u32,
     banned: bool,
+    keying: Keying,
 }
 
 /// A timeline of points, each attached when work that will signal it is taken, and reached when
@@ -247,7 +248,15 @@ struct State {
     /// The lab's card: see [`FakeXe::lab`].
     lab: Option<Lab>,
     registers: Registers,
+    /// How xe answers a queue keyed by binding table: see [`FakeXe::without_keying`] and
+    /// [`FakeXe::refuse_keying`].
+    keying_refused: Option<i32>,
 }
+
+/// The register whose bit [`STATE_CACHE_PERF_FIX_OFF`] keys the render colour cache by binding
+/// table and index. xe sets it at the start of a queue keyed so, and on no other queue.
+pub const COMMON_SLICE_CHICKEN3: u32 = 0x7304;
+pub const STATE_CACHE_PERF_FIX_OFF: u32 = 1 << 13;
 
 /// The registers a batch may set and read. On a card a batch reaches only the registers the kernel
 /// lets user work reach, and any other is neither set nor read, so the memory a read names keeps
@@ -411,6 +420,12 @@ impl State {
         }
         let Some(queue) = self.queues.get(&run.queue) else { return };
         let queue_vm = queue.vm;
+        // The register is the queue's context's, so it reads as its queue was made.
+        let bit = self.registers.values.entry(COMMON_SLICE_CHICKEN3).or_default();
+        match queue.keying {
+            Keying::BindingTableAndIndex => *bit |= STATE_CACHE_PERF_FIX_OFF,
+            Keying::BindingIndex => *bit &= !STATE_CACHE_PERF_FIX_OFF,
+        }
         let vm = self.vms.get(&queue.vm);
         let mut outcome = match vm {
             Some(_) if self.fault_runs => Outcome::Fault(run.batch),
@@ -616,6 +631,17 @@ impl FakeXe {
         self.state().registers.reachable.extend(registers);
     }
 
+    /// Answers a queue keyed by binding table as a kernel before Linux v7.1 does: xe doesn't know
+    /// the property, which it says as a wrong request.
+    pub fn without_keying(&self) {
+        self.state().keying_refused = Some(libc::EINVAL);
+    }
+
+    /// Refuses a queue keyed by binding table with `code`, and only such a queue.
+    pub fn refuse_keying(&self, code: i32) {
+        self.state().keying_refused = Some(code);
+    }
+
     pub fn set_names_faults(&self, names: bool) {
         self.state().names_faults = names;
     }
@@ -745,14 +771,23 @@ impl Xe for FakeXe {
         Ok(())
     }
 
-    fn create_queue(&mut self, vm: u32, engine: EngineInstance) -> io::Result<u32> {
+    fn create_queue(&mut self, vm: u32, engine: EngineInstance, keying: Keying) -> io::Result<u32> {
         let mut state = self.state();
-        state.enter(Call::CreateQueue { vm, engine })?;
+        state.enter(Call::CreateQueue { vm, engine, keying })?;
+        if keying == Keying::BindingTableAndIndex {
+            if let Some(code) = state.keying_refused {
+                return Err(errno(code));
+            }
+            // xe's own rule: the property is for render queues only.
+            if engine.class != crate::xe_query::Engine::RENDER {
+                return Err(errno(libc::EOPNOTSUPP));
+            }
+        }
         if !state.vms.contains_key(&vm) {
             return Err(errno(libc::ENOENT));
         }
         let id = state.new_id();
-        state.queues.insert(id, Queue { vm, banned: false });
+        state.queues.insert(id, Queue { vm, banned: false, keying });
         Ok(id)
     }
 
@@ -891,6 +926,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::xe_query::Engine;
 
     fn buffer() -> NewBuffer {
         NewBuffer { size: 0x1000, placement: 1, flags: 0, cpu_caching: abi::CPU_CACHING_WRITE_BACK }
@@ -915,7 +951,7 @@ mod tests {
         xe.bind(vm, &map(batch, 0x1_0000), None).unwrap();
         xe.bind(vm, &map(data, 0x2_0000), None).unwrap();
         let engine = EngineInstance { class: 0, instance: 0, gt: 0 };
-        let queue = xe.create_queue(vm, engine).unwrap();
+        let queue = xe.create_queue(vm, engine, Keying::BindingIndex).unwrap();
         let (batch_map, data_map) =
             (xe.map_buffer(batch, 0x1000).unwrap(), xe.map_buffer(data, 0x1000).unwrap());
         (xe, vm, queue, batch_map, data_map)
@@ -958,6 +994,44 @@ mod tests {
         mute.exec(queue, 0x1_0000, &[]).unwrap();
         assert_eq!(mute.faults(), [0x9_0000_0123]);
         assert_eq!(mute.vm_faults(vm).unwrap(), []);
+    }
+
+    #[test]
+    fn only_a_render_queue_is_keyed_by_binding_table_and_its_context_reads_so() {
+        let (mut xe, vm, plain, mut batch_map, data_map) = rig();
+        let engine = |class| EngineInstance { class, instance: 0, gt: 0 };
+        let keyed = xe.create_queue(vm, engine(Engine::RENDER), Keying::BindingTableAndIndex).unwrap();
+        for class in [Engine::COPY, Engine::COMPUTE, Engine::VIDEO_DECODE, Engine::VIDEO_ENHANCE] {
+            let refused = xe.create_queue(vm, engine(class), Keying::BindingTableAndIndex).unwrap_err();
+            assert_eq!(refused.raw_os_error(), Some(libc::EOPNOTSUPP), "{class}");
+        }
+        xe.reach_registers(&[COMMON_SLICE_CHICKEN3]);
+        let read = batch::store_register(COMMON_SLICE_CHICKEN3, 0x2_0000);
+        let words: Vec<u8> = read.iter().chain(&[batch::BATCH_END]).flat_map(|w| w.to_le_bytes()).collect();
+        assert!(batch_map.write(0, &words));
+        for (queue, bit) in [(keyed, STATE_CACHE_PERF_FIX_OFF), (plain, 0), (keyed, STATE_CACHE_PERF_FIX_OFF)]
+        {
+            xe.exec(queue, 0x1_0000, &[]).unwrap();
+            assert_eq!(qword_at(&data_map, 0) as u32 & STATE_CACHE_PERF_FIX_OFF, bit, "queue {queue}");
+        }
+        assert!(xe.calls().contains(&Call::CreateQueue {
+            vm,
+            engine: engine(Engine::RENDER),
+            keying: Keying::BindingTableAndIndex
+        }));
+    }
+
+    #[test]
+    fn a_kernel_without_the_keying_or_one_that_refuses_it_still_makes_plain_queues() {
+        let (mut xe, vm, _queue, _batch, _data) = rig();
+        let render = EngineInstance { class: Engine::RENDER, instance: 0, gt: 0 };
+        xe.without_keying();
+        let refused = xe.create_queue(vm, render, Keying::BindingTableAndIndex).unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(libc::EINVAL), "a property it doesn't know");
+        xe.refuse_keying(libc::ENOMEM);
+        let refused = xe.create_queue(vm, render, Keying::BindingTableAndIndex).unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(libc::ENOMEM));
+        assert!(xe.create_queue(vm, render, Keying::BindingIndex).is_ok());
     }
 
     #[test]
@@ -1005,7 +1079,9 @@ mod tests {
         let vm = xe.create_vm(abi::VM_LONG_RUNNING).unwrap();
         let ring = xe.create_buffer(&buffer()).unwrap();
         xe.bind(vm, &map(ring, 0x1_0000), None).unwrap();
-        let queue = xe.create_queue(vm, EngineInstance { class: 0, instance: 0, gt: 0 }).unwrap();
+        let queue = xe
+            .create_queue(vm, EngineInstance { class: 0, instance: 0, gt: 0 }, Keying::BindingIndex)
+            .unwrap();
         xe.exec(queue, 0x1_0000, &[]).unwrap();
         assert!(!xe.queue_banned(queue).unwrap());
         assert_eq!(xe.unbound(), (0, 0));
@@ -1117,7 +1193,9 @@ mod tests {
             3,
             "written once the bind is in place"
         );
-        let queue = xe.create_queue(vm, EngineInstance { class: 4, instance: 0, gt: 0 }).unwrap();
+        let queue = xe
+            .create_queue(vm, EngineInstance { class: 4, instance: 0, gt: 0 }, Keying::BindingIndex)
+            .unwrap();
         let mut batch_map = xe.map_buffer(handle, 0x1000).unwrap();
         batch_map.write(0, &batch::bytes(&[batch::SEMAPHORE_WAIT_HEADER, 1, 0x1_0800, 0, 0]));
         assert!(unsupported(xe.exec(queue, 0x1_0000, &[signal])));
