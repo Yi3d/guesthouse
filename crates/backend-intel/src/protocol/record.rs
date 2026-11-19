@@ -169,7 +169,7 @@ const FIVE_LEVEL_ADDRESS_BITS: u64 = 57;
 const KNOWN_CARD_GT_TYPE: u32 = 0;
 
 /// Feature bits the driver's table sets that this record keeps clear on every card.
-const KEPT_CLEAR: [Feature; 8] = [
+const KEPT_CLEAR: [Feature; 9] = [
     // The guest's tiled resources: xe never turns on the hardware's translation table for them,
     // whether the kernel driver or the user-mode driver keeps it (see `work::choices`); the core has
     // no request that maps a range to nothing, which null pages are; and tiles mapped through the
@@ -187,7 +187,15 @@ const KEPT_CLEAR: [Feature; 8] = [
     // A service of the kernel driver rather than of the card: resetting the function, which the
     // host does.
     features::DRIVER_FLR,
+    // A capability the Direct3D 12 driver offers on this bit's word. Offered on an adapter whose
+    // display is another device's, as the guest's display always is, Windows then wants resources
+    // shared across adapters, which the guest is never offered, and refuses to make a Direct3D 12
+    // device there: on every adapter but the render-only one, the default adapter among them.
+    CROSS_ADAPTER_CAPABILITY,
 ];
+
+/// The unnamed bit [`KEPT_CLEAR`] keeps for Direct3D 12.
+const CROSS_ADAPTER_CAPABILITY: Feature = features::bit("unnamed bit 505, a Direct3D 12 capability", 505);
 
 /// The inputs to the driver's tables that are its defaults rather than the card's, as the log
 /// names them.
@@ -1368,6 +1376,7 @@ pub(crate) mod tests {
             (features::NULL_PAGES, true, false),
             (features::RENDER_COMPRESSION, true, false),
             (features::DRIVER_FLR, true, false),
+            (CROSS_ADAPTER_CAPABILITY, true, false),
             (features::GPGPU_MID_THREAD_PREEMPT, false, true),
         ];
         departures.extend(older_ddi_versions());
@@ -1672,7 +1681,7 @@ pub(crate) mod tests {
         }
         assert_eq!(ours, real);
         assert_eq!(features::workaround(&record, 2835), Some(1), "with the table's unnamed bit 445");
-        assert_eq!(features::workaround(&record, 2964), Some(2), "the render cache's RHWO kept off");
+        assert_eq!(features::workaround(&record, 2964), Some(2), "the compositor follows it");
         assert_eq!(record[0x96A] & 0xF, 0x02, "the low half of the byte Direct3D 11 tests");
         let Outcome::Built(built) = outcome.workarounds else { panic!("the B580 is covered") };
         assert_eq!(built.entries, 195);

@@ -129,6 +129,8 @@ fn the_recorded_b580_gets_the_kernel_drivers_feature_table_but_where_this_record
         (features::NULL_PAGES, true, false),
         // The kernel driver's own reset.
         (features::DRIVER_FLR, true, false),
+        // The Direct3D 12 capability that wants resources shared across adapters.
+        (unnamed(505), true, false),
     ];
     // The older Direct3D 11 interface versions: this record offers the newest alone.
     expected.extend(
