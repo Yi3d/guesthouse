@@ -23,3 +23,4 @@ pub mod record;
 pub mod shape;
 pub mod update_status;
 pub mod wddm_caps;
+pub mod workarounds;
