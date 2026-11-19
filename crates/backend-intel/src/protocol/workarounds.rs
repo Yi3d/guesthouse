@@ -15,7 +15,9 @@
 //!   function and is a virtual machine's, a card whose display is present and not fused down, and no
 //!   hybrid-graphics display switch.
 //!
-//! A card whose IP versions the data doesn't cover gets no table: [`fill`] says which IP it was.
+//! A card whose render IP the data doesn't cover gets no table: [`fill`] says which IP it was. One
+//! whose render IP is covered but whose media or display IP is not gets the parts that are, and
+//! [`Built::uncovered`] names the parts left out.
 
 mod data;
 
@@ -166,13 +168,16 @@ pub struct Built {
     pub entries: usize,
     /// The inputs that are defaults rather than the card's.
     pub defaults: Vec<&'static str>,
+    /// The parts the data has nothing for, named as "media 13.07" and the like, whose entries are
+    /// not set.
+    pub uncovered: Vec<String>,
 }
 
 /// Whether the table was built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Built(Built),
-    /// The data has nothing for this IP, named as "render 12.55" and the like.
+    /// The data has nothing for the render IP, named as "render 12.55" and the like.
     Uncovered(String),
 }
 
@@ -286,6 +291,7 @@ fn table(card: &Card, record: &[u8]) -> Result<(Vec<(usize, u8)>, Built), String
         device_group: None,
         entries: 0,
         defaults: Vec::new(),
+        uncovered: Vec::new(),
     };
     let mut parts: Vec<(&'static [Rows], u8)> = Vec::new();
     if card.product_family == ALCHEMIST {
@@ -300,17 +306,34 @@ fn table(card: &Card, record: &[u8]) -> Result<(Vec<(usize, u8)>, Built), String
         let render = card.render.ok_or_else(|| "render IP unknown".to_owned())?;
         parts.push((component(Block::Render, render)?.rows, render.revision()));
         built.render = Some(render);
+        // A media or display IP the data lacks leaves out that part's entries alone.
         if let Some(media) = card.media {
-            parts.push((component(Block::Media, media)?.rows, media.revision()));
-            built.media = Some(media);
+            match component(Block::Media, media) {
+                Ok(component) => {
+                    parts.push((component.rows, media.revision()));
+                    built.media = Some(media);
+                }
+                Err(uncovered) => built.uncovered.push(uncovered),
+            }
         }
-        let (architecture, release) = display_ip(card)
-            .ok_or_else(|| format!("display IP unknown for product family {}", card.product_family))?;
-        // xe doesn't report the display IP or its revision: the IP is the platform's, the revision 0.
-        let display = Ip::new(architecture, release, 0);
-        parts.push((component(Block::Display, display)?.rows, display.revision()));
-        built.display = Some(display);
-        built.defaults.extend([DISPLAY_IP_DEFAULT, DISPLAY_REVISION_DEFAULT, DISPLAY_AUX_DEFAULT]);
+        match display_ip(card) {
+            Some((architecture, release)) => {
+                // xe doesn't report the display IP or its revision: the IP is the platform's, the
+                // revision 0.
+                let display = Ip::new(architecture, release, 0);
+                built.defaults.extend([DISPLAY_IP_DEFAULT, DISPLAY_REVISION_DEFAULT, DISPLAY_AUX_DEFAULT]);
+                match component(Block::Display, display) {
+                    Ok(component) => {
+                        parts.push((component.rows, display.revision()));
+                        built.display = Some(display);
+                    }
+                    Err(uncovered) => built.uncovered.push(uncovered),
+                }
+            }
+            None => {
+                built.uncovered.push(format!("display IP unknown for product family {}", card.product_family))
+            }
+        }
     }
     built.defaults.push(GUEST_SETTINGS_DEFAULT);
 
@@ -332,7 +355,7 @@ fn table(card: &Card, record: &[u8]) -> Result<(Vec<(usize, u8)>, Built), String
 }
 
 /// Writes the table Intel's kernel driver would give `card` into `record`, whose feature table must
-/// already be filled. A card the data doesn't cover leaves the record as it was.
+/// already be filled. A card whose render IP the data doesn't cover leaves the record as it was.
 pub fn fill(record: &mut [u8], card: &Card) -> Outcome {
     match table(card, record) {
         Ok((entries, built)) => {
@@ -431,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn an_uncovered_ip_is_named_and_the_record_left_alone() {
+    fn an_uncovered_render_ip_is_named_and_the_record_left_alone() {
         let mut record = vec![0u8; RECORD];
         record[0x3A0 + 968 / 2] = 1;
         let before = record.clone();
@@ -443,14 +466,53 @@ mod tests {
         };
         assert_eq!(fill(&mut record, &card), Outcome::Uncovered("render 20.09".into()));
         assert_eq!(record, before);
-        let card = Card { product_family: 9999, render: Some(Ip::new(20, 1, 0)), ..Card::default() };
-        assert_eq!(
-            fill(&mut record, &card),
-            Outcome::Uncovered("display IP unknown for product family 9999".into())
-        );
-        let card = Card { media: Some(Ip::new(13, 7, 0)), ..card };
-        let card = Card { product_family: BATTLEMAGE, ..card };
-        assert_eq!(fill(&mut record, &card), Outcome::Uncovered("media 13.07".into()));
+        let card = Card { render: None, ..card };
+        assert_eq!(fill(&mut record, &card), Outcome::Uncovered("render IP unknown".into()));
         assert_eq!(record, before);
+    }
+
+    /// The entries one part of the table sets for a card, alone.
+    fn part(block: Block, ip: Ip) -> Vec<usize> {
+        let mut table = Table { nibbles: [0; ENTRIES], card: Card::default() };
+        table.set(component(block, ip).unwrap().rows, ip.revision(), 0);
+        (0..ENTRIES).filter(|&entry| table.nibbles[entry] != 0).collect()
+    }
+
+    #[test]
+    fn an_uncovered_media_or_display_ip_leaves_out_that_part_alone() {
+        let record = vec![0u8; RECORD];
+        let b580 = Card {
+            product_family: BATTLEMAGE,
+            device_id: 0xE20B,
+            render: Some(Ip::new(20, 1, 0)),
+            media: Some(Ip::new(13, 1, 1)),
+            ..Card::default()
+        };
+        let (whole, built) = table(&b580, &record).unwrap();
+        assert!(built.uncovered.is_empty());
+        let has = |entries: &[(usize, u8)], entry: usize| entries.iter().any(|&(at, _)| at == entry);
+        let media_only: Vec<usize> = part(Block::Media, Ip::new(13, 1, 1))
+            .into_iter()
+            .filter(|&entry| !part(Block::Render, Ip::new(20, 1, 0)).contains(&entry))
+            .filter(|&entry| !part(Block::Display, Ip::new(14, 1, 0)).contains(&entry))
+            .collect();
+        assert!(!media_only.is_empty());
+
+        let unknown_media = Card { media: Some(Ip::new(13, 7, 0)), ..b580 };
+        let (entries, built) = table(&unknown_media, &record).unwrap();
+        assert_eq!(built.uncovered, ["media 13.07"]);
+        assert_eq!((built.render, built.media, built.display), (b580.render, None, Some(Ip::new(14, 1, 0))));
+        assert!(entries.len() < whole.len() && has(&entries, 2964), "the render part is there");
+        for entry in &media_only {
+            assert!(has(&whole, *entry) && !has(&entries, *entry), "{entry}");
+        }
+
+        let unknown_family = Card { product_family: 9999, ..b580 };
+        let mut record = vec![0u8; RECORD];
+        let Outcome::Built(built) = fill(&mut record, &unknown_family) else { panic!("render is covered") };
+        assert_eq!(built.uncovered, ["display IP unknown for product family 9999"]);
+        assert_eq!((built.media, built.display), (b580.media, None));
+        assert_eq!(features::workaround(&record, 2525), Some(4), "media 13.01's");
+        assert_eq!(built.defaults, [GUEST_SETTINGS_DEFAULT], "no display IP was taken");
     }
 }

@@ -239,10 +239,18 @@ impl IntelBackend {
             log::warn!("{PREFIX} record-urb-unknown \"the card's hwconfig gives no URB entry limits\"");
         }
         match &self.workarounds {
-            protocol::workarounds::Outcome::Built(built) => log::info!("{PREFIX} record-workarounds {built}"),
+            protocol::workarounds::Outcome::Built(built) => {
+                log::info!("{PREFIX} record-workarounds {built}");
+                for part in &built.uncovered {
+                    log::warn!(
+                        "{PREFIX} record-workarounds-partial part=\"{part}\" \"the workaround table has no data for \
+                         this part, so its entries are left out and the rest are set\""
+                    );
+                }
+            }
             protocol::workarounds::Outcome::Uncovered(ip) => log::warn!(
-                "{PREFIX} record-workarounds-uncovered ip=\"{ip}\" \"the workaround table has no data for this IP, \
-                 so only the entries this backend sets are set\""
+                "{PREFIX} record-workarounds-uncovered ip=\"{ip}\" \"the workaround table has no data for the \
+                 render IP, so only the entries this backend sets are set\""
             ),
         }
         log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
