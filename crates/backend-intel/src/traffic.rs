@@ -436,9 +436,8 @@ mod tests {
             "answered=record guest_build=0x10"
         );
         assert_eq!(QueryOutcome::LeftToTheCore.to_string(), "answered=left-to-the-core");
-        let held =
-            QueryOutcome::DriverName(Status::NOT_SUPPORTED, NameAnswer::Withheld(Withheld::BeforeDirect3d12))
-                .to_string();
+        let held = QueryOutcome::DriverName(Status::NOT_SUPPORTED, NameAnswer::Withheld(Withheld::Direct3d))
+            .to_string();
         assert!(held.starts_with("refused="), "{held}");
         assert_eq!(
             QueryOutcome::OpenGl(Status::SUCCESS, "x.dll").to_string(),

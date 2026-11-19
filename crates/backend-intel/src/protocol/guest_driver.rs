@@ -31,8 +31,6 @@ const USER_DRIVERS_32_BIT: [&str; 4] =
 /// Where the version sits in the query, KMTUMDVERSION: 0 for Direct3D 9 up to 3 for Direct3D 12.
 const VERSION_FIELD: usize = 0;
 const NEWEST: usize = USER_DRIVERS.len() - 1;
-/// Direct3D 12's version in that field. Every version below it is Direct3D 9, 10 or 11.
-const DIRECT3D_12: usize = 3;
 
 /// The drivers Intel's INF names differently from one kind of card to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +131,7 @@ pub enum NameAnswer {
 /// stage withholds it from this program: see [`crate::stage`].
 pub fn write_name(query: &VendorQuery<'_>, desktop: Desktop, out: &mut Vec<u8>) -> (Status, NameAnswer) {
     let version = dword(query.data, VERSION_FIELD).map_or(NEWEST, |version| (version as usize).min(NEWEST));
-    if let Some(why) = desktop.withheld(version >= DIRECT3D_12, query.program) {
+    if let Some(why) = desktop.withheld(query.program) {
         return (Status::NOT_SUPPORTED, NameAnswer::Withheld(why));
     }
     let drivers = if query.process_is_32_bit { USER_DRIVERS_32_BIT } else { USER_DRIVERS };
@@ -230,27 +228,26 @@ mod tests {
     }
 
     #[test]
-    fn the_software_desktop_switch_holds_back_all_but_direct3d_12() {
+    fn the_software_desktop_switch_holds_back_every_direct3d_version() {
         let mut out = Vec::new();
-        for (version, wanted) in [
-            (0u8, NameAnswer::Withheld(Withheld::BeforeDirect3d12)),
-            (2, NameAnswer::Withheld(Withheld::BeforeDirect3d12)),
-            (3, NameAnswer::Given("igd12umd64.dll")),
-        ] {
+        for version in [0u8, 1, 2, 3] {
             let data = [version, 0, 0, 0];
             let query = VendorQuery {
                 kind: guest_text::QUERY_USER_DRIVER_NAME,
                 size: 4,
                 data: &data,
                 process_is_32_bit: false,
-                program: "",
+                program: "explorer.exe",
             };
-            assert_eq!(write_name(&query, Desktop::Software, &mut out).1, wanted, "{version}");
+            let (status, answer) = write_name(&query, Desktop::Software, &mut out);
+            assert_eq!(status, Status::NOT_SUPPORTED, "{version}");
+            assert_eq!(answer, NameAnswer::Withheld(Withheld::Direct3d), "{version}");
         }
+        assert!(out.is_empty(), "no path is written for a driver held back");
     }
 
     #[test]
-    fn the_software_desktop_holds_back_even_direct3d_12_from_the_compositor_only() {
+    fn the_compositor_is_held_back_for_its_own_reason_and_given_everything_on_the_hardware_desktop() {
         let data = [3u8, 0, 0, 0];
         let query = |program| VendorQuery {
             kind: guest_text::QUERY_USER_DRIVER_NAME,
@@ -260,22 +257,18 @@ mod tests {
             program,
         };
         let mut out = Vec::new();
-        assert_eq!(
-            write_name(&query("dwm.exe"), Desktop::Software, &mut out).1,
-            NameAnswer::Withheld(Withheld::FromTheCompositor)
-        );
-        assert_eq!(
-            write_name(&query("DWM.EXE"), Desktop::Software, &mut out).1,
-            NameAnswer::Withheld(Withheld::FromTheCompositor)
-        );
-        assert_eq!(
-            write_name(&query("dwm.exe"), Desktop::Hardware, &mut out).1,
-            NameAnswer::Given("igd12umd64.dll")
-        );
-        assert_eq!(
-            write_name(&query("game.exe"), Desktop::Software, &mut out).1,
-            NameAnswer::Given("igd12umd64.dll")
-        );
+        for compositor in ["dwm.exe", "DWM.EXE"] {
+            assert_eq!(
+                write_name(&query(compositor), Desktop::Software, &mut out).1,
+                NameAnswer::Withheld(Withheld::FromTheCompositor)
+            );
+        }
+        for program in ["dwm.exe", "explorer.exe"] {
+            assert_eq!(
+                write_name(&query(program), Desktop::Hardware, &mut out).1,
+                NameAnswer::Given("igd12umd64.dll")
+            );
+        }
     }
 
     #[test]

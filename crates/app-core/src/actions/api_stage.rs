@@ -15,6 +15,8 @@ const NOTHING: [&str; 2] = ["nothing", "no device on "];
 /// Probes whose work has a context type the daemon knows; the others run only where everything does.
 const OPENCL_PROBE: &str = "opencl";
 const DIRECT3D_PROBE: &str = "d3d";
+/// What the software desktop does to the Direct3D probe.
+const DIRECT3D_REFUSED: &str = "Direct3D 9 to 12 refused by the software desktop";
 
 /// The stage named in the daemon's log, if it names one.
 fn stage_in(daemon_log: &str) -> Option<Stage> {
@@ -38,6 +40,10 @@ fn runs(probe: &str, stage: Stage) -> bool {
 /// One API's line: its work run or withheld, and whether how far it got is a failure.
 fn verdict(probe: &str, furthest: &str, stage: Stage, software_desktop: bool) -> String {
     let got_nowhere = NOTHING.iter().any(|nothing| furthest.starts_with(nothing));
+    let direct3d_refused = probe == DIRECT3D_PROBE && software_desktop;
+    if direct3d_refused && got_nowhere {
+        return format!("{DIRECT3D_REFUSED}, so no device on the card is as far as it can get");
+    }
     let mut said = if runs(probe, stage) {
         if got_nowhere {
             format!("FAILED: its work runs on the card at stage={stage:?}, and it reached nothing there")
@@ -55,8 +61,8 @@ fn verdict(probe: &str, furthest: &str, stage: Stage, software_desktop: bool) ->
              is as far as it can get"
         )
     };
-    if probe == DIRECT3D_PROBE && software_desktop {
-        said.push_str("; Direct3D 9, 10 and 11 refused by the software desktop");
+    if direct3d_refused {
+        said.push_str(&format!("; {DIRECT3D_REFUSED}"));
     }
     said
 }
@@ -96,7 +102,7 @@ mod tests {
         \x20 vulkan 64-bit: furthest nothing (exit code 0 (0x00000000))\n\
         \x20 opencl 32-bit: furthest nothing (exit code 0 (0x00000000))\n\napi-check done\n";
     const COMPUTE: &str = "INFO  [    0.003] intel stage=Compute: the guest's work runs on the card\n\
-        INFO  [    0.003] intel software-desktop on: Direct3D 9, 10 and 11 drivers refused\n";
+        INFO  [    0.003] intel software-desktop on: every Direct3D driver refused, 9 to 12\n";
 
     fn line<'a>(section: &'a str, start: &str) -> &'a str {
         section.lines().find(|line| line.trim_start().starts_with(start)).unwrap()
@@ -114,6 +120,17 @@ mod tests {
         let d3d = line(&section, "d3d 64-bit");
         assert!(d3d.contains("withheld by stage=Compute") && d3d.contains("refused by the software desktop"));
         assert!(line(&section, "vulkan").contains("FAILED: stage=Compute withholds its work"));
+    }
+
+    #[test]
+    fn direct3d_reaching_no_device_on_the_software_desktop_is_no_failure() {
+        let report = REPORT.replace("furthest D3D12 device, feature level 12_0,", "furthest no device");
+        let log = format!("intel stage=Everything: runs\n{}", COMPUTE.lines().nth(1).unwrap());
+        let section = stage_section(&report, Some(&log), false);
+        let d3d = line(&section, "d3d 64-bit");
+        assert!(!d3d.contains("FAILED") && d3d.contains("refused by the software desktop"), "{d3d}");
+        let without = stage_section(&report, Some("intel stage=Everything: runs\n"), false);
+        assert!(line(&without, "d3d 64-bit").contains("FAILED"), "the hardware desktop gives Direct3D");
     }
 
     #[test]

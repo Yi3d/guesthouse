@@ -5,10 +5,14 @@
 //! ([`Desktop::at_stage`]), and the app falls back by itself when the hardware desktop doesn't come
 //! up. A recorded card keeps the software desktop.
 //!
-//! In the software desktop, Direct3D 9, 10 and 11 programs are refused Intel's drivers and draw in
-//! software. The desktop's compositor is refused Direct3D 12 as well: refused 11, it takes 12, and
-//! as nothing it draws is run, it gives up and crashes over and over until Windows stops the adapter
-//! for every program. Other programs keep Direct3D 12, compute and Vulkan, which is what a run is for.
+//! In the software desktop, every program is refused Intel's Direct3D drivers, 9 to 12, and draws in
+//! software. Refused 11 alone, Windows runs a program's Direct3D 11 device on Intel's Direct3D 12
+//! driver instead, so the shell's programs (the sign-in screen, Explorer, Start) would still draw on
+//! the card, for a compositor that has no driver of it and can't show it. On a card whose record
+//! lets that through they fail and are started again, over and over, and the desktop never comes
+//! up. The compositor itself is refused every driver: refused 11, it takes 12, and as nothing it
+//! draws is run, it gives up and crashes over and over until Windows stops the adapter for every
+//! program. Compute and Vulkan stay, which is what a run is for.
 //!
 //! The display driver is kept off then. With it in, a lab guest's compositor crashed in dwmcore.dll
 //! at each start, as on a tester's, until Winlogon stopped the session's use of the GPU and both
@@ -80,15 +84,13 @@ impl Desktop {
         }
     }
 
-    /// Whether `program` is refused the driver for this Direct3D version, and why.
-    pub fn withheld(self, direct3d_12: bool, program: &str) -> Option<Withheld> {
-        if self == Self::Hardware {
-            return None;
+    /// Whether `program` is refused Intel's Direct3D drivers, and why.
+    pub fn withheld(self, program: &str) -> Option<Withheld> {
+        match self {
+            Self::Hardware => None,
+            Self::Software if program.eq_ignore_ascii_case(COMPOSITOR) => Some(Withheld::FromTheCompositor),
+            Self::Software => Some(Withheld::Direct3d),
         }
-        if program.eq_ignore_ascii_case(COMPOSITOR) {
-            return Some(Withheld::FromTheCompositor);
-        }
-        (!direct3d_12).then_some(Withheld::BeforeDirect3d12)
     }
 
     /// Whether `program` is told a driver update is in progress: the compositor, on the software
@@ -274,8 +276,8 @@ pub const COMPUTE_CONTEXT_TYPES: [u32; 1] = [5];
 /// Why a driver is withheld.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Withheld {
-    /// Direct3D 9, 10 or 11, from every program.
-    BeforeDirect3d12,
+    /// Every Direct3D version, from every program.
+    Direct3d,
     /// Any version, from the compositor.
     FromTheCompositor,
 }
@@ -283,7 +285,7 @@ pub enum Withheld {
 impl Withheld {
     pub fn why(self) -> &'static str {
         match self {
-            Self::BeforeDirect3d12 => "held back by the software desktop switch",
+            Self::Direct3d => "held back by the software desktop switch",
             Self::FromTheCompositor => "the compositor gets no Intel driver while the desktop is in software",
         }
     }
@@ -294,13 +296,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_compositor_gets_nothing_and_others_get_direct3d_12_in_the_software_desktop() {
+    fn the_software_desktop_withholds_direct3d_from_every_program_and_the_compositor_has_its_own_reason() {
         let software = Desktop::Software;
-        assert_eq!(software.withheld(true, "DWM.EXE"), Some(Withheld::FromTheCompositor));
-        assert_eq!(software.withheld(false, "dwm.exe"), Some(Withheld::FromTheCompositor));
-        assert_eq!(software.withheld(false, "game.exe"), Some(Withheld::BeforeDirect3d12));
-        assert_eq!(software.withheld(true, "game.exe"), None);
-        assert_eq!(Desktop::Hardware.withheld(false, "dwm.exe"), None, "all of Intel's drivers for everyone");
+        assert_eq!(software.withheld("DWM.EXE"), Some(Withheld::FromTheCompositor));
+        assert_eq!(software.withheld("dwm.exe"), Some(Withheld::FromTheCompositor));
+        for program in ["explorer.exe", "LogonUI.exe", "game.exe", ""] {
+            assert_eq!(software.withheld(program), Some(Withheld::Direct3d), "{program}");
+        }
+        assert_eq!(Desktop::Hardware.withheld("dwm.exe"), None, "all of Intel's drivers for everyone");
+        assert_eq!(Desktop::Hardware.withheld("explorer.exe"), None);
     }
 
     #[test]

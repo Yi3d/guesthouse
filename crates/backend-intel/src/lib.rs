@@ -180,7 +180,7 @@ impl IntelBackend {
                  compositor sends would run, so it could never draw"
             ),
             (Desktop::Software, None) => log::info!(
-                "{PREFIX} software-desktop on: Direct3D 9, 10 and 11 drivers refused, and every driver to the compositor"
+                "{PREFIX} software-desktop on: every Direct3D driver refused, 9 to 12, and every driver to the compositor"
             ),
             (Desktop::Hardware, _) if lab_kept && self.stage() != Stage::Everything => log::warn!(
                 "{PREFIX} software-desktop off on a recorded card, as {} asks: a lab run to see the hardware \
