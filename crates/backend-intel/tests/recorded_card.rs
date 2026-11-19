@@ -2,7 +2,7 @@
 //! guest the record the daemon on the real card gave, as that daemon's log line says it.
 
 use guesthouse_backend_intel::IntelBackend;
-use guesthouse_backend_intel::protocol::record;
+use guesthouse_backend_intel::protocol::{features, record};
 use guesthouse_backend_intel::recording;
 
 const ARC_B580: &str = include_str!("cards/arc-b580.card");
@@ -28,4 +28,15 @@ fn the_recorded_b580_gives_the_guest_its_own_urb() {
         "size_kb=3840 vs=64-5888 hs=0-1548 gs=2-1952 ds=50-4480 task=0-1548 mesh=4-1952 max_start=127",
         "768 KB a slice in five slices, and the stages' limits as its hwconfig gives them"
     );
+}
+
+#[test]
+fn the_recorded_b580_gets_its_workaround_table_from_its_render_and_media_ips() {
+    let backend = IntelBackend::from_card(recording::read(ARC_B580).unwrap()).unwrap();
+    let record = backend.record();
+    let set = (0..3048).filter(|&entry| features::workaround(record, entry).is_some_and(|value| value != 0));
+    assert_eq!(set.count(), 194);
+    assert_eq!(features::workaround(record, 2964), Some(2), "render 20.01");
+    assert_eq!(features::workaround(record, 2525), Some(4), "media 13.01");
+    assert_eq!(features::workaround(record, 2571), Some(8), "display 14.01 at revision 0");
 }

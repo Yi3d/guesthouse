@@ -89,6 +89,8 @@ pub struct IntelBackend {
     generation: &'static Generation,
     facts: AdapterFacts,
     record: Vec<u8>,
+    /// How the record's workaround table was built, for the log.
+    workarounds: protocol::workarounds::Outcome,
     books: Books,
     traffic: Traffic,
     started: Instant,
@@ -123,7 +125,7 @@ impl IntelBackend {
             ));
         }
         let shared = card.system_memory() / SHARED_MEMORY_PART;
-        let record = record::build(&record_facts(&card, generation, shared));
+        let (record, workarounds) = record::build_telling(&record_facts(&card, generation, shared));
         // A card with memory of its own offers that; one without offers its share of the system's.
         let own = card.card_memory();
         let video_memory = if own > 0 { own } else { shared };
@@ -144,6 +146,7 @@ impl IntelBackend {
             generation,
             facts,
             record,
+            workarounds,
             books: Books::default(),
             traffic: Traffic::default(),
             started: Instant::now(),
@@ -234,6 +237,13 @@ impl IntelBackend {
         log::info!("{PREFIX} record-urb {urb}");
         if urb.vertex.max == 0 {
             log::warn!("{PREFIX} record-urb-unknown \"the card's hwconfig gives no URB entry limits\"");
+        }
+        match &self.workarounds {
+            protocol::workarounds::Outcome::Built(built) => log::info!("{PREFIX} record-workarounds {built}"),
+            protocol::workarounds::Outcome::Uncovered(ip) => log::warn!(
+                "{PREFIX} record-workarounds-uncovered ip=\"{ip}\" \"the workaround table has no data for this IP, \
+                 so only the entries this backend sets are set\""
+            ),
         }
         log::info!("{PREFIX} record-partition [{}]", protocol::partition::Text(protocol::partition::ours()));
         for gap in gaps::unset(shape::filled(&self.record)) {
@@ -485,6 +495,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
         video_enhance_engines: card.instance_mask(Engine::VIDEO_ENHANCE),
         address_bits: card.config.va_bits,
         xe2_tiling: generation.xe2_tiling,
+        media_ip: card.media_gt().map(|gt| ip(Some(gt))),
     }
 }
 

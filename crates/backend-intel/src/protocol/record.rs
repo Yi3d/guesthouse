@@ -7,13 +7,14 @@
 //! the card's ids, clocks and shape, the feature flags this backend sets, and the GPU address
 //! partition. The shape of the GPU includes its slice arrays, [`super::shape`]. Compression is off,
 //! as the host can't set up compressed memory yet, and the byte that marks the adapter as a virtual
-//! machine's is set, with the one workaround entry that goes with it. What is left at zero is listed in
-//! [`super::gaps::RECORD`].
+//! machine's is set. The workaround table is the one Intel's kernel driver would give the card,
+//! [`super::workarounds`]. What is left at zero is listed in [`super::gaps::RECORD`].
 
 use super::bytes::{dword, put_dword, put_qword, put_word};
 use super::features::{self, Feature};
 use super::partition;
 use super::shape::{self, Core};
+use super::workarounds::{self, Outcome};
 use guesthouse_backend::{Status, VendorQuery};
 
 /// KMTQAITYPE_UMDRIVERPRIVATE.
@@ -126,18 +127,15 @@ const VEBOX_COUNT: usize = 0x14;
 const VEBOX_VALID: usize = 0x18;
 
 /// The workaround entry that is set for an adapter that is a virtual machine's, and its value.
+/// Intel's kernel driver sets it only when asked for a virtual machine's record; this adapter always
+/// is one, so the entry is set whatever the table gives. On every card the table covers it gives 1.
 const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
 /// An unnamed entry, the top nibble of the record's dword at 0x4A8, that Intel's Direct3D 11 driver
 /// reads as tiled resources at tier 2 or above. Direct3D 11 refuses a device at 12_0 or above from a
-/// driver that says less, which is every device, the desktop compositor's included.
+/// driver that says less, which is every device, the desktop compositor's included, so it is set
+/// whatever the table gives. On every card the table covers it gives 1 too; a card it doesn't cover
+/// still needs it.
 const TILED_RESOURCES_WORKAROUND: (usize, u8) = (535, 1);
-/// The entry Intel's Direct3D 11 driver reads to keep one of the render cache's optimisations off
-/// (RHWO, which 3DSTATE_3D_MODE switches), and the value Intel's kernel driver gives it on
-/// Battlemage. With the entry clear the driver turns the optimisation on in every context and
-/// leaves it on. Mesa keeps it off on the same cards.
-const RENDER_CACHE_WORKAROUND: (usize, u8) = (2964, 2);
-/// The render IP that entry is set for: Battlemage, 20.01.
-const BATTLEMAGE_RENDER_IP: (u32, u32) = (20, 1);
 /// KMD_CAPS_INFO's DriverStoreEnabled: the driver runs from the driver store, as one from a DCH INF
 /// always does, and the guest's copy is in its host driver store. Intel's Direct3D 12 driver loads
 /// its shader compiler from its own folder only when this is set, and by bare name, from nowhere it
@@ -190,6 +188,18 @@ impl IpWord {
 
     pub fn release(self) -> u32 {
         self.0 >> Self::RELEASE_SHIFT & Self::RELEASE_MASK
+    }
+
+    pub fn revision(self) -> u32 {
+        self.0 & Self::REVISION_MASK
+    }
+
+    /// As the workaround table reads it, or none for a word that is all zero.
+    fn workaround_ip(self) -> Option<workarounds::Ip> {
+        let part = |value: u32| value as u16;
+        (self.0 != 0).then(|| {
+            workarounds::Ip::new(part(self.architecture()), part(self.release()), part(self.revision()))
+        })
     }
 }
 
@@ -348,10 +358,18 @@ pub struct RecordFacts {
     pub address_bits: u64,
     /// Whether the card tiles as Xe2 and later do.
     pub xe2_tiling: bool,
+    /// The media GT's IP version, which the workaround table is built from. A card with no media
+    /// GT has none.
+    pub media_ip: Option<IpWord>,
 }
 
 /// Builds the record.
 pub fn build(facts: &RecordFacts) -> Vec<u8> {
+    build_telling(facts).0
+}
+
+/// Builds the record, and says how its workaround table was built.
+pub fn build_telling(facts: &RecordFacts) -> (Vec<u8>, Outcome) {
     let mut record = vec![0u8; RECORD_SIZE];
     let platform = &facts.platform;
     for (field, value) in [
@@ -433,20 +451,25 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
             record[block + valid] = 1;
         }
     }
+    // The table reads the feature table, so it comes after it, and the entries this backend
+    // insists on after the table.
     set_features(&mut record, facts);
+    let card = workarounds::Card {
+        product_family: platform.product_family,
+        device_id: platform.device_id,
+        pci_revision: platform.revision as u8,
+        render: platform.render_ip.workaround_ip(),
+        media: facts.media_ip.and_then(IpWord::workaround_ip),
+    };
+    let outcome = workarounds::fill(&mut record, &card);
     for (entry, value) in [VIRTUAL_MACHINE_WORKAROUND, TILED_RESOURCES_WORKAROUND] {
-        features::set_workaround(&mut record, entry, value);
-    }
-    let render_ip = (platform.render_ip.architecture(), platform.render_ip.release());
-    if render_ip == BATTLEMAGE_RENDER_IP {
-        let (entry, value) = RENDER_CACHE_WORKAROUND;
         features::set_workaround(&mut record, entry, value);
     }
     let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
     partition::write(block, &partition::ours());
     record[at::FROM_VIRTUAL_MACHINE] = 1;
     record[at::SECURE_VIRTUAL_MACHINE] = 0;
-    record
+    (record, outcome)
 }
 
 /// The flags this backend sets: the memory model the core offers, hardware scheduling, Xe2's
@@ -565,6 +588,7 @@ impl std::fmt::Display for RecordSummary {
 pub(crate) mod tests {
     use super::*;
     use crate::protocol::bytes::{qword, word};
+    use std::collections::BTreeMap;
 
     pub fn facts() -> RecordFacts {
         RecordFacts {
@@ -599,6 +623,7 @@ pub(crate) mod tests {
             video_enhance_engines: 0b11,
             address_bits: 48,
             xe2_tiling: true,
+            media_ip: Some(IpWord::new(20, 0, 0)),
         }
     }
 
@@ -747,17 +772,256 @@ pub(crate) mod tests {
         assert_eq!(features::workaround(&record, 534), Some(0));
     }
 
+    /// The table Intel's kernel driver gives an Arc B580, as `entry:value` with the value in hex,
+    /// on a guest whose feature table is a real card's.
+    const B580_REAL_CARD: &str = "\
+        0:1 91:1 427:1 535:1 705:1 830:1 876:1 925:1 926:1 957:1 968:1 982:1 984:1 1002:1 1093:1 \
+        1234:1 1249:1 1261:1 1316:1 1385:1 1398:1 1401:1 1402:1 1403:1 1405:1 1407:1 1408:1 1410:1 \
+        1413:1 1414:1 1432:1 1433:1 1468:1 1527:1 1528:1 2159:8 2163:2 2287:1 2350:8 2368:8 2411:8 \
+        2414:8 2456:8 2457:1 2479:8 2480:8 2500:8 2523:8 2525:4 2532:2 2533:2 2534:2 2535:1 2540:2 \
+        2541:2 2542:4 2543:4 2544:2 2554:2 2559:2 2563:2 2569:2 2571:8 2572:8 2574:8 2581:2 2588:8 \
+        2595:2 2596:2 2607:2 2613:2 2627:4 2628:2 2631:2 2632:2 2635:2 2644:2 2648:4 2650:2 2651:8 \
+        2654:4 2655:4 2661:2 2662:2 2663:2 2665:2 2667:2 2668:2 2669:2 2671:2 2672:4 2676:2 2678:6 \
+        2681:4 2682:2 2683:2 2687:2 2690:4 2695:2 2697:2 2698:2 2699:4 2705:4 2709:8 2710:2 2711:4 \
+        2714:2 2719:2 2721:2 2722:6 2725:2 2734:2 2735:2 2740:8 2741:4 2742:8 2743:8 2744:2 2747:2 \
+        2750:8 2752:2 2754:8 2756:2 2759:8 2760:2 2763:2 2765:2 2770:2 2774:8 2775:2 2776:4 2777:2 \
+        2781:2 2782:2 2783:2 2784:2 2787:8 2789:2 2791:8 2792:2 2794:2 2795:2 2796:8 2799:8 2802:2 \
+        2803:2 2807:2 2811:2 2815:4 2822:8 2827:2 2834:2 2835:1 2836:1 2838:1 2839:1 2847:1 2851:2 \
+        2854:2 2860:2 2864:1 2865:1 2866:8 2867:2 2869:2 2871:2 2874:6 2876:2 2877:2 2878:2 2882:4 \
+        2883:2 2888:2 2893:2 2896:8 2913:2 2920:2 2922:4 2924:8 2925:2 2927:2 2928:8 2930:8 2935:6 \
+        2943:6 2948:4 2949:2 2950:8 2964:2 3024:1 3039:3 3040:5 3041:9";
+    // What Intel's kernel driver gives the other cards in the tests below for the same inputs,
+    // with this backend's feature table (the newest Direct3D 11 interface version alone).
+
+    /// 210 entries.
+    const LUNAR_LAKE: &str = "\
+        91:1 427:1 535:1 705:1 830:1 876:1 925:1 926:1 957:1 968:1 982:1 984:1 1002:1 1022:1 1093:1 \
+        1234:1 1249:1 1261:1 1316:1 1385:1 1398:1 1401:1 1402:1 1403:1 1404:1 1406:1 1407:1 1409:1 \
+        1410:1 1412:1 1413:1 1414:1 1432:1 1433:1 1468:1 1527:1 1528:1 1552:1 1982:1 2163:2 2287:1 \
+        2457:1 2485:1 2500:8 2501:8 2503:8 2523:8 2525:4 2532:2 2533:2 2534:2 2535:1 2539:2 2540:2 \
+        2541:6 2542:4 2543:4 2544:2 2554:2 2559:2 2563:2 2569:2 2571:8 2572:8 2574:8 2581:2 2585:8 \
+        2588:8 2595:2 2596:2 2597:4 2599:8 2601:8 2604:4 2607:2 2613:2 2615:6 2616:6 2619:8 2627:4 \
+        2631:2 2633:2 2635:2 2644:2 2645:2 2648:4 2651:8 2654:4 2655:4 2657:8 2658:8 2661:2 2662:2 \
+        2663:2 2664:8 2665:2 2667:2 2668:2 2671:6 2672:4 2676:2 2678:6 2682:2 2683:2 2687:2 2693:8 \
+        2695:2 2697:2 2698:2 2699:4 2700:8 2702:8 2705:4 2706:8 2710:2 2714:2 2719:2 2720:8 2721:2 \
+        2722:6 2723:8 2725:2 2734:2 2735:2 2741:4 2742:8 2743:8 2744:2 2748:2 2749:4 2751:4 2752:2 \
+        2755:8 2756:6 2757:2 2759:8 2760:4 2763:2 2764:6 2765:2 2768:4 2769:4 2771:2 2773:8 2774:8 \
+        2776:4 2777:2 2779:8 2781:2 2782:2 2783:2 2784:2 2785:8 2788:8 2789:2 2790:4 2791:8 2792:2 \
+        2793:2 2794:2 2796:8 2799:8 2802:2 2803:2 2811:2 2822:8 2825:8 2826:8 2827:2 2836:1 2838:1 \
+        2843:1 2847:1 2853:8 2854:2 2856:6 2858:8 2864:1 2865:1 2867:2 2869:2 2871:2 2873:8 2874:6 \
+        2876:2 2877:2 2878:2 2882:4 2888:2 2893:2 2896:8 2899:4 2913:2 2922:4 2924:8 2927:2 2928:8 \
+        2930:8 2935:6 2938:4 2943:6 2948:6 2949:2 2964:2 3014:2 3023:1 3024:1 3039:3 3040:5 3041:9";
+    /// 248 entries.
+    const METEOR_LAKE: &str = "\
+        91:1 399:1 415:1 427:1 535:1 692:1 705:1 706:1 771:1 876:1 925:1 926:1 957:1 968:1 982:1 \
+        983:1 1002:1 1021:1 1093:1 1138:1 1234:1 1249:1 1261:1 1316:1 1385:1 1398:1 1401:1 1402:1 \
+        1403:1 1404:1 1406:1 1407:1 1409:1 1410:1 1412:1 1413:1 1414:1 1432:1 1433:1 1439:1 1442:1 \
+        1468:1 1527:1 1528:1 1552:1 1726:2 1917:2 1982:1 2132:2 2147:8 2159:8 2172:2 2191:2 2197:2 \
+        2198:2 2201:6 2223:2 2225:2 2229:2 2232:2 2238:6 2240:2 2241:2 2245:2 2246:2 2250:2 2251:2 \
+        2252:2 2258:8 2261:8 2265:1 2266:2 2267:2 2268:2 2270:2 2273:2 2275:8 2277:2 2278:8 2280:2 \
+        2283:2 2284:2 2286:2 2288:2 2289:2 2295:2 2300:2 2301:2 2302:2 2303:2 2340:2 2343:6 2344:2 \
+        2349:8 2350:8 2352:4 2354:2 2356:2 2357:2 2358:2 2360:2 2363:2 2365:2 2367:8 2368:8 2376:8 \
+        2379:8 2380:2 2385:2 2386:2 2387:2 2388:2 2389:2 2390:2 2391:2 2394:2 2397:4 2399:2 2400:2 \
+        2401:2 2403:4 2404:2 2411:8 2413:2 2416:2 2421:4 2436:2 2437:8 2438:1 2440:2 2442:2 2443:2 \
+        2444:2 2446:2 2447:2 2449:2 2451:2 2452:2 2455:2 2456:8 2457:1 2462:4 2467:2 2468:2 2470:8 \
+        2471:2 2473:4 2475:2 2476:2 2477:8 2480:8 2484:2 2485:1 2487:2 2491:2 2498:2 2499:2 2500:8 \
+        2502:2 2503:8 2507:2 2513:2 2517:2 2518:4 2520:2 2521:2 2522:2 2523:8 2524:2 2526:2 2535:1 \
+        2538:2 2543:4 2560:2 2571:8 2572:8 2574:8 2575:8 2577:6 2582:4 2586:2 2587:2 2588:8 2593:2 \
+        2594:6 2596:2 2603:2 2604:6 2614:8 2621:2 2623:2 2629:2 2630:2 2639:4 2642:2 2645:4 2646:4 \
+        2649:2 2651:8 2656:8 2659:2 2672:4 2683:2 2691:8 2704:2 2705:4 2708:2 2709:8 2712:4 2716:6 \
+        2721:2 2733:8 2741:4 2742:8 2743:8 2753:8 2759:8 2774:8 2779:8 2791:8 2796:8 2799:8 2810:2 \
+        2822:8 2827:2 2836:1 2839:1 2841:1 2842:1 2843:1 2857:2 2863:2 2865:1 2866:8 2874:6 2880:2 \
+        2882:4 2896:8 2921:8 2922:4 2924:8 2928:8 2930:8 2968:8 3024:1 3039:3 3040:5 3041:9";
+    /// 147 entries.
+    const PANTHER_LAKE: &str = "\
+        91:1 427:1 535:1 705:1 830:1 876:1 925:1 926:1 957:1 968:1 982:1 1002:1 1093:1 1234:1 1249:1 \
+        1261:1 1316:1 1385:1 1398:1 1401:1 1402:1 1403:1 1404:1 1406:1 1407:1 1409:1 1410:1 1412:1 \
+        1413:1 1414:1 1432:1 1433:1 1468:1 1527:1 1528:1 1552:1 2287:1 2457:1 2534:2 2535:1 2559:2 \
+        2662:2 2671:4 2705:4 2717:4 2718:8 2720:8 2732:8 2734:2 2741:4 2742:8 2743:8 2748:2 2749:4 \
+        2751:4 2752:2 2755:8 2756:6 2760:4 2761:4 2763:2 2764:6 2768:4 2769:4 2772:8 2773:8 2774:8 \
+        2777:2 2779:8 2781:2 2782:2 2783:2 2785:8 2788:8 2789:2 2792:2 2796:8 2797:4 2799:8 2801:8 \
+        2802:2 2803:2 2804:2 2812:8 2819:2 2822:8 2825:8 2826:8 2828:4 2831:2 2832:4 2836:1 2838:1 \
+        2843:1 2847:1 2852:2 2853:8 2854:2 2858:8 2859:8 2862:8 2865:1 2869:2 2870:4 2871:2 2874:6 \
+        2876:2 2877:2 2878:2 2879:8 2883:2 2885:4 2890:2 2891:4 2893:2 2896:8 2903:4 2907:4 2910:8 \
+        2911:8 2913:2 2922:4 2924:8 2926:8 2927:2 2928:8 2930:8 2931:4 2935:6 2938:4 2940:4 2943:6 \
+        2948:6 2949:2 2952:8 2964:2 2973:2 2977:8 2984:2 3005:8 3013:8 3014:2 3023:1 3030:1 3039:3 \
+        3040:5 3041:9";
+    /// 296 entries.
+    const ALCHEMIST_G11_REV_0: &str = "\
+        0:1 1:1 91:1 92:1 96:1 97:1 310:1 318:1 399:1 415:1 427:1 535:1 675:1 692:1 705:1 706:1 \
+        707:1 771:1 876:1 881:1 883:1 925:1 926:1 957:1 968:1 970:1 981:1 986:1 997:1 1016:1 1020:1 \
+        1022:1 1093:1 1138:1 1234:1 1249:1 1250:1 1257:1 1261:1 1316:1 1328:1 1337:1 1385:1 1398:1 \
+        1401:1 1402:1 1403:1 1404:1 1406:1 1407:1 1409:1 1410:1 1412:1 1413:1 1414:1 1438:1 1439:1 \
+        1468:1 1471:1 1475:1 1500:1 1527:1 1528:1 1552:1 1582:1 1594:1 1624:1 1684:1 1726:1 1728:1 \
+        1793:1 1816:1 1819:1 1830:1 1844:1 1847:1 1854:1 1871:1 1893:1 1917:1 1952:1 1953:1 1960:1 \
+        1967:1 1981:1 1982:1 1999:1 2009:1 2011:1 2020:1 2024:1 2025:1 2028:1 2031:1 2034:1 2062:1 \
+        2070:1 2071:1 2072:1 2078:1 2083:1 2086:1 2093:1 2094:1 2095:1 2097:1 2102:1 2103:1 2107:1 \
+        2109:1 2112:1 2119:1 2122:1 2123:1 2125:1 2129:1 2130:1 2131:1 2132:1 2140:1 2142:1 2147:1 \
+        2148:1 2149:1 2152:1 2153:1 2154:1 2157:1 2159:1 2160:1 2161:1 2162:1 2165:1 2166:1 2169:1 \
+        2171:1 2172:1 2173:1 2178:1 2179:1 2184:1 2185:1 2186:1 2187:1 2188:1 2189:1 2191:1 2194:1 \
+        2195:1 2196:1 2197:1 2198:1 2199:1 2201:1 2222:1 2223:1 2225:1 2229:1 2230:1 2232:1 2236:1 \
+        2238:1 2240:1 2243:1 2245:1 2246:1 2247:1 2248:1 2250:1 2251:1 2252:1 2253:1 2256:1 2260:1 \
+        2261:1 2266:1 2267:1 2268:1 2270:1 2271:1 2272:1 2273:1 2276:1 2277:1 2279:1 2280:1 2283:1 \
+        2284:1 2286:1 2288:1 2289:1 2295:1 2300:1 2302:1 2306:1 2317:1 2340:1 2342:1 2343:1 2344:1 \
+        2349:1 2350:1 2352:1 2354:1 2356:1 2357:1 2358:1 2363:1 2364:1 2365:1 2366:1 2368:1 2369:1 \
+        2376:1 2379:1 2380:1 2382:1 2386:1 2387:1 2388:1 2389:1 2390:1 2391:1 2394:1 2395:1 2396:1 \
+        2400:1 2401:1 2402:1 2412:1 2417:1 2421:1 2437:1 2439:1 2440:1 2441:1 2442:1 2443:1 2444:1 \
+        2446:1 2449:1 2452:1 2455:1 2457:1 2467:1 2468:1 2469:1 2474:1 2488:1 2494:1 2500:1 2502:1 \
+        2503:1 2513:1 2522:1 2523:1 2526:1 2535:1 2553:1 2560:1 2561:1 2572:1 2575:1 2576:1 2579:1 \
+        2587:1 2588:1 2596:1 2604:1 2611:1 2621:1 2623:1 2649:1 2683:1 2691:1 2696:1 2716:1 2721:1 \
+        2742:1 2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2836:1 2839:1 2865:1 2866:1 \
+        2874:1 3024:1 3039:1 3040:1 3041:1";
+    /// 283 entries.
+    const ALCHEMIST_G11_REV_8: &str = "\
+        0:1 1:1 91:1 92:1 96:1 97:1 310:1 318:1 399:1 415:1 427:1 535:1 675:1 692:1 705:1 706:1 \
+        707:1 771:1 876:1 881:1 883:1 925:1 926:1 957:1 968:1 981:1 986:1 997:1 1016:1 1020:1 1022:1 \
+        1093:1 1138:1 1234:1 1249:1 1250:1 1257:1 1261:1 1316:1 1328:1 1337:1 1385:1 1398:1 1401:1 \
+        1402:1 1403:1 1404:1 1406:1 1407:1 1409:1 1410:1 1412:1 1413:1 1414:1 1438:1 1439:1 1449:1 \
+        1468:1 1471:1 1475:1 1500:1 1527:1 1528:1 1552:1 1582:1 1594:1 1624:1 1684:1 1726:1 1728:1 \
+        1793:1 1816:1 1819:1 1830:1 1844:1 1847:1 1854:1 1871:1 1893:1 1917:1 1952:1 1953:1 1960:1 \
+        1967:1 1981:1 1982:1 1999:1 2009:1 2024:1 2025:1 2028:1 2031:1 2034:1 2078:1 2083:1 2095:1 \
+        2102:1 2107:1 2112:1 2119:1 2125:1 2129:1 2132:1 2142:1 2147:1 2148:1 2152:1 2154:1 2157:1 \
+        2159:1 2160:1 2161:1 2165:1 2166:1 2172:1 2178:1 2179:1 2184:1 2185:1 2191:1 2196:1 2197:1 \
+        2198:1 2199:1 2201:1 2222:1 2223:1 2224:1 2225:1 2229:1 2230:1 2232:1 2236:1 2238:1 2240:1 \
+        2243:1 2245:1 2246:1 2247:1 2248:1 2250:1 2251:1 2252:1 2253:1 2256:1 2261:1 2266:1 2267:1 \
+        2268:1 2270:1 2271:1 2272:1 2273:1 2276:1 2277:1 2279:1 2280:1 2283:1 2284:1 2286:1 2288:1 \
+        2289:1 2295:1 2300:1 2302:1 2303:1 2306:1 2317:1 2340:1 2342:1 2343:1 2344:1 2349:1 2350:1 \
+        2352:1 2354:1 2355:1 2356:1 2357:1 2358:1 2363:1 2364:1 2365:1 2366:1 2368:1 2369:1 2370:1 \
+        2376:1 2379:1 2380:1 2382:1 2386:1 2387:1 2388:1 2389:1 2390:1 2391:1 2394:1 2395:1 2396:1 \
+        2400:1 2401:1 2402:1 2404:1 2412:1 2413:1 2417:1 2421:1 2424:1 2437:1 2439:1 2440:1 2441:1 \
+        2442:1 2443:1 2444:1 2446:1 2449:1 2452:1 2455:1 2457:1 2467:1 2468:1 2469:1 2471:1 2474:1 \
+        2481:1 2482:1 2487:1 2488:1 2494:1 2498:1 2499:1 2500:1 2502:1 2503:1 2506:1 2507:1 2513:1 \
+        2519:1 2520:1 2522:1 2523:1 2526:1 2535:1 2553:1 2560:1 2561:1 2572:1 2575:1 2576:1 2579:1 \
+        2587:1 2588:1 2596:1 2604:1 2611:1 2621:1 2623:1 2649:1 2683:1 2691:1 2696:1 2716:1 2721:1 \
+        2742:1 2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2836:1 2839:1 2865:1 2866:1 \
+        2874:1 3024:1 3039:1 3040:1 3041:1";
+    /// 294 entries.
+    const ALCHEMIST_A770: &str = "\
+        0:1 1:1 91:1 92:1 96:1 97:1 310:1 318:1 399:1 415:1 427:1 535:1 675:1 692:1 705:1 706:1 \
+        709:1 771:1 876:1 881:1 925:1 926:1 957:1 968:1 981:1 986:1 997:1 1016:1 1020:1 1022:1 \
+        1093:1 1138:1 1234:1 1249:1 1250:1 1257:1 1261:1 1316:1 1328:1 1337:1 1385:1 1398:1 1401:1 \
+        1402:1 1403:1 1404:1 1406:1 1407:1 1409:1 1410:1 1412:1 1413:1 1414:1 1438:1 1439:1 1449:1 \
+        1468:1 1471:1 1475:1 1481:1 1500:1 1527:1 1528:1 1552:1 1582:1 1624:1 1684:1 1726:1 1728:1 \
+        1793:1 1816:1 1819:1 1830:1 1844:1 1847:1 1854:1 1871:1 1887:1 1893:1 1910:1 1917:1 1952:1 \
+        1953:1 1960:1 1967:1 1981:1 1982:1 1999:1 2009:1 2024:1 2025:1 2028:1 2031:1 2034:1 2078:1 \
+        2083:1 2095:1 2102:1 2107:1 2110:1 2112:1 2119:1 2125:1 2129:1 2132:1 2142:1 2147:1 2148:1 \
+        2152:1 2154:1 2159:1 2160:1 2161:1 2165:1 2166:1 2172:1 2177:1 2178:1 2179:1 2184:1 2185:1 \
+        2191:1 2196:1 2197:1 2198:1 2201:1 2222:1 2223:1 2227:1 2229:1 2238:1 2240:1 2243:1 2245:1 \
+        2246:1 2248:1 2250:1 2251:1 2252:1 2256:1 2259:1 2261:1 2266:1 2267:1 2268:1 2270:1 2273:1 \
+        2276:1 2277:1 2279:1 2280:1 2283:1 2284:1 2286:1 2288:1 2289:1 2295:1 2300:1 2302:1 2303:1 \
+        2306:1 2317:1 2340:1 2341:1 2342:1 2343:1 2344:1 2346:1 2349:1 2350:1 2352:1 2354:1 2355:1 \
+        2356:1 2357:1 2358:1 2359:1 2363:1 2364:1 2365:1 2366:1 2368:1 2369:1 2370:1 2376:1 2379:1 \
+        2380:1 2381:1 2382:1 2385:1 2386:1 2387:1 2388:1 2389:1 2390:1 2391:1 2394:1 2395:1 2396:1 \
+        2399:1 2400:1 2401:1 2402:1 2404:1 2412:1 2413:1 2417:1 2421:1 2423:1 2424:1 2437:1 2440:1 \
+        2441:1 2443:1 2444:1 2446:1 2449:1 2451:1 2452:1 2455:1 2457:1 2467:1 2468:1 2469:1 2471:1 \
+        2474:1 2476:1 2481:1 2482:1 2487:1 2488:1 2494:1 2498:1 2499:1 2500:1 2502:1 2503:1 2506:1 \
+        2507:1 2513:1 2519:1 2520:1 2522:1 2523:1 2524:1 2526:1 2528:1 2535:1 2538:1 2553:1 2560:1 \
+        2561:1 2572:1 2575:1 2576:1 2579:1 2586:1 2587:1 2588:1 2589:1 2596:1 2604:1 2611:1 2621:1 \
+        2623:1 2629:1 2642:1 2645:1 2649:1 2659:1 2683:1 2691:1 2703:1 2716:1 2721:1 2731:1 2742:1 \
+        2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2836:1 2839:1 2865:1 2866:1 2874:1 \
+        3024:1 3039:1 3040:1 3041:1";
+
+    fn expected(table: &str) -> BTreeMap<usize, u8> {
+        table
+            .split_whitespace()
+            .map(|pair| {
+                let (entry, value) = pair.split_once(':').unwrap();
+                (entry.parse().unwrap(), u8::from_str_radix(value, 16).unwrap())
+            })
+            .collect()
+    }
+
+    fn table_of(record: &[u8]) -> BTreeMap<usize, u8> {
+        (0..0x5F4 * 2)
+            .filter_map(|entry| Some((entry, features::workaround(record, entry)?)))
+            .filter(|&(_, value)| value != 0)
+            .collect()
+    }
+
+    /// A card with GMD_ID versions: its product family and device, and its render and media IPs.
+    fn card(product_family: u32, device_id: u16, render_ip: IpWord, media_ip: Option<IpWord>) -> RecordFacts {
+        let base = facts();
+        let platform = Platform { product_family, device_id, render_ip, ..base.platform };
+        RecordFacts { platform, media_ip, ..base }
+    }
+
+    fn alchemist(device_id: u16, revision: u16) -> RecordFacts {
+        let mut facts = card(1270, device_id, IpWord::new(12, 55, 8), None);
+        facts.platform.revision = revision;
+        facts
+    }
+
     #[test]
-    fn battlemage_keeps_the_render_caches_optimisation_off_and_other_cards_are_left_alone() {
-        let mut battlemage = facts();
-        battlemage.platform.render_ip = IpWord::new(20, 1, 0);
-        let record = build(&battlemage);
-        assert_eq!(features::workaround(&record, 2964), Some(2));
-        assert_eq!(record[0x96A], 0x02, "the low half of the byte Direct3D 11 tests");
-        assert_eq!(features::workaround(&record, 2965), Some(0));
-        let mut lunar_lake = facts();
-        lunar_lake.platform.render_ip = IpWord::new(20, 4, 4);
-        assert_eq!(features::workaround(&build(&lunar_lake), 2964), Some(0));
+    fn the_arc_b580_gets_the_table_intels_kernel_driver_gives_it() {
+        let b580 = card(1274, 0xE20B, IpWord::new(20, 1, 0), Some(IpWord::new(13, 1, 1)));
+        let (record, outcome) = build_telling(&b580);
+        let mut ours = table_of(&record);
+        let mut real = expected(B580_REAL_CARD);
+        assert_eq!(real.len(), 193);
+        // Where this backend's record departs from a real card's, each entry by name: (entry, the
+        // real card's value, this record's).
+        let departures = [
+            // The entries that go with which Direct3D 11 interface versions the feature table
+            // offers. A real card offers them all; this record offers the newest alone.
+            (1404, 0, 1),
+            (1405, 1, 0),
+            (1406, 0, 1),
+            (1408, 1, 0),
+            (1409, 0, 1),
+            (1412, 0, 1),
+            // Set only with a feature bit whose meaning isn't known, which this record leaves clear.
+            (2835, 1, 0),
+            // This backend's own two, the virtual machine's and tiled resources: the same as a
+            // real card's.
+            (VIRTUAL_MACHINE_WORKAROUND.0, 1, 1),
+            (TILED_RESOURCES_WORKAROUND.0, 1, 1),
+        ];
+        for (entry, real_value, our_value) in departures {
+            assert_eq!(real.remove(&entry).unwrap_or(0), real_value, "{entry}");
+            assert_eq!(ours.remove(&entry).unwrap_or(0), our_value, "{entry}");
+        }
+        assert_eq!(ours, real);
+        assert_eq!(features::workaround(&record, 2964), Some(2), "the render cache's RHWO kept off");
+        assert_eq!(record[0x96A] & 0xF, 0x02, "the low half of the byte Direct3D 11 tests");
+        let Outcome::Built(built) = outcome else { panic!("the B580 is covered") };
+        assert_eq!(built.entries, 194);
+    }
+
+    #[test]
+    fn every_other_family_gets_its_table() {
+        let cards = [
+            (
+                "Lunar Lake",
+                card(1275, 0x64A0, IpWord::new(20, 4, 4), Some(IpWord::new(20, 0, 0))),
+                LUNAR_LAKE,
+            ),
+            (
+                "Meteor Lake",
+                card(1272, 0x7D55, IpWord::new(12, 70, 0), Some(IpWord::new(13, 0, 0))),
+                METEOR_LAKE,
+            ),
+            (
+                "Panther Lake",
+                card(1300, 0xB080, IpWord::new(30, 0, 4), Some(IpWord::new(30, 0, 0))),
+                PANTHER_LAKE,
+            ),
+            ("Alchemist G11 rev 0", alchemist(0x5693, 0), ALCHEMIST_G11_REV_0),
+            ("Alchemist G11 rev 8", alchemist(0x5693, 8), ALCHEMIST_G11_REV_8),
+            ("Arc A770", alchemist(0x56A0, 8), ALCHEMIST_A770),
+        ];
+        for (name, facts, table) in cards {
+            let record = build(&facts);
+            assert_eq!(table_of(&record), expected(table), "{name}");
+        }
+        assert_eq!(features::workaround(&build(&alchemist(0x56A0, 8)), 2964), Some(0));
+    }
+
+    #[test]
+    fn a_card_whose_ip_the_data_does_not_cover_keeps_only_this_backends_entries() {
+        let unknown = card(1274, 0xE20B, IpWord::new(20, 9, 0), Some(IpWord::new(13, 1, 1)));
+        let (record, outcome) = build_telling(&unknown);
+        assert_eq!(outcome, Outcome::Uncovered("render 20.09".into()));
+        assert_eq!(table_of(&record), BTreeMap::from([(535, 1), (968, 1)]));
     }
 
     #[test]

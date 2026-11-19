@@ -5,13 +5,12 @@
 //! where. The log names every one at start, so a tester's log says what the guest was not told.
 
 /// The parts of the record always left at zero, in words for the log.
-pub const RECORD: [&str; 18] = [
+pub const RECORD: [&str; 17] = [
     "the kernel driver's interface version (the record's first dword)",
     "the display IP version",
     "the media IP version",
     "the platform word between the display and render IP versions",
     "the per-adapter block after the platform",
-    "the workaround table, every entry but the one that marks a virtual machine's adapter, the one for tiled resources and Battlemage's for the render cache",
     "the feature flags whose places aren't known: Tile64Optimization, the video and video-enhancement \
      ring flags, and the rest of the table",
     "the feature flags whose places are only inferred: 3D mid-batch preemption, 3D object-level \

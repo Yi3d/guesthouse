@@ -70,6 +70,7 @@ fn every_kind_of_exchange_has_its_line() {
         ("intel card pci=8086:64a0", 1),
         ("intel record product_family=1275 render_core=0xc09", 1),
         ("intel record-urb size_kb=600 ", 1),
+        ("intel record-workarounds render=20.04r", 1),
         ("intel record-gap ", gaps::unset(true).len()),
         ("intel adapter-opened guest_id=0x6949", 1),
         ("intel query kind=0 size=4 wow64=0 answered=adapter-count", 1),
