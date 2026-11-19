@@ -27,6 +27,22 @@ const SLOT_SLACK: u64 = 2 << 20;
 /// How many allocations of about the right size are worth reading. Each costs a short copy.
 const MOST_CANDIDATES: usize = 32;
 
+/// What each buffer read for a stamp began with, for a ring that couldn't be made. Which slots
+/// were stamped, and with what, says where the stamps went.
+fn what_was_read(read: &[(u32, [u8; STAMP_SIZE])]) -> String {
+    if read.is_empty() {
+        return "no buffer of the right size to read".to_string();
+    }
+    let each: Vec<String> = read
+        .iter()
+        .map(|(allocation, bytes)| {
+            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("{allocation:#x} starts {hex}")
+        })
+        .collect();
+    format!("read {}", each.join(", "))
+}
+
 impl<B: Backend, M: GuestMemory> Session<B, M> {
     fn reply(&self, outcome: Outcome, next_slot: Option<u32>) -> Reply {
         let viewer = self.frames.viewer_facts;
@@ -141,6 +157,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     fn find_slots(&mut self, ring: &Register, space: SpaceId) -> Result<Vec<GuestSlot>, BackendError> {
         let own_space = self.own_space()?;
         let mut slots = vec![None; ring.slots as usize];
+        let mut read = Vec::new();
         for candidate in self.slot_candidates(ring, space) {
             let mut bytes = [0; STAMP_SIZE];
             // A candidate the guest's CPU has locked lies in the guest's own pages, and its stamp is
@@ -158,6 +175,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                     self.backend.read_memory_start(host, own_space, candidate.memory, &mut bytes)?;
                 }
             }
+            read.push((candidate.allocation, bytes));
             let Some(stamp) = Stamp::parse(&bytes) else { continue };
             if stamp.generation == ring.name.generation
                 && let Some(place) = slots.get_mut(stamp.slot as usize)
@@ -166,7 +184,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             }
         }
         let found: Option<Vec<GuestSlot>> = slots.into_iter().collect();
-        found.ok_or(BackendError::new("the ring's stamps aren't all there"))
+        found.ok_or_else(|| {
+            BackendError::new(format!("the ring's stamps aren't all there; {}", what_was_read(&read)))
+        })
     }
 
     /// The stamps have reached memory, or never will.
@@ -587,5 +607,23 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             StagingStart::Running => self.wait_for_copy(),
             StagingStart::Finished(status) => status,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ring_that_cant_be_made_says_what_each_buffer_began_with() {
+        let mut stamped = [0; STAMP_SIZE];
+        stamped[..4].copy_from_slice(b"GHOU");
+        let said = what_was_read(&[(0x4007_da40, stamped), (0x4007_dac0, [0; STAMP_SIZE])]);
+        assert_eq!(
+            said,
+            "read 0x4007da40 starts 47484f55000000000000000000000000, \
+             0x4007dac0 starts 00000000000000000000000000000000"
+        );
+        assert_eq!(what_was_read(&[]), "no buffer of the right size to read");
     }
 }
