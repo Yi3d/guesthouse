@@ -2,6 +2,7 @@
 //! the app watches the small file it leaves.
 
 mod amd_files;
+mod amd_package;
 mod amd_start;
 mod desktop;
 mod display;
@@ -17,6 +18,7 @@ mod ubuntu;
 mod window_speed;
 
 use amd_files::{bring_amd_driver_up_to_date, complete_host_driver};
+use amd_package::register_amd_package;
 pub use desktop::{apply_share, boots, rebooted};
 use desktop::{note_boot, set_up_desktop, wait_for_desktop};
 use gpu_check::check_gpu;
@@ -203,7 +205,8 @@ fn get_ready(task: &mut Task, shown: PciIdentity) -> Result<()> {
     apply_window_speed(task)?;
     if task.machine.windows_amd_card().is_some() {
         // What follows places NVIDIA's files and settings store, which a guest on AMD has no use for.
-        return bring_amd_driver_up_to_date(task);
+        bring_amd_driver_up_to_date(task)?;
+        return register_amd_package(task);
     }
     place_driver_files(task)?;
     place_profile_store(task)
