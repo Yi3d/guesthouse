@@ -79,8 +79,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// Somewhere in the window. Returns the address, and whether it was placed and not handed out.
     fn find_room(&mut self, window: Window, size: u64, space: SpaceId) -> Option<(u64, bool)> {
         let usage = AddressUse::Reserved;
-        let mapped = self.mapped_anywhere();
-        if let Some(base) = self.gpu_addresses.take_clear_of(size, ALLOCATION_ALIGN, usage, window, &mapped) {
+        // A freed reservation can still hold the guest's pages, and goes out again anyway: nothing is
+        // mapped over them until the guest maps there, which clears what it left.
+        if let Some(base) = self.gpu_addresses.take_within(size, ALLOCATION_ALIGN, usage, window) {
             return Some((base, false));
         }
         if !self.gpu_addresses.reaches(window) {

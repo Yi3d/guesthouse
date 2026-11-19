@@ -2746,6 +2746,17 @@ mod address_reuse {
     }
 
     #[test]
+    fn a_freed_reservation_is_reserved_again_with_the_guest_s_pages_still_in_it() {
+        let mut session = session();
+        let range = reserve(&mut session, 0x2_0000);
+        let (_, page) = allocate(&mut session, private(0x1_0000));
+        assert_eq!(map(&mut session, page, range + 0x1_0000, 0, 0x10), (range + 0x1_0000, SUCCESS));
+        free(&mut session, range);
+        // The guest's next map there clears what it left, as it does in any range it holds.
+        assert_eq!(reserve(&mut session, 0x2_0000), range);
+    }
+
+    #[test]
     fn a_range_with_the_guest_s_own_page_in_it_is_not_handed_out_again() {
         let mut session = session();
         let (base, buffer, _) = padded_buffer(&mut session);
