@@ -37,7 +37,8 @@ fn the_recorded_b580_gets_its_workaround_table_from_its_render_and_media_ips() {
     let backend = IntelBackend::from_card(recording::read(ARC_B580).unwrap()).unwrap();
     let record = backend.record();
     let set = (0..3048).filter(|&entry| features::workaround(record, entry).is_some_and(|value| value != 0));
-    assert_eq!(set.count(), 195);
+    assert_eq!(set.count(), 194, "the table's 195 but the render cache's keying");
+    assert_eq!(features::workaround(record, 2287), Some(0), "the render cache's keying, kept clear");
     assert_eq!(features::workaround(record, 2964), Some(2), "render 20.01");
     assert_eq!(features::workaround(record, 2525), Some(4), "media 13.01");
     assert_eq!(features::workaround(record, 2571), Some(8), "display 14.01 at revision 0");
@@ -51,8 +52,9 @@ fn fingerprint(record: &[u8]) -> u64 {
 }
 
 /// What the record of the recorded card with its device made 0xE20D was before the kernel driver's
-/// data: a Battlemage device that data has no table for.
-const UNLISTED_DEVICE_RECORD: u64 = 0xA17A_8091_A6A8_503B;
+/// data, a Battlemage device that data has no table for, but for the workaround entry for the render
+/// cache's keying, which the record now keeps clear on every card.
+const UNLISTED_DEVICE_RECORD: u64 = 0x989C_77AA_F17D_736B;
 
 #[test]
 fn a_device_the_kernel_drivers_data_does_not_list_gets_the_record_it_got_before() {

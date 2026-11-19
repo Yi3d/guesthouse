@@ -155,6 +155,14 @@ const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
 /// whatever the table gives. On every card the table covers it gives 1 too; a card it doesn't cover
 /// still needs it.
 const TILED_RESOURCES_WORKAROUND: (usize, u8) = (535, 1);
+/// An unnamed entry, the top nibble of the record's byte at 0x817. With it set, Intel's Direct3D 11
+/// driver takes the render cache to be keyed by binding table and index, as on Windows, and leaves
+/// out the render target cache flush the hardware otherwise needs whenever a binding comes to name
+/// another surface. xe keys the cache by index alone unless a queue is made with the state cache
+/// fix turned off, which this backend doesn't ask for, so the entry stays clear whatever the table
+/// gives and the driver flushes. With it set, draws into several surfaces one after another can
+/// land in the wrong one, and the display driver stamps its slots that way.
+const RENDER_CACHE_KEYING_WORKAROUND: (usize, u8) = (2287, 0);
 /// KMD_CAPS_INFO's DriverStoreEnabled: the driver runs from the driver store, as one from a DCH INF
 /// always does, and the guest's copy is in its host driver store. Intel's Direct3D 12 driver loads
 /// its shader compiler from its own folder only when this is set, and by bare name, from nowhere it
@@ -601,7 +609,9 @@ pub fn build_telling(facts: &RecordFacts) -> (Vec<u8>, Telling) {
         media: facts.media_ip.and_then(IpWord::workaround_ip),
     };
     let outcome = workarounds::fill(&mut record, &card);
-    for (entry, value) in [VIRTUAL_MACHINE_WORKAROUND, TILED_RESOURCES_WORKAROUND] {
+    for (entry, value) in
+        [VIRTUAL_MACHINE_WORKAROUND, TILED_RESOURCES_WORKAROUND, RENDER_CACHE_KEYING_WORKAROUND]
+    {
         features::set_workaround(&mut record, entry, value);
     }
     let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
@@ -1674,6 +1684,8 @@ pub(crate) mod tests {
             // real card's.
             (VIRTUAL_MACHINE_WORKAROUND.0, 1, 1),
             (TILED_RESOURCES_WORKAROUND.0, 1, 1),
+            // The render cache keyed by binding table, which xe's queues aren't here.
+            (RENDER_CACHE_KEYING_WORKAROUND.0, 1, 0),
         ];
         for (entry, real_value, our_value) in departures {
             assert_eq!(real.remove(&entry).unwrap_or(0), real_value, "{entry}");
@@ -1711,7 +1723,10 @@ pub(crate) mod tests {
         ];
         for (name, facts, table) in cards {
             let record = build(&facts);
-            assert_eq!(table_of(&record), expected(table), "{name}");
+            let mut real = expected(table);
+            // Kept clear on every card, as on the B580.
+            real.remove(&RENDER_CACHE_KEYING_WORKAROUND.0);
+            assert_eq!(table_of(&record), real, "{name}");
         }
         assert_eq!(features::workaround(&build(&alchemist(0x56A0, 8)), 2964), Some(0));
     }
