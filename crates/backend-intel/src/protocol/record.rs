@@ -204,6 +204,12 @@ const KEPT_CLEAR: [Feature; 9] = [
     CROSS_ADAPTER_CAPABILITY,
 ];
 
+/// The hwconfig key for how many bits a bindless surface offset has. The record leaves its place
+/// at zero on every card, where a real card says 26 or so. With it set Intel's Direct3D 12 driver
+/// fills a heap of surface states in memory the guest's program was never given, and the program
+/// dies; with zero it makes no such heap.
+const BINDLESS_SURFACE_OFFSET_BITS_KEY: u32 = 60;
+
 /// The unnamed bit [`KEPT_CLEAR`] keeps for Direct3D 12.
 const CROSS_ADAPTER_CAPABILITY: Feature = features::bit("unnamed bit 505, a Direct3D 12 capability", 505);
 
@@ -679,6 +685,9 @@ fn fill_from_data(record: &mut [u8], facts: &RecordFacts, table: &card_data::Tab
     // Every hwconfig key the card gives, where the driver puts it. These come after this backend's
     // own fields, so a key the card gives wins over what was worked out without it.
     for &(key, value) in &facts.hwconfig {
+        if key == BINDLESS_SURFACE_OFFSET_BITS_KEY {
+            continue;
+        }
         let places = card_data::hwconfig_places(key);
         for &place in places {
             put_dword(record, place, value);
@@ -1615,12 +1624,12 @@ pub(crate) mod tests {
         let (record, telling) = build_telling(&facts);
         let read = |at| dword(&record, at).unwrap();
         assert_eq!(read(0x2180), 2048, "ray tracing stacks per core");
-        assert_eq!(read(0x22FC), 26, "bindless surface offset bits");
+        assert_eq!(read(0x22FC), 0, "bindless surface offset bits, kept at zero");
         assert_eq!(read(0x219C), 4, "memory type");
         assert_eq!((read(0x21A8), read(0x239C)), (2, 2), "the most video engines, in both places");
         assert_eq!(read(at::MAX_EU_PER_SUBSLICE), 8, "the key, over what was worked out without it");
         let CardData::Built(built) = telling.card_data else { panic!("covered") };
-        assert_eq!(built.hwconfig_keys, 5, "two keys have no place in the record");
+        assert_eq!(built.hwconfig_keys, 4, "two keys have no place in the record and one is kept out");
     }
 
     #[test]

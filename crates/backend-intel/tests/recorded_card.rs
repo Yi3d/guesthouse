@@ -197,7 +197,8 @@ fn the_recorded_b580_gives_the_guest_every_hwconfig_field_where_the_kernel_drive
         ("DS_MIN_DEREF_BLOCK_SIZE_HANDLE_COUNT", 0x217C, 324),
         ("NUM_RT_STACKS_PER_DSS", 0x2180, 2048),
         ("MAX_NUM_L3_CONFIGS", 0x21B4, 0),
-        ("BINDLESS_SURFACE_OFFSET_BIT_COUNT", 0x22FC, 26),
+        // Kept at zero on purpose: see the record.
+        ("BINDLESS_SURFACE_OFFSET_BIT_COUNT", 0x22FC, 0),
         ("MAX_GSC", 0x2314, 1),
         ("MAX_GSC again", 0x23A4, 1),
         ("MAX_VCS again", 0x239C, 2),
