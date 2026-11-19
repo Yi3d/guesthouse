@@ -1,8 +1,7 @@
 //! The data the workaround table is built from: what Intel's kernel driver sets for each graphics,
 //! media and display IP version and for each Alchemist device group, and what it changes after.
-//! Generated from a description of the table kept outside the repository; not edited by hand.
-//! Settings that come from the guest's Windows are already folded in, as
-//! [`super`] describes.
+//! Generated; not edited by hand. Settings that come from the guest's Windows are already
+//! folded in, as [`super`] describes.
 
 use super::{Block, Component, Cond, DeviceGroup, Op, Rows, When};
 

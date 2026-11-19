@@ -4,13 +4,13 @@
 //! table the card would have under Intel's own kernel driver. That driver builds it from the card's
 //! graphics, media and display IP versions and their revisions, or, on Alchemist, from the PCI device
 //! id and revision. It starts from an empty table, makes a few changes, sets the entries each IP
-//! version's part of [`data`] gives for the revisions the card has, and then makes the rest of its
+//! version's part of `data` gives for the revisions the card has, and then makes the rest of its
 //! changes, some of which depend on the card, the table so far and the record's feature table.
 //!
 //! What Linux can't say is filled in, and [`Built::defaults`] names each:
-//! - the display IP, which xe doesn't report: [`display_ip`] picks it by platform;
+//! - the display IP, which xe doesn't report: `display_ip` picks it by platform;
 //! - the display IP's revision, and a second display revision only Lunar Lake's display reads: zero;
-//! - the settings that come from the guest's Windows, folded into [`data`] already: a Windows 11 guest
+//! - the settings that come from the guest's Windows, folded into `data` already: a Windows 11 guest
 //!   (24H2 or later), Intel's registry settings absent, an adapter that is not an SR-IOV virtual
 //!   function and is a virtual machine's, a card whose display is present and not fused down, and no
 //!   hybrid-graphics display switch.
@@ -33,7 +33,7 @@ const ARROW_LAKE: u32 = 1273;
 const BATTLEMAGE: u32 = 1274;
 const LUNAR_LAKE: u32 = 1275;
 const PANTHER_LAKE: u32 = 1300;
-/// Wildcat Lake's device ids, in Panther Lake's product family.
+/// Wildcat Lake's device ids, in Panther Lake's product family, as [`crate::generation`] lists them.
 const WILDCAT_LAKE_DEVICES: [u16; 2] = [0xFD80, 0xFD81];
 
 /// What the table is built from, as Linux knows the card.
