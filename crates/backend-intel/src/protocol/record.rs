@@ -131,6 +131,13 @@ const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
 /// reads as tiled resources at tier 2 or above. Direct3D 11 refuses a device at 12_0 or above from a
 /// driver that says less, which is every device, the desktop compositor's included.
 const TILED_RESOURCES_WORKAROUND: (usize, u8) = (535, 1);
+/// The entry Intel's Direct3D 11 driver reads to keep one of the render cache's optimisations off
+/// (RHWO, which 3DSTATE_3D_MODE switches), and the value Intel's kernel driver gives it on
+/// Battlemage. With the entry clear the driver turns the optimisation on in every context and
+/// leaves it on. Mesa keeps it off on the same cards.
+const RENDER_CACHE_WORKAROUND: (usize, u8) = (2964, 2);
+/// The render IP that entry is set for: Battlemage, 20.01.
+const BATTLEMAGE_RENDER_IP: (u32, u32) = (20, 1);
 /// KMD_CAPS_INFO's DriverStoreEnabled: the driver runs from the driver store, as one from a DCH INF
 /// always does, and the guest's copy is in its host driver store. Intel's Direct3D 12 driver loads
 /// its shader compiler from its own folder only when this is set, and by bare name, from nowhere it
@@ -175,6 +182,14 @@ impl IpWord {
                 | (u32::from(release) & Self::RELEASE_MASK) << Self::RELEASE_SHIFT
                 | u32::from(revision) & Self::REVISION_MASK,
         )
+    }
+
+    pub fn architecture(self) -> u32 {
+        self.0 >> Self::ARCHITECTURE_SHIFT
+    }
+
+    pub fn release(self) -> u32 {
+        self.0 >> Self::RELEASE_SHIFT & Self::RELEASE_MASK
     }
 }
 
@@ -420,6 +435,11 @@ pub fn build(facts: &RecordFacts) -> Vec<u8> {
     }
     set_features(&mut record, facts);
     for (entry, value) in [VIRTUAL_MACHINE_WORKAROUND, TILED_RESOURCES_WORKAROUND] {
+        features::set_workaround(&mut record, entry, value);
+    }
+    let render_ip = (platform.render_ip.architecture(), platform.render_ip.release());
+    if render_ip == BATTLEMAGE_RENDER_IP {
+        let (entry, value) = RENDER_CACHE_WORKAROUND;
         features::set_workaround(&mut record, entry, value);
     }
     let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
@@ -725,6 +745,19 @@ pub(crate) mod tests {
         assert_eq!(record[0x4AB], 0x10);
         assert_ne!(dword(&record, 0x4A8).unwrap() & 0xF000_0000, 0);
         assert_eq!(features::workaround(&record, 534), Some(0));
+    }
+
+    #[test]
+    fn battlemage_keeps_the_render_caches_optimisation_off_and_other_cards_are_left_alone() {
+        let mut battlemage = facts();
+        battlemage.platform.render_ip = IpWord::new(20, 1, 0);
+        let record = build(&battlemage);
+        assert_eq!(features::workaround(&record, 2964), Some(2));
+        assert_eq!(record[0x96A], 0x02, "the low half of the byte Direct3D 11 tests");
+        assert_eq!(features::workaround(&record, 2965), Some(0));
+        let mut lunar_lake = facts();
+        lunar_lake.platform.render_ip = IpWord::new(20, 4, 4);
+        assert_eq!(features::workaround(&build(&lunar_lake), 2964), Some(0));
     }
 
     #[test]
