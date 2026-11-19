@@ -37,7 +37,7 @@ fn the_recorded_b580_gets_its_workaround_table_from_its_render_and_media_ips() {
     let backend = IntelBackend::from_card(recording::read(ARC_B580).unwrap()).unwrap();
     let record = backend.record();
     let set = (0..3048).filter(|&entry| features::workaround(record, entry).is_some_and(|value| value != 0));
-    assert_eq!(set.count(), 194);
+    assert_eq!(set.count(), 195);
     assert_eq!(features::workaround(record, 2964), Some(2), "render 20.01");
     assert_eq!(features::workaround(record, 2525), Some(4), "media 13.01");
     assert_eq!(features::workaround(record, 2571), Some(8), "display 14.01 at revision 0");
@@ -129,11 +129,6 @@ fn the_recorded_b580_gets_the_kernel_drivers_feature_table_but_where_this_record
         (features::NULL_PAGES, true, false),
         // The kernel driver's own reset.
         (features::DRIVER_FLR, true, false),
-        // The memory bits that go with memory on the card.
-        (unnamed(435), true, false),
-        (unnamed(445), true, false),
-        (unnamed(462), true, false),
-        (unnamed(469), true, false),
     ];
     // The older Direct3D 11 interface versions: this record offers the newest alone.
     expected.extend(

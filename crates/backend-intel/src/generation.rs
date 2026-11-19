@@ -41,10 +41,12 @@ pub struct Generation {
     pub render_core: u32,
     /// PLATFORM_TYPE.
     pub platform_type: u32,
-    /// GTTYPE. Newer platforms leave it undefined.
+    /// GTTYPE, left undefined.
     ///
     /// The display core, the platform type and the GT type are the record's only for a card the
-    /// kernel driver's data doesn't list: one it lists gets that driver's, [`crate::protocol::card_data`].
+    /// kernel driver's data doesn't list: one it lists gets that driver's,
+    /// [`crate::protocol::card_data`], whose GT type is GTTYPE_GT1 and whose platform type is
+    /// desktop or mobile.
     pub gt_type: u32,
     /// Hardware threads in each EU, for a card whose hwconfig doesn't say.
     pub threads_per_eu: u32,
@@ -84,10 +86,9 @@ const GUESS_URB: &str = "the URB size for a card whose hwconfig doesn't give it 
 
 /// What is unconfirmed in the same way for every generation no card of has been recorded.
 const GUESS_NO_RECORDING: &str = "no card of this generation has been recorded";
-const GUESS_RECORD_LAYOUT: &str =
-    "the record's layout and feature bits were read along Lunar Lake's path of the driver";
-const GUESS_BEFORE_XE2: &str =
-    "the feature bits besides Xe2's tiling are Xe2's, and this generation's may differ";
+const GUESS_RECORD_LAYOUT: &str = "the record's layout was read along Lunar Lake's path of the driver";
+const GUESS_BEFORE_XE2: &str = "on a device the kernel driver's data doesn't list, the feature bits besides \
+     Xe2's tiling are Xe2's, and this generation's may differ";
 const GUESS_ON_XE: &str = "xe takes these cards only when told to, and has seldom been run on them";
 
 /// Lunar Lake's graphics, the Arc 130V and 140V: IGFX_LUNARLAKE on IGFX_XE2_LPG_CORE.

@@ -169,7 +169,7 @@ const FIVE_LEVEL_ADDRESS_BITS: u64 = 57;
 const KNOWN_CARD_GT_TYPE: u32 = 0;
 
 /// Feature bits the driver's table sets that this record keeps clear on every card.
-const KEPT_CLEAR: [Feature; 13] = [
+const KEPT_CLEAR: [Feature; 8] = [
     // The guest's tiled resources: xe never turns on the hardware's translation table for them,
     // whether the kernel driver or the user-mode driver keeps it (see `work::choices`); the core has
     // no request that maps a range to nothing, which null pages are; and tiles mapped through the
@@ -187,14 +187,6 @@ const KEPT_CLEAR: [Feature; 13] = [
     // A service of the kernel driver rather than of the card: resetting the function, which the
     // host does.
     features::DRIVER_FLR,
-    // Unnamed bits among the memory flags that the table sets only on cards with memory of their
-    // own. Which memory the guest gets there is the core's to say, and nothing says these describe
-    // what it gives: see [`super::gaps::LOCAL_MEMORY`].
-    features::bit("unnamed memory bit 435", 435),
-    features::bit("unnamed memory bit 445", 445),
-    features::bit("unnamed memory bit 462", 462),
-    features::bit("unnamed memory bit 463", 463),
-    features::bit("unnamed memory bit 469", 469),
 ];
 
 /// The inputs to the driver's tables that are its defaults rather than the card's, as the log
@@ -681,7 +673,7 @@ fn fill_from_data(record: &mut [u8], facts: &RecordFacts, table: &card_data::Tab
     }
     if card_data::is_not_vga(facts.pci_class) {
         for &bit in card_data::not_vga_clears() {
-            features::set(record, features::bit("not VGA-compatible", usize::from(bit)), false);
+            features::set(record, features::bit("VGA-compatible", usize::from(bit)), false);
         }
     }
     for feature in KEPT_CLEAR {
@@ -1043,7 +1035,8 @@ pub(crate) mod tests {
         2943:6 2948:4 2949:2 2950:8 2964:2 3024:1 3039:3 3040:5 3041:9";
     // What Intel's kernel driver gives the other cards in the tests below for the same inputs,
     // with the feature table this record carries (the newest Direct3D 11 interface version alone).
-    // Lunar Lake's and Panther Lake's entry 2849 goes with a feature bit of their table.
+    // Lunar Lake's and Panther Lake's entry 2849 and Alchemist's 2835 go with feature bits of their
+    // tables.
 
     /// 211 entries.
     const LUNAR_LAKE: &str = "\
@@ -1098,7 +1091,7 @@ pub(crate) mod tests {
         2911:8 2913:2 2922:4 2924:8 2926:8 2927:2 2928:8 2930:8 2931:4 2935:6 2938:4 2940:4 2943:6 \
         2948:6 2949:2 2952:8 2964:2 2973:2 2977:8 2984:2 3005:8 3013:8 3014:2 3023:1 3030:1 3039:3 \
         3040:5 3041:9";
-    /// 296 entries.
+    /// 297 entries.
     const ALCHEMIST_G11_REV_0: &str = "\
         0:1 1:1 91:1 92:1 96:1 97:1 310:1 318:1 399:1 415:1 427:1 535:1 675:1 692:1 705:1 706:1 \
         707:1 771:1 876:1 881:1 883:1 925:1 926:1 957:1 968:1 970:1 981:1 986:1 997:1 1016:1 1020:1 \
@@ -1121,9 +1114,9 @@ pub(crate) mod tests {
         2446:1 2449:1 2452:1 2455:1 2457:1 2467:1 2468:1 2469:1 2474:1 2488:1 2494:1 2500:1 2502:1 \
         2503:1 2513:1 2522:1 2523:1 2526:1 2535:1 2553:1 2560:1 2561:1 2572:1 2575:1 2576:1 2579:1 \
         2587:1 2588:1 2596:1 2604:1 2611:1 2621:1 2623:1 2649:1 2683:1 2691:1 2696:1 2716:1 2721:1 \
-        2742:1 2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2836:1 2839:1 2865:1 2866:1 \
+        2742:1 2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2835:1 2836:1 2839:1 2865:1 2866:1 \
         2874:1 3024:1 3039:1 3040:1 3041:1";
-    /// 283 entries.
+    /// 284 entries.
     const ALCHEMIST_G11_REV_8: &str = "\
         0:1 1:1 91:1 92:1 96:1 97:1 310:1 318:1 399:1 415:1 427:1 535:1 675:1 692:1 705:1 706:1 \
         707:1 771:1 876:1 881:1 883:1 925:1 926:1 957:1 968:1 981:1 986:1 997:1 1016:1 1020:1 1022:1 \
@@ -1145,9 +1138,9 @@ pub(crate) mod tests {
         2481:1 2482:1 2487:1 2488:1 2494:1 2498:1 2499:1 2500:1 2502:1 2503:1 2506:1 2507:1 2513:1 \
         2519:1 2520:1 2522:1 2523:1 2526:1 2535:1 2553:1 2560:1 2561:1 2572:1 2575:1 2576:1 2579:1 \
         2587:1 2588:1 2596:1 2604:1 2611:1 2621:1 2623:1 2649:1 2683:1 2691:1 2696:1 2716:1 2721:1 \
-        2742:1 2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2836:1 2839:1 2865:1 2866:1 \
+        2742:1 2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2835:1 2836:1 2839:1 2865:1 2866:1 \
         2874:1 3024:1 3039:1 3040:1 3041:1";
-    /// 294 entries.
+    /// 295 entries.
     const ALCHEMIST_A770: &str = "\
         0:1 1:1 91:1 92:1 96:1 97:1 310:1 318:1 399:1 415:1 427:1 535:1 675:1 692:1 705:1 706:1 \
         709:1 771:1 876:1 881:1 925:1 926:1 957:1 968:1 981:1 986:1 997:1 1016:1 1020:1 1022:1 \
@@ -1170,7 +1163,7 @@ pub(crate) mod tests {
         2507:1 2513:1 2519:1 2520:1 2522:1 2523:1 2524:1 2526:1 2528:1 2535:1 2538:1 2553:1 2560:1 \
         2561:1 2572:1 2575:1 2576:1 2579:1 2586:1 2587:1 2588:1 2589:1 2596:1 2604:1 2611:1 2621:1 \
         2623:1 2629:1 2642:1 2645:1 2649:1 2659:1 2683:1 2691:1 2703:1 2716:1 2721:1 2731:1 2742:1 \
-        2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2836:1 2839:1 2865:1 2866:1 2874:1 \
+        2743:1 2774:1 2791:1 2796:1 2798:1 2810:1 2822:1 2827:1 2835:1 2836:1 2839:1 2865:1 2866:1 2874:1 \
         3024:1 3039:1 3040:1 3041:1";
 
     fn expected(table: &str) -> BTreeMap<usize, u8> {
@@ -1414,7 +1407,7 @@ pub(crate) mod tests {
 
     #[test]
     fn every_family_gets_the_kernel_drivers_feature_table_but_where_this_record_departs() {
-        let xe2_departures = |memory: &[usize]| {
+        let xe2_departures = || {
             let mut departures = always_departs();
             departures.extend([
                 (features::COMPRESSION[0], true, false),
@@ -1423,7 +1416,6 @@ pub(crate) mod tests {
                 (features::PML5, true, false),
                 (unnamed(684), true, false),
             ]);
-            departures.extend(memory.iter().map(|&index| (unnamed(index), true, false)));
             departures
         };
         let cards: [(&str, RecordFacts, &DataTable, Vec<Departure>); 7] = [
@@ -1438,10 +1430,6 @@ pub(crate) mod tests {
                         (features::CCS_RING, false, true),
                         (features::CCS_NODE, false, true),
                         (features::CCS_MULTI_INSTANCE, true, false),
-                        (unnamed(435), true, false),
-                        (unnamed(445), true, false),
-                        (unnamed(462), true, false),
-                        (unnamed(463), true, false),
                     ]);
                     departures
                 },
@@ -1455,9 +1443,6 @@ pub(crate) mod tests {
                     (features::CCS_RING, false, true),
                     (features::CCS_NODE, false, true),
                     (features::CCS_MULTI_INSTANCE, true, false),
-                    (unnamed(435), true, false),
-                    (unnamed(445), true, false),
-                    (unnamed(462), true, false),
                 ]);
                 departures
             }),
@@ -1490,19 +1475,19 @@ pub(crate) mod tests {
                 "Lunar Lake",
                 card(1275, 0x64A0, IpWord::new(20, 4, 4), Some(IpWord::new(20, 0, 0))),
                 &LUNAR_LAKE_64A0_DATA,
-                xe2_departures(&[]),
+                xe2_departures(),
             ),
             (
                 "Panther Lake",
                 card(1300, 0xB080, IpWord::new(30, 0, 4), Some(IpWord::new(30, 0, 0))),
                 &PANTHER_LAKE_B080_DATA,
-                xe2_departures(&[]),
+                xe2_departures(),
             ),
             (
                 "Wildcat Lake",
                 card(1300, 0xFD80, IpWord::new(30, 3, 0), Some(IpWord::new(30, 2, 0))),
                 &WILDCAT_LAKE_FD80_DATA,
-                xe2_departures(&[]),
+                xe2_departures(),
             ),
         ];
         for (name, facts, data, departures) in cards {
@@ -1519,8 +1504,8 @@ pub(crate) mod tests {
         let lunar_lake = card(1275, 0x64A0, IpWord::new(20, 4, 4), Some(IpWord::new(20, 0, 0)));
         let vga = build(&lunar_lake);
         let other = build(&with(lunar_lake, |facts| facts.pci_class = 0x03_8000));
-        let not_vga = features::bit("not VGA-compatible", 8);
-        assert!(features::is_set(&vga, not_vga) && !features::is_set(&other, not_vga));
+        let vga_bit = features::bit("VGA-compatible", 8);
+        assert!(features::is_set(&vga, vga_bit) && !features::is_set(&other, vga_bit));
         assert_eq!(feature_bits(&vga), feature_bits(&other) + 1);
     }
 
@@ -1554,12 +1539,34 @@ pub(crate) mod tests {
         assert_eq!((read(&a770, at::PLATFORM_TYPE), read(&a770, at::DISPLAY_CORE)), (1, 0x11), "desktop");
         assert_eq!(read(&a770, at::DISPLAY_IP), 0, "Alchemist has no IP versions");
         assert_eq!(read(&a770, at::DISPLAY_IP_CORE), 0, "nor per-IP cores");
-        let meteor_lake =
-            build(&older(card(1272, 0x7D55, IpWord::new(12, 70, 0), Some(IpWord::new(13, 0, 0)))));
-        assert_eq!(
-            (read(&meteor_lake, at::DISPLAY_CORE), read(&meteor_lake, at::MEDIA_CORE)),
-            (0xE00, 0xD00)
-        );
+        // Platform type, display core, media core and GT type.
+        let words = |record: &[u8]| {
+            [at::PLATFORM_TYPE, at::DISPLAY_CORE, at::MEDIA_CORE, at::GT_TYPE].map(|at| read(record, at))
+        };
+        for (name, facts, expected) in [
+            (
+                "Meteor Lake",
+                older(card(1272, 0x7D55, IpWord::new(12, 70, 0), Some(IpWord::new(13, 0, 0)))),
+                [2, 0xE00, 0xD00, 0],
+            ),
+            (
+                "Arrow Lake",
+                older(card(1273, 0x7D51, IpWord::new(12, 74, 0), Some(IpWord::new(13, 0, 0)))),
+                [2, 0xE00, 0xD00, 0],
+            ),
+            (
+                "Panther Lake",
+                card(1300, 0xB080, IpWord::new(30, 0, 4), Some(IpWord::new(30, 0, 0))),
+                [2, 0x1E00, 0x1E00, 0],
+            ),
+            (
+                "Wildcat Lake",
+                card(1300, 0xFD80, IpWord::new(30, 3, 0), Some(IpWord::new(30, 2, 0))),
+                [2, 0x1E00, 0x1E00, 0],
+            ),
+        ] {
+            assert_eq!(words(&build(&facts)), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1654,8 +1661,6 @@ pub(crate) mod tests {
             (1408, 1, 0),
             (1409, 0, 1),
             (1412, 0, 1),
-            // Set only with a feature bit whose meaning isn't known, which this record leaves clear.
-            (2835, 1, 0),
             // This backend's own two, the virtual machine's and tiled resources: the same as a
             // real card's.
             (VIRTUAL_MACHINE_WORKAROUND.0, 1, 1),
@@ -1666,10 +1671,11 @@ pub(crate) mod tests {
             assert_eq!(ours.remove(&entry).unwrap_or(0), our_value, "{entry}");
         }
         assert_eq!(ours, real);
+        assert_eq!(features::workaround(&record, 2835), Some(1), "with the table's unnamed bit 445");
         assert_eq!(features::workaround(&record, 2964), Some(2), "the render cache's RHWO kept off");
         assert_eq!(record[0x96A] & 0xF, 0x02, "the low half of the byte Direct3D 11 tests");
         let Outcome::Built(built) = outcome.workarounds else { panic!("the B580 is covered") };
-        assert_eq!(built.entries, 194);
+        assert_eq!(built.entries, 195);
     }
 
     #[test]
