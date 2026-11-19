@@ -9,6 +9,7 @@
 
 pub mod allocation;
 pub mod bytes;
+pub mod card_data;
 pub mod command_header;
 pub mod context;
 pub mod escape;
