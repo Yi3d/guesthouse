@@ -6,6 +6,7 @@ use crate::card;
 use crate::protocol::bytes::put_dword;
 use crate::protocol::command_header::{COMPACT_SIZE, Header};
 use crate::stage::Stage;
+use crate::xe::abi::Keying;
 use crate::xe::fake::FakeXe;
 use crate::xe::plan::BufferUse;
 use guesthouse_backend::{
@@ -29,8 +30,14 @@ pub fn work(stage: Stage) -> (CardWork, FakeXe) {
 }
 
 pub fn work_with_cap(stage: Stage, cap: u64) -> (CardWork, FakeXe) {
+    work_keyed(stage, cap, Keying::BindingIndex)
+}
+
+/// Work whose render queues are keyed as `render_keying` says.
+pub fn work_keyed(stage: Stage, cap: u64, render_keying: Keying) -> (CardWork, FakeXe) {
     let xe = FakeXe::default();
-    let work = CardWork::new(Box::new(xe.clone()), &card::tests::battlemage(), stage, cap).unwrap();
+    let work =
+        CardWork::new(Box::new(xe.clone()), &card::tests::battlemage(), stage, cap, render_keying).unwrap();
     (work, xe)
 }
 
@@ -249,7 +256,12 @@ pub struct Rig {
 
 impl Rig {
     pub fn new(stage: Stage) -> Self {
-        let (mut work, xe) = work(stage);
+        Self::keyed(stage, Keying::BindingIndex)
+    }
+
+    /// A rig whose render queues are keyed as `render_keying` says.
+    pub fn keyed(stage: Stage, render_keying: Keying) -> Self {
+        let (mut work, xe) = work_keyed(stage, ROOMY, render_keying);
         let (batch, _) = work.allocate(BATCH_BYTES, BufferUse::Card).unwrap();
         let data_pages = Pages::new(DATA_BYTES);
         let data = work.adopt(data_pages.address(), DATA_BYTES as u64).unwrap();

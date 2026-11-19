@@ -8,9 +8,10 @@
 use super::choices::{self, Rings};
 use super::{CardWork, engines};
 use crate::protocol::command_header::{Header, Length};
-use crate::xe::abi::{Keying, Sync};
+use crate::xe::abi::{EngineInstance, Keying, Sync};
 use crate::xe::batch::{self, Ending};
 use crate::xe::plan::{self, Backing, ExecVerdict, Point};
+use crate::xe_query::Engine;
 use guesthouse_backend::{BackendError, CommandBuffer, Doorbell, HostServices, SpaceId, Work, WorkStart};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -207,10 +208,8 @@ impl CardWork {
                     Some(xe_queue) => xe_queue,
                     None => {
                         let vm = self.ring_vm(space).map_err(|error| Refused::Xe(error.to_string()))?;
-                        let made = self
-                            .xe
-                            .create_queue(vm, engine, Keying::BindingIndex)
-                            .map_err(|error| Refused::Xe(error.to_string()))?;
+                        let made =
+                            self.new_queue(vm, engine).map_err(|error| Refused::Xe(error.to_string()))?;
                         self.queues.get_mut(&work.queue).expect("made above").ring = Some(made);
                         made
                     }
@@ -279,19 +278,35 @@ impl CardWork {
     }
 
     /// An xe queue in a VM with the timeline its runs signal.
-    fn make_ordinary(
-        &mut self,
-        vm: u32,
-        engine: crate::xe::abi::EngineInstance,
-    ) -> std::io::Result<(u32, u32)> {
+    fn make_ordinary(&mut self, vm: u32, engine: EngineInstance) -> std::io::Result<(u32, u32)> {
         let done = self.xe.create_syncobj()?;
-        match self.xe.create_queue(vm, engine, Keying::BindingIndex) {
+        match self.new_queue(vm, engine) {
             Ok(queue) => Ok((queue, done)),
             Err(error) => {
                 let _ = self.xe.destroy_syncobj(done);
                 Err(error)
             }
         }
+    }
+
+    /// An xe queue for a guest's queue, ring or not. One on a render engine has its colour cache
+    /// keyed as decided at the start, which is what the record told the guest's driver; the
+    /// other engines draw nothing through a render target and xe keys none of theirs.
+    ///
+    /// A render queue xe won't key by binding table is not made without it: the guest's driver
+    /// leaves out the flushes keying by index alone needs, so its draws would land in the wrong
+    /// surfaces without a word. Its queue stops instead, which the guest is told.
+    fn new_queue(&mut self, vm: u32, engine: EngineInstance) -> std::io::Result<u32> {
+        let keying = if engine.class == Engine::RENDER { self.render_keying } else { Keying::BindingIndex };
+        self.xe.create_queue(vm, engine, keying).inspect_err(|error| {
+            if keying == Keying::BindingTableAndIndex {
+                log::warn!(
+                    "intel work: xe refused a render queue with its colour cache keyed by binding table \
+                     ({error}), and none is made without that: the guest's driver was told the cache is \
+                     keyed so and leaves out the flushes that keying by index alone needs"
+                );
+            }
+        })
     }
 
     /// How a batch ends, read from its last bytes where they lie: a buffer through the CPU's view
@@ -831,6 +846,100 @@ mod tests {
         assert_ne!(vms[0], vms[1], "one in each of the process's two address spaces");
         rig.work.close_queue(1);
         assert_eq!(rig.xe.calls_named("destroy_queue").len(), 2);
+    }
+
+    /// The node numbers of the render, copy and compute engines.
+    const RENDER_NODE: u32 = 0;
+    const COPY_NODE: u32 = 2;
+    const COMPUTE_NODE: u32 = 5;
+
+    /// How each xe queue made so far was keyed, with its engine class.
+    fn keyings(rig: &Rig) -> Vec<(u16, Keying)> {
+        rig.xe
+            .calls_named("create_queue")
+            .iter()
+            .map(|call| match call {
+                Call::CreateQueue { engine, keying, .. } => (engine.class, *keying),
+                _ => unreachable!(),
+            })
+            .collect()
+    }
+
+    /// Sends one batch that ends from each of the three nodes, each as its own queue.
+    fn one_on_each_node(rig: &mut Rig) {
+        for (queue, node) in [(1, RENDER_NODE), (2, COPY_NODE), (3, COMPUTE_NODE)] {
+            let mut work = rig.submission(queue, 1);
+            work.node = node;
+            let WorkStart::Started { doorbell, .. } = rig.start(&work) else { panic!("node {node}") };
+            assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::Rung, "node {node}");
+        }
+    }
+
+    #[test]
+    fn with_the_keying_decided_every_render_queue_and_no_other_is_keyed_by_binding_table() {
+        let mut rig = Rig::keyed(Stage::Everything, Keying::BindingTableAndIndex);
+        rig.write_batch(&[batch::BATCH_END]);
+        one_on_each_node(&mut rig);
+        let table = Keying::BindingTableAndIndex;
+        assert_eq!(
+            keyings(&rig),
+            [
+                (Engine::RENDER, table),
+                (Engine::COPY, Keying::BindingIndex),
+                (Engine::COMPUTE, Keying::BindingIndex)
+            ]
+        );
+        // A ring on the render engine is a render queue like any other; one on compute is not.
+        ring(&mut rig);
+        for (queue, node) in [(4, RENDER_NODE), (5, COMPUTE_NODE)] {
+            let mut work = rig.submission(queue, 1);
+            work.node = node;
+            let WorkStart::Started { doorbell, .. } = rig.start(&work) else { panic!("node {node}") };
+            assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::RungToStay, "node {node}");
+        }
+        assert_eq!(keyings(&rig)[3..], [(Engine::RENDER, table), (Engine::COMPUTE, Keying::BindingIndex)]);
+        assert!(!rig.work.space_failed(rig.space));
+    }
+
+    #[test]
+    fn without_it_no_queue_is_keyed_by_binding_table() {
+        let mut rig = Rig::new(Stage::Everything);
+        rig.write_batch(&[batch::BATCH_END]);
+        one_on_each_node(&mut rig);
+        ring(&mut rig);
+        let mut work = rig.submission(4, 1);
+        work.node = RENDER_NODE;
+        let WorkStart::Started { doorbell, .. } = rig.start(&work) else { panic!() };
+        rig.work.ring_doorbell(doorbell).unwrap();
+        let made = keyings(&rig);
+        assert_eq!(made.len(), 4);
+        assert!(made.iter().all(|(_, keying)| *keying == Keying::BindingIndex), "{made:?}");
+    }
+
+    #[test]
+    fn a_render_queue_xe_wont_key_stops_and_is_not_made_any_other_way() {
+        let mut rig = Rig::keyed(Stage::Everything, Keying::BindingTableAndIndex);
+        rig.write_batch(&[batch::BATCH_END]);
+        rig.xe.refuse_keying(libc::EINVAL);
+        let mut work = rig.submission(1, 1);
+        work.node = RENDER_NODE;
+        assert_eq!(rig.start(&work), WorkStart::QueueFailed);
+        assert_eq!(keyings(&rig), [(Engine::RENDER, Keying::BindingTableAndIndex)], "no plain queue after");
+        assert!(rig.xe.calls_named("exec").is_empty());
+        // The ring of a render queue is refused the same way.
+        ring(&mut rig);
+        let mut work = rig.submission(2, 1);
+        work.node = RENDER_NODE;
+        assert_eq!(rig.start(&work), WorkStart::QueueFailed);
+        assert_eq!(keyings(&rig).len(), 2);
+        assert!(keyings(&rig).iter().all(|(_, keying)| *keying == Keying::BindingTableAndIndex));
+        // The process's other engines go on.
+        rig.write_batch(&[batch::BATCH_END]);
+        let work = rig.submission(3, 1);
+        let WorkStart::Started { doorbell, .. } = rig.start(&work) else { panic!() };
+        assert_eq!(rig.work.ring_doorbell(doorbell).unwrap(), Doorbell::Rung);
+        assert_eq!(rig.fence(), 1);
+        assert!(!rig.work.space_failed(rig.space));
     }
 
     #[test]

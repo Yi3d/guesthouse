@@ -156,13 +156,15 @@ const VIRTUAL_MACHINE_WORKAROUND: (usize, u8) = (968, 1);
 /// still needs it.
 const TILED_RESOURCES_WORKAROUND: (usize, u8) = (535, 1);
 /// An unnamed entry, the top nibble of the record's byte at 0x817. With it set, Intel's Direct3D 11
-/// driver takes the render cache to be keyed by binding table and index, as on Windows, and leaves
-/// out the render target cache flush the hardware otherwise needs whenever a binding comes to name
-/// another surface. xe keys the cache by index alone unless a queue is made with the state cache
-/// fix turned off, which this backend doesn't ask for, so the entry stays clear whatever the table
-/// gives and the driver flushes. With it set, draws into several surfaces one after another can
-/// land in the wrong one, and the display driver stamps its slots that way.
-const RENDER_CACHE_KEYING_WORKAROUND: (usize, u8) = (2287, 0);
+/// driver takes the render colour cache to be keyed by binding table and index, as Intel's kernel
+/// driver keys it on cards whose table sets it, and leaves out the render target cache flush the
+/// hardware otherwise needs whenever a binding comes to name another surface. xe keys the cache by
+/// index alone unless a queue is made keyed by binding table, so the entry is kept as the table
+/// gives it only when every render queue is made so ([`RecordFacts::render_cache_keyed`]), and
+/// cleared otherwise, so the driver flushes. Set over a cache keyed by index alone, draws into
+/// several surfaces one after another can land in the wrong one, and the display driver stamps its
+/// slots that way.
+pub const RENDER_CACHE_KEYING_WORKAROUND: usize = 2287;
 /// KMD_CAPS_INFO's DriverStoreEnabled: the driver runs from the driver store, as one from a DCH INF
 /// always does, and the guest's copy is in its host driver store. Intel's Direct3D 12 driver loads
 /// its shader compiler from its own folder only when this is set, and by bare name, from nowhere it
@@ -439,6 +441,9 @@ pub struct RecordFacts {
     pub hwconfig: Vec<(u32, u32)>,
     /// Whether memory on the card may be mapped in 4 KiB pages.
     pub local_memory_small_pages: bool,
+    /// Whether every queue on a render engine has its colour cache keyed by binding table and
+    /// index: see [`RENDER_CACHE_KEYING_WORKAROUND`].
+    pub render_cache_keyed: bool,
 }
 
 /// How the parts of the record that come from data were built, for the log.
@@ -609,10 +614,11 @@ pub fn build_telling(facts: &RecordFacts) -> (Vec<u8>, Telling) {
         media: facts.media_ip.and_then(IpWord::workaround_ip),
     };
     let outcome = workarounds::fill(&mut record, &card);
-    for (entry, value) in
-        [VIRTUAL_MACHINE_WORKAROUND, TILED_RESOURCES_WORKAROUND, RENDER_CACHE_KEYING_WORKAROUND]
-    {
+    for (entry, value) in [VIRTUAL_MACHINE_WORKAROUND, TILED_RESOURCES_WORKAROUND] {
         features::set_workaround(&mut record, entry, value);
+    }
+    if !facts.render_cache_keyed {
+        features::set_workaround(&mut record, RENDER_CACHE_KEYING_WORKAROUND, 0);
     }
     let block = &mut record[at::PARTITION..at::PARTITION + partition::SIZE];
     partition::write(block, &partition::ours());
@@ -885,6 +891,7 @@ pub(crate) mod tests {
             pci_class: 0x03_0000,
             hwconfig: Vec::new(),
             local_memory_small_pages: false,
+            render_cache_keyed: false,
         }
     }
 
@@ -1684,8 +1691,8 @@ pub(crate) mod tests {
             // real card's.
             (VIRTUAL_MACHINE_WORKAROUND.0, 1, 1),
             (TILED_RESOURCES_WORKAROUND.0, 1, 1),
-            // The render cache keyed by binding table, which xe's queues aren't here.
-            (RENDER_CACHE_KEYING_WORKAROUND.0, 1, 0),
+            // The render cache keyed by binding table, which xe's queues aren't unless made so.
+            (RENDER_CACHE_KEYING_WORKAROUND, 1, 0),
         ];
         for (entry, real_value, our_value) in departures {
             assert_eq!(real.remove(&entry).unwrap_or(0), real_value, "{entry}");
@@ -1697,6 +1704,21 @@ pub(crate) mod tests {
         assert_eq!(record[0x96A] & 0xF, 0x02, "the low half of the byte Direct3D 11 tests");
         let Outcome::Built(built) = outcome.workarounds else { panic!("the B580 is covered") };
         assert_eq!(built.entries, 195);
+    }
+
+    #[test]
+    fn the_arc_b580_keeps_its_render_cache_entry_when_every_render_queue_is_keyed_by_binding_table() {
+        let b580 = card(1274, 0xE20B, IpWord::new(20, 1, 0), Some(IpWord::new(13, 1, 1)));
+        let keyed = build(&RecordFacts { render_cache_keyed: true, ..b580.clone() });
+        let plain = build(&b580);
+        assert_eq!(features::workaround(&keyed, RENDER_CACHE_KEYING_WORKAROUND), Some(1), "the table's");
+        assert_eq!(features::workaround(&plain, RENDER_CACHE_KEYING_WORKAROUND), Some(0));
+        let (mut keyed_table, mut plain_table) = (table_of(&keyed), table_of(&plain));
+        keyed_table.remove(&RENDER_CACHE_KEYING_WORKAROUND);
+        plain_table.remove(&RENDER_CACHE_KEYING_WORKAROUND);
+        assert_eq!(keyed_table, plain_table, "nothing else differs");
+        let differ = keyed.iter().zip(&plain).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 1, "one byte, the entry's");
     }
 
     #[test]
@@ -1724,8 +1746,9 @@ pub(crate) mod tests {
         for (name, facts, table) in cards {
             let record = build(&facts);
             let mut real = expected(table);
-            // Kept clear on every card, as on the B580.
-            real.remove(&RENDER_CACHE_KEYING_WORKAROUND.0);
+            // Kept clear on every card, as on the B580, unless every render queue is keyed so.
+            assert_eq!(table_of(&build(&RecordFacts { render_cache_keyed: true, ..facts })), real, "{name}");
+            real.remove(&RENDER_CACHE_KEYING_WORKAROUND);
             assert_eq!(table_of(&record), real, "{name}");
         }
         assert_eq!(features::workaround(&build(&alchemist(0x56A0, 8)), 2964), Some(0));

@@ -72,6 +72,7 @@ use traffic::{QueryOutcome, Traffic};
 use watch::PREFIX;
 use work::CardWork;
 use work::copies::Rows;
+use xe::abi::Keying;
 use xe::device::Xe;
 use xe::plan::BufferUse;
 use xe_query::{Engine, Gt};
@@ -125,7 +126,9 @@ impl IntelBackend {
             ));
         }
         let shared = card.system_memory() / SHARED_MEMORY_PART;
-        let (record, telling) = record::build_telling(&record_facts(&card, generation, shared));
+        // No queue exists yet, so the render cache is keyed as xe keys it until work starts.
+        let (record, telling) =
+            record::build_telling(&record_facts(&card, generation, shared, Keying::BindingIndex));
         // A card with memory of its own offers that; one without offers its share of the system's.
         let own = card.card_memory();
         let video_memory = if own > 0 { own } else { shared };
@@ -205,6 +208,20 @@ impl IntelBackend {
     /// The adapter record the guest is given, before its build stamp is put in.
     pub fn record(&self) -> &[u8] {
         &self.record
+    }
+
+    /// How every queue on a render engine has its colour cache keyed: decided once when work
+    /// starts, from what xe offers and what the self-test proved, and followed by both the queues
+    /// and the record. Keyed by index alone, as xe keys it, while nothing runs on the card.
+    pub fn render_keying(&self) -> Keying {
+        self.work.as_ref().map_or(Keying::BindingIndex, CardWork::render_keying)
+    }
+
+    /// Builds the record again for the render keying work now has, so the two can't disagree.
+    fn follow_render_keying(&mut self) {
+        let shared = self.card.system_memory() / SHARED_MEMORY_PART;
+        let facts = record_facts(&self.card, self.generation, shared, self.render_keying());
+        (self.record, self.telling) = record::build_telling(&facts);
     }
 
     fn log_start(&self) {
@@ -297,14 +314,40 @@ impl IntelBackend {
                     stage::RUN_VARIABLE
                 );
                 self.work = Some(work);
+                self.follow_render_keying();
+                self.log_render_keying();
             }
             Err(fallback) => {
                 self.work = None;
+                self.follow_render_keying();
                 log::warn!(
                     "{PREFIX} stage=Listen {fallback}. Nothing reaches the card: the guest's work is \
                      finished unrun"
                 );
                 self.listening = Some(fallback);
+            }
+        }
+    }
+
+    fn log_render_keying(&self) {
+        let entry = record::RENDER_CACHE_KEYING_WORKAROUND;
+        match self.render_keying() {
+            Keying::BindingTableAndIndex => log::info!(
+                "{PREFIX} render-cache keyed=table: every render queue's colour cache is keyed by binding \
+                 table and index, as Intel's kernel driver keys it, and the record keeps workaround entry \
+                 {entry} as the card's table gives it"
+            ),
+            Keying::BindingIndex => {
+                let why = if self.card.config.offers_cache_keying() {
+                    "the self-test didn't prove a render queue keyed by binding table on this card"
+                } else {
+                    "this kernel's xe doesn't offer it (Linux v7.1 and later do)"
+                };
+                log::info!(
+                    "{PREFIX} render-cache keyed=index: {why}, so render queues are keyed by binding index \
+                     alone, as xe makes them, and the record keeps workaround entry {entry} clear: the \
+                     guest's driver flushes on each binding change itself"
+                );
             }
         }
     }
@@ -346,7 +389,18 @@ impl IntelBackend {
         if cap < work::cap::LEAST_FOR_A_GUEST {
             return Err(Fallback::TooLittleMemory(cap));
         }
-        CardWork::new(xe, &self.card, asked, cap).ok_or(Fallback::NoMemoryRegion)
+        let keying = render_keying(&self.card, &summary);
+        CardWork::new(xe, &self.card, asked, cap, keying).ok_or(Fallback::NoMemoryRegion)
+    }
+}
+
+/// How render queues are to be keyed: by binding table and index when xe says it can and the
+/// self-test made and ran such a queue on this card, and by index alone otherwise.
+fn render_keying(card: &CardFacts, summary: &xe::selftest::Summary) -> Keying {
+    if card.config.offers_cache_keying() && summary.cache_keyed {
+        Keying::BindingTableAndIndex
+    } else {
+        Keying::BindingIndex
     }
 }
 
@@ -440,7 +494,12 @@ fn adapter_name(card: &CardFacts) -> String {
 }
 
 /// What the record is built from: the card where it can say, and the generation where it can't.
-fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> RecordFacts {
+fn record_facts(
+    card: &CardFacts,
+    generation: &Generation,
+    shared: u64,
+    render_keying: Keying,
+) -> RecordFacts {
     let ip = |gt: Option<&Gt>| {
         gt.map_or(IpWord::default(), |gt| IpWord::new(gt.ip.major, gt.ip.minor, gt.ip.revision))
     };
@@ -522,6 +581,7 @@ fn record_facts(card: &CardFacts, generation: &Generation, shared: u64) -> Recor
             .filter_map(|entry| Some((entry.key, *entry.values.first()?)))
             .collect(),
         local_memory_small_pages: card.small_pages_on_card(),
+        render_cache_keyed: render_keying == Keying::BindingTableAndIndex,
     }
 }
 
@@ -936,6 +996,68 @@ mod tests {
         assert!(both.to_string().contains("its steps binds, engine rcs0 failed"), "{both}");
     }
 
+    /// Starts work on a stand-in for xe at the stage asked, and says how render queues are keyed
+    /// and what the record's render cache entry is.
+    fn started_keyed(
+        card: CardFacts,
+        xe: &xe::fake::FakeXe,
+        stage: Stage,
+    ) -> (IntelBackend, Keying, Option<u8>) {
+        let mut backend = IntelBackend::from_card(card).unwrap();
+        assert_eq!(
+            protocol::features::workaround(backend.record(), record::RENDER_CACHE_KEYING_WORKAROUND),
+            Some(0)
+        );
+        let given = xe.clone();
+        backend.start_work_on_card((stage, None), move || Ok(Box::new(given) as _), None);
+        let entry = protocol::features::workaround(backend.record(), record::RENDER_CACHE_KEYING_WORKAROUND);
+        let keying = backend.render_keying();
+        (backend, keying, entry)
+    }
+
+    #[test]
+    fn the_record_and_the_render_queues_follow_one_keying_decided_at_the_start() {
+        // xe offers it and the self-test made and ran such a queue: the B580's table entry stands.
+        let xe = xe::fake::FakeXe::default();
+        let (mut backend, keying, entry) = started_keyed(card::tests::battlemage(), &xe, Stage::Everything);
+        assert_eq!((keying, entry), (Keying::BindingTableAndIndex, Some(1)));
+        // Staying to listen afterwards makes no queue, and the entry is cleared again.
+        backend.start_work_on_card((Stage::Listen, None), no_card, None);
+        assert_eq!(backend.render_keying(), Keying::BindingIndex);
+        assert_eq!(
+            protocol::features::workaround(backend.record(), record::RENDER_CACHE_KEYING_WORKAROUND),
+            Some(0)
+        );
+
+        // A kernel that doesn't offer it: Lunar Lake's table sets the entry too, and it is cleared.
+        let card = card::tests::lunar_lake();
+        assert!(!card.config.offers_cache_keying());
+        let (_, keying, entry) = started_keyed(card, &xe::fake::FakeXe::default(), Stage::Everything);
+        assert_eq!((keying, entry), (Keying::BindingIndex, Some(0)));
+
+        // xe says it can, and then turns the property down in the self-test.
+        let xe = xe::fake::FakeXe::default();
+        xe.without_keying();
+        let (_, keying, entry) = started_keyed(card::tests::battlemage(), &xe, Stage::Everything);
+        assert_eq!((keying, entry), (Keying::BindingIndex, Some(0)));
+
+        // A stage that runs nothing on the card.
+        let (_, keying, entry) =
+            started_keyed(card::tests::battlemage(), &xe::fake::FakeXe::default(), Stage::Listen);
+        assert_eq!((keying, entry), (Keying::BindingIndex, Some(0)));
+    }
+
+    #[test]
+    fn the_lunar_lake_table_sets_the_render_cache_entry_for_a_keyed_start() {
+        let card = card::tests::lunar_lake();
+        let card = CardFacts {
+            config: xe_query::Config { flags: xe_query::Config::HAS_CACHE_KEYING, ..card.config },
+            ..card
+        };
+        let (_, keying, entry) = started_keyed(card, &xe::fake::FakeXe::default(), Stage::Everything);
+        assert_eq!((keying, entry), (Keying::BindingTableAndIndex, Some(1)), "the table's value");
+    }
+
     #[test]
     fn a_failed_video_engine_copy_clock_or_cleanup_lets_work_run() {
         for step in ["engine vcs0", "engine vecs0", "copy", "clock", "cleanup", "render cache keying"] {
@@ -1049,7 +1171,7 @@ mod tests {
         assert!(protocol::features::is_set(backend.record(), protocol::features::XE2_TILING));
         let mut bare = card;
         bare.hwconfig = hwconfig::Hwconfig::default();
-        let facts = record_facts(&bare, &generation::XE3_LPG, 0);
+        let facts = record_facts(&bare, &generation::XE3_LPG, 0, Keying::BindingIndex);
         assert_eq!(facts.gt.thread_count, 64 * 10, "ten threads to an EU where hwconfig doesn't say");
     }
 
@@ -1082,7 +1204,7 @@ mod tests {
         let summary = record::summary(backend.record());
         assert_eq!((summary.product_family, summary.render_core, summary.device_id), (1274, 0xC09, 0xE20B));
         assert_eq!(summary.eu_count, 160);
-        let built = record_facts(backend.card(), &generation::XE2_HPG, 7);
+        let built = record_facts(backend.card(), &generation::XE2_HPG, 7, Keying::BindingIndex);
         assert_eq!(built.memory, Memory { dedicated: 12216 << 20, system_shared: 7, system_video: 0 });
         assert!(built.local_memory);
         assert_eq!(
@@ -1133,7 +1255,7 @@ mod tests {
     fn the_thread_count_falls_back_to_the_generations_when_hwconfig_has_none() {
         let mut card = card::tests::lunar_lake();
         card.hwconfig = hwconfig::Hwconfig::default();
-        let facts = record_facts(&card, &generation::XE2_LPG, 0);
+        let facts = record_facts(&card, &generation::XE2_LPG, 0, Keying::BindingIndex);
         assert_eq!(facts.gt.thread_count, 64 * generation::XE2_LPG.threads_per_eu);
         assert_eq!(facts.gt.max_slices, 0, "not guessed");
     }

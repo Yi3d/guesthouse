@@ -21,7 +21,7 @@ pub(crate) mod testing;
 
 use crate::card::CardFacts;
 use crate::stage::Stage;
-use crate::xe::abi::EngineInstance;
+use crate::xe::abi::{EngineInstance, Keying};
 use crate::xe::device::Xe;
 use crate::xe::plan::Placements;
 use crate::xe_query::Engine;
@@ -37,6 +37,11 @@ pub struct CardWork {
     stage: Stage,
     placements: Placements,
     engines: Vec<Engine>,
+    /// How every queue on a render engine has its colour cache keyed, decided once at the start
+    /// and told to the guest's driver in the record: see [`IntelBackend::render_keying`].
+    ///
+    /// [`IntelBackend::render_keying`]: crate::IntelBackend::render_keying
+    render_keying: Keying,
     /// The engine whose cycle counter is the GPU's clock, and its rate.
     clock: Option<(EngineInstance, u32)>,
     next_id: u64,
@@ -63,8 +68,15 @@ impl std::fmt::Debug for CardWork {
 
 impl CardWork {
     /// `None` if the card's memory regions give nowhere to put a buffer. `cap` is the most video
-    /// memory the guest may hold: see [`cap::video_cap`].
-    pub fn new(xe: Box<dyn Xe + Send>, card: &CardFacts, stage: Stage, cap: u64) -> Option<Self> {
+    /// memory the guest may hold: see [`cap::video_cap`]. `render_keying` is how every queue made
+    /// on a render engine has its colour cache keyed.
+    pub fn new(
+        xe: Box<dyn Xe + Send>,
+        card: &CardFacts,
+        stage: Stage,
+        cap: u64,
+        render_keying: Keying,
+    ) -> Option<Self> {
         let clock_engine = crate::xe::plan::one_engine_per_class(&card.engines).first().copied();
         let rate = card.main_gt().map_or(0, |gt| gt.reference_clock);
         Some(Self {
@@ -72,6 +84,7 @@ impl CardWork {
             stage,
             placements: Placements::of(&card.regions)?,
             engines: card.engines.clone(),
+            render_keying,
             clock: clock_engine.filter(|_| rate != 0).map(|engine| (engine, rate)),
             next_id: 0,
             blocks: HashMap::new(),
@@ -86,6 +99,10 @@ impl CardWork {
 
     pub fn stage(&self) -> Stage {
         self.stage
+    }
+
+    pub fn render_keying(&self) -> Keying {
+        self.render_keying
     }
 
     /// The most video memory the guest may hold.
