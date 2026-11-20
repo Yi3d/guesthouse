@@ -19,6 +19,7 @@ use crate::setup::guest_driver::guest_driver;
 use crate::start_checks::start_problems;
 use crate::vm_args::Boot;
 use crate::vm_host::{last_words, send_key};
+use crate::writable_copy::copy_writable;
 use crate::zones;
 use serde_json::json;
 use std::fs;
@@ -94,14 +95,19 @@ pub fn make_answer_disc(context: &Context, machine: &Machine) -> Result<()> {
     built
 }
 
+/// The copies are made writable: the program folder can be read-only, as in NixOS's store, and the
+/// answer file is written over once it's filled in.
 fn fill_answer_disc(context: &Context, machine: &Machine, files: &Path) -> Result<()> {
     for name in INSTALL_FILES {
-        fs::copy(context.paths.guest_files().join(name), files.join(name))?;
+        copy_writable(context.paths.guest_files().join(name), files.join(name))?;
     }
-    fs::copy(context.paths.guest_files().join(SETMODE_FILE), files.join(SETMODE_FILE))?;
+    copy_writable(context.paths.guest_files().join(SETMODE_FILE), files.join(SETMODE_FILE))?;
     if machine.windows_maker() == Some(GpuMaker::Intel) {
         // Setup places Intel's loaders in the system folders with the script that does it at a start.
-        fs::copy(context.paths.guest_files().join(SYSTEM_FILES_SCRIPT), files.join(SYSTEM_FILES_SCRIPT))?;
+        copy_writable(
+            context.paths.guest_files().join(SYSTEM_FILES_SCRIPT),
+            files.join(SYSTEM_FILES_SCRIPT),
+        )?;
     }
     // Setup runs these at its end, for Remote Desktop and SSH as the machine was made.
     let access = read_access(context, machine);
@@ -109,7 +115,7 @@ fn fill_answer_disc(context: &Context, machine: &Machine, files: &Path) -> Resul
         fs::write(files.join(name), script)?;
     }
     if access.is_on(Service::Ssh) {
-        fs::copy(context.paths.openssh_installer(), files.join(INSTALLER_ON_DISC))?;
+        copy_writable(context.paths.openssh_installer(), files.join(INSTALLER_ON_DISC))?;
     }
     let password = make_password(context, machine)?;
     let zone = zones::host_zone(zones::HOST_ZONE_LINK);

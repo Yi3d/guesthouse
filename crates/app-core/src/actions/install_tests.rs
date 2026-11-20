@@ -184,6 +184,32 @@ fn the_answer_disc_holds_this_machines_token_and_is_private() {
     assert!(!vm.folder(&context).join("answer-disc.new").exists(), "the files for the disc are gone");
 }
 
+/// As in NixOS's store, where the program folder's files can't be written.
+fn make_read_only(folder: &Path) {
+    for entry in fs::read_dir(folder).unwrap().flatten() {
+        fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o444)).unwrap();
+    }
+}
+
+#[test]
+fn a_read_only_program_folder_still_makes_the_disc() {
+    let scratch = Scratch::new();
+    let context = scratch_context(&scratch);
+    with_install_files(&scratch, &context);
+    scratch.write("program/openssh/OpenSSH-Win64.msi", "installer");
+    make_read_only(&scratch.path("program/guest"));
+    make_read_only(&scratch.path("program/openssh"));
+    let vm = machine(&context);
+    let access = crate::remote_access::Access { ssh: Some(true), ..crate::remote_access::Access::NEW };
+    crate::remote_access::write_access(&context, &vm, &access).unwrap();
+    make_answer_disc(&context, &vm).unwrap();
+    let answers = on_disc(&answer_disc_path(&context, &vm), "/autounattend.xml");
+    assert!(
+        String::from_utf8_lossy(&answers).contains("<TimeZone>"),
+        "the filled answer file is on the disc"
+    );
+}
+
 #[test]
 fn a_machine_on_an_amd_card_gets_amds_driver_on_its_disc() {
     let scratch = Scratch::new();
