@@ -58,7 +58,7 @@ let
     procps
     curl
   ];
-  version = "0.7.1";
+  version = "0.7.2-nixos.2";
   # One folder for everything the app finds by where its own program is, as it does with the guest files.
   home = "$out/lib/guesthouse";
 in
@@ -68,7 +68,7 @@ stdenvNoCC.mkDerivation {
 
   src = fetchurl {
     url = "https://github.com/xnixy/guesthouse/releases/download/v${version}/guesthouse-${version}-x86_64.tar.xz";
-    hash = "sha256-vMtUs9B4QOyCij7QIQSE4GBQpYhenqRRDboEnvn7/gg=";
+    hash = "sha256-NGU70BsfygKVwGQTjDJVnNVKgxPKhD4o3pWC0ADAxeI=";
   };
   sourceRoot = "guesthouse-${version}-x86_64";
 
