@@ -225,6 +225,8 @@ pub fn create(context: &Context, new: &NewMachine) -> Result<Machine> {
         iso: new.iso.clone(),
         installing: installs,
         tpm: windows || new.windows_disc,
+        // The install's own Windows has NVMe's driver. What a plain machine boots may not.
+        nvme: windows,
         mac: unused_mac(context),
         amd_gpu: new.amd_gpu.clone().unwrap_or_else(|| crate::linux::amd::default_linux_gpu(context)),
         gpu_maker: new.gpu_maker.and_then(GpuMaker::recorded).filter(|_| windows),
@@ -524,6 +526,7 @@ mod tests {
         let new = NewMachine { windows_disc: true, ..plain(&scratch, "By Hand", None) };
         let made = create(&context, &new).unwrap();
         assert!(made.kind == Kind::Plain && made.tpm && !made.installing && !made.has_gpu());
+        assert!(!made.nvme, "what a plain machine boots may have no NVMe driver");
         assert_eq!(fs::read_to_string(&made.vars).unwrap(), "firmware settings with keys");
     }
 
@@ -595,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_windows_machine_installs_with_a_tpm() {
+    fn a_new_windows_machine_installs_with_a_tpm_on_nvme() {
         let scratch = Scratch::new();
         let mut context = scratch_context(&scratch);
         context.install_room = Some(0);
@@ -618,7 +621,7 @@ mod tests {
             access: Access::NEW,
         };
         let made = create(&context, &new).unwrap();
-        assert!(made.installing && made.tpm && !made.has_gpu());
+        assert!(made.installing && made.tpm && made.nvme && !made.has_gpu());
         assert_eq!(fs::read_to_string(&made.vars).unwrap(), "firmware settings with keys");
         assert_eq!(read_access(&context, &made), Access::NEW);
         let with_ssh = Access { ssh: Some(true), ..Access::NEW };
@@ -658,7 +661,7 @@ mod tests {
             access: Access::NEW,
         };
         let made = create(&context, &new).unwrap();
-        assert!(made.installing && !made.tpm && made.vars.is_empty());
+        assert!(made.installing && !made.tpm && made.vars.is_empty() && !made.nvme);
         assert!(made.owns_files(&context));
     }
 
