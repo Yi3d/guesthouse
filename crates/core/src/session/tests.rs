@@ -449,8 +449,19 @@ mod adapter {
     fn identity_says_whether_messages_may_be_async() {
         let mut session = session();
         session.config.async_messages = true;
+        session.config.keep_cpu_views = false;
         let reply = send(&mut session, &message(Command::GetAdapterIdentity, HEADER_SIZE));
         assert_eq!(u32_at(&reply, 12), Ok(0x40));
+    }
+
+    #[test]
+    fn identity_tells_the_guest_to_keep_cpu_views_by_default() {
+        let reply = send(&mut session(), &message(Command::GetAdapterIdentity, HEADER_SIZE));
+        assert_eq!(u32_at(&reply, 12), Ok(0x20));
+        let mut session = session();
+        session.config.keep_cpu_views = false;
+        let reply = send(&mut session, &message(Command::GetAdapterIdentity, HEADER_SIZE));
+        assert_eq!(u32_at(&reply, 12), Ok(0));
     }
 
     #[test]
@@ -892,6 +903,18 @@ mod allocations {
         let mut session = session();
         let (_, handle) = allocate(&mut session, private(0x1000));
         assert_eq!(lock(&mut session, handle), lock(&mut session, handle));
+    }
+
+    #[test]
+    fn a_lock_after_an_unlock_answers_the_first_address() {
+        // A guest told to keep CPU views uses only the first answer, so every later one must agree.
+        let mut session = session();
+        let (_, handle) = allocate(&mut session, private(0x1000));
+        let first = lock(&mut session, handle);
+        let mut unlock = message(Command::UnlockForCpu, 0x28);
+        set_u32(&mut unlock, 0x1C, handle);
+        assert_eq!(status_of(&send(&mut session, &unlock)), SUCCESS);
+        assert_eq!(lock(&mut session, handle), first);
     }
 
     #[test]

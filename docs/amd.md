@@ -58,7 +58,7 @@ Two more switches are a stopgap for that reset. Each is off unless set, and does
 
 A tester ran it on a Radeon 780M with driver 32.0.32015.12012 in the guest:
 
-- HEVC decode through Direct3D 11, and the frames match the software decoder's. H.264 through Direct3D 11 crashes in AMD's driver inside the guest.
+- HEVC decode through Direct3D 11, and the frames match the software decoder's. H.264 through Direct3D 11 crashed in AMD's driver inside the guest. AMD's driver reads the stream through a pointer after it has unlocked the buffer, and Windows in the guest used to take that pointer away at the unlock. The daemon now has Windows keep it until the buffer is freed. That hasn't run on a 780M yet. `GUESTHOUSE_UNMAP_AT_UNLOCK=1` brings back the old behaviour, for any card.
 - `hevc_amf`, `h264_amf` and `av1_amf` encode 1080p, about 2 ms a frame.
 - Each frame holds up the guest's other GPU work while the card decodes or encodes it.
 - A program that looks for AMF in System32 finds it only once `amfrt64.dll` is copied there from the driver's folder.
