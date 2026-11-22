@@ -56,6 +56,9 @@ pub struct Allocation {
     /// The residency priority the guest set, if it has. Nothing here acts on it: the host's
     /// driver decides what stays in video memory.
     pub priority: Option<u32>,
+    /// The card had no room, so its memory is host system memory the card reaches, as Windows
+    /// moves memory out of a full card. It doesn't count as on the card.
+    pub spilled: bool,
 }
 
 impl Allocation {

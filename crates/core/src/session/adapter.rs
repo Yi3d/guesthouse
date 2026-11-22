@@ -19,6 +19,9 @@ use guesthouse_messages::indirect;
 use guesthouse_messages::queue::{DriverEscape, clock_answer};
 use guesthouse_messages::registry::RegistryQuery;
 use guesthouse_messages::wire::{align_up, pad_to, put_u32, put_u64, set_u32, u32_at};
+
+/// What the guest's budget leaves free on the card, for the host and the daemon's own memory.
+const CARD_MARGIN: u64 = 512 << 20;
 use guesthouse_messages::{MessageHeader, Status};
 use std::collections::HashMap;
 
@@ -143,8 +146,21 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         } else {
             0
         };
-        memory_answer(self.group_budget(group), usage, reserved, out);
+        let budget =
+            if group == VIDEO_MEMORY_GROUP { self.video_budget_now() } else { self.group_budget(group) };
+        memory_answer(budget, usage, reserved, out);
         Ok(())
+    }
+
+    /// The guest's video budget: the fixed one, or less when the card has less free than that. What
+    /// the guest already has on the card counts as its own, and a margin is left for the host's
+    /// desktop and the daemon's own memory, which the guest doesn't see. A game that keeps to its
+    /// budget then doesn't fill the card.
+    fn video_budget_now(&self) -> u64 {
+        let fixed = self.group_budget(VIDEO_MEMORY_GROUP);
+        let Some(free) = self.backend.card_memory_free() else { return fixed };
+        let room = self.video_in_use().saturating_add(free).saturating_sub(CARD_MARGIN);
+        fixed.min(room)
     }
 
     /// Keeps the amount a process asks to have kept, up to what a usage query says it may. Nothing

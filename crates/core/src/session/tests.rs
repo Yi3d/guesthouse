@@ -501,6 +501,24 @@ mod adapter {
         assert_eq!(u64_at(&reply, 24), Ok(3 << 30));
     }
 
+    #[test]
+    fn the_video_budget_follows_what_the_card_has_free() {
+        let mut session = session();
+        allocate(&mut session, private(0x20000));
+        session.backend_mut().card_free = Some(2 << 30);
+        let reply = send(&mut session, &message(Command::QueryVideoMemory, 0x20));
+        // What the guest has on the card is its own, and 512 MiB is left for the host.
+        assert_eq!(u64_at(&reply, 0), Ok(0x20000 + (2 << 30) - (512 << 20)));
+    }
+
+    #[test]
+    fn a_card_with_plenty_free_leaves_the_budget_as_it_was() {
+        let mut session = session();
+        session.backend_mut().card_free = Some(100 << 30);
+        let reply = send(&mut session, &message(Command::QueryVideoMemory, 0x20));
+        assert_eq!(u64_at(&reply, 0), Ok(6 << 30));
+    }
+
     fn reserve(session: &mut TestSession, group: u32, bytes: u64) -> u32 {
         let mut request = message(Command::ChangeVideoMemoryReservation, 0x38);
         set_u32(&mut request, 0x24, group);
@@ -737,6 +755,30 @@ mod allocations {
         session.backend_mut().fail_next_allocation = true;
         let reply = send(&mut session, &create_message(0, &[private(0x1000)]));
         assert_eq!(reply, Status::UNSUCCESSFUL.0.to_le_bytes());
+    }
+
+    #[test]
+    fn a_full_card_puts_the_allocation_in_system_memory() {
+        let mut session = session_with(Some(0x3000));
+        session.backend_mut().spill_allowed = true;
+        session.backend_mut().fail_next_allocation = true;
+        let (_, spilled) = allocate(&mut session, private(0x2000));
+        assert!(session.allocations[&spilled].spilled);
+        assert_eq!(session.backend().spilled.len(), 1);
+        // It isn't on the card, so the cap still has room for this one.
+        let (_, on_card) = allocate(&mut session, private(0x2000));
+        assert!(!session.allocations[&on_card].spilled);
+    }
+
+    #[test]
+    fn system_memory_for_a_full_card_stops_at_half_the_guest_s_ram() {
+        // The test guest has 16 GiB, so 8 GiB can go to system memory.
+        let mut session = session();
+        session.backend_mut().spill_allowed = true;
+        session.backend_mut().fail_next_allocation = true;
+        let reply = send(&mut session, &create_message(0, &[private(9 << 30)]));
+        assert_eq!(reply, Status::UNSUCCESSFUL.0.to_le_bytes());
+        assert!(session.backend().spilled.is_empty());
     }
 
     #[test]

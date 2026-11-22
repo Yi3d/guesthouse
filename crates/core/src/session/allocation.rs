@@ -95,11 +95,54 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     /// The video memory the guest's allocations hold. Guest memory does not count: it is not on
     /// the card.
-    fn video_in_use(&self) -> u64 {
-        let on_card = self.allocations.values().filter(|allocation| {
-            allocation.memory.is_some() && allocation.guest_address.is_none() && allocation.view.is_none()
-        });
+    pub(super) fn video_in_use(&self) -> u64 {
+        let on_card =
+            self.allocations.values().filter(|allocation| holds_memory(allocation) && !allocation.spilled);
         on_card.map(|allocation| allocation.size).fold(0, u64::saturating_add)
+    }
+
+    /// The system memory allocations hold that the card had no room for.
+    fn spilled_in_use(&self) -> u64 {
+        let spilled =
+            self.allocations.values().filter(|allocation| holds_memory(allocation) && allocation.spilled);
+        spilled.map(|allocation| allocation.size).fold(0, u64::saturating_add)
+    }
+
+    /// Video memory for an allocation, or, when the card refuses, system memory the card reaches,
+    /// up to a share of the guest's RAM as Windows shares system memory with a card. Says which.
+    pub(super) fn card_or_spill_memory(
+        &mut self,
+        size: u64,
+        kind: MemoryKind,
+    ) -> Result<(MemoryId, u64, bool), BackendError> {
+        let refused = match self.backend.allocate_video_memory(size, kind) {
+            Ok((memory, given)) => return Ok((memory, given, false)),
+            Err(error) => error,
+        };
+        let room = self.config.limits.system_budget / SPILL_SHARE;
+        if self.spilled_in_use().saturating_add(size) > room {
+            log::warn!(
+                "the card refused {size:#x} bytes, and system memory for the card is full too: {refused}"
+            );
+            return Err(refused);
+        }
+        match self.backend.allocate_spill_memory(size, kind) {
+            Ok((memory, given)) => {
+                if std::mem::replace(&mut self.spill_noted, true) {
+                    log::debug!("{size:#x} bytes went to system memory, as the card refused: {refused}");
+                } else {
+                    log::warn!(
+                        "the card is full ({refused}), so {size:#x} bytes went to system memory, and more may. \
+                         Programs run slower like this, as on Windows when a card fills up"
+                    );
+                }
+                Ok((memory, given, true))
+            }
+            Err(error) => {
+                log::warn!("the card refused {size:#x} bytes, and system memory refused too: {error}");
+                Err(refused)
+            }
+        }
     }
 
     /// Whether memory the guest is yet to list would be more than it has. Each page waiting for its
@@ -174,9 +217,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 let pages = shape.exact_size.div_ceil(PAGE_SIZE) as usize;
                 allocation.pending_pages = Some(vec![None; pages]);
             } else {
-                let (memory, size) = self.backend.allocate_video_memory(shape.size, shape.kind)?;
+                let (memory, size, spilled) = self.card_or_spill_memory(shape.size, shape.kind)?;
                 allocation.memory = Some(memory);
                 allocation.size = size;
+                allocation.spilled = spilled;
             }
             log::debug!(
                 "allocation {handle:#x} in process {owner:#x}: {:#x} bytes, guest backed {guest_backed}, primary {}",
@@ -468,6 +512,14 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.allocations.get_mut(&request.allocation).expect("found above").memory = Some(memory);
         Ok(())
     }
+}
+
+/// Windows lets a card use up to half the system's memory.
+const SPILL_SHARE: u64 = 2;
+
+/// Whether an allocation holds memory of its own, rather than the guest's pages or a lock's.
+fn holds_memory(allocation: &Allocation) -> bool {
+    allocation.memory.is_some() && allocation.guest_address.is_none() && allocation.view.is_none()
 }
 
 /// What the log says when the machine's video memory cap refuses an allocation. The guest's

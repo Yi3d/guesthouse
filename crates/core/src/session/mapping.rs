@@ -72,9 +72,12 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             self.backend.release_memory(memory);
             let allocation = self.allocations.get_mut(&handle).expect("read above");
             allocation.memory = None;
-            let (grown, size) = self.backend.allocate_video_memory(needed, allocation.kind)?;
+            let kind = allocation.kind;
+            let (grown, size, spilled) = self.card_or_spill_memory(needed, kind)?;
+            let allocation = self.allocations.get_mut(&handle).expect("read above");
             allocation.memory = Some(grown);
             allocation.size = size;
+            allocation.spilled = spilled;
             memory = grown;
         }
         if request.address != 0 {

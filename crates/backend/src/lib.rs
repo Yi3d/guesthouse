@@ -66,6 +66,25 @@ pub trait Backend: Sized {
     fn allocate_video_memory(&mut self, size: u64, kind: MemoryKind)
     -> Result<(MemoryId, u64), BackendError>;
 
+    /// Makes memory of at least `size` bytes in host system memory that the GPU reaches, for an
+    /// allocation the card has no room for, as Windows moves memory out of a full card instead of
+    /// failing. Laid out as `kind` says if it can be. A backend that can't says so, and the
+    /// allocation fails as before.
+    fn allocate_spill_memory(
+        &mut self,
+        _size: u64,
+        _kind: MemoryKind,
+    ) -> Result<(MemoryId, u64), BackendError> {
+        Err(BackendError::new("this backend can't place video memory in system memory"))
+    }
+
+    /// How much of the card's own memory is free right now, everyone's use counted, if the backend
+    /// can tell. The guest's budget follows it, so a game asks for less when the host is using the
+    /// card too.
+    fn card_memory_free(&self) -> Option<u64> {
+        None
+    }
+
     /// Lets the GPU reach host memory that is already mapped in this process.
     fn adopt_host_pages(&mut self, host_address: u64, size: u64) -> Result<MemoryId, BackendError>;
 

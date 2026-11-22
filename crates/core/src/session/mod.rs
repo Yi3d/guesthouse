@@ -176,6 +176,8 @@ pub struct Session<B, M> {
     pub(crate) queues_made: u32,
     /// Statistics have been refused once, which is worth saying once.
     pub(crate) statistics_refused: bool,
+    /// Whether the log has said an allocation went to system memory, which it says once.
+    pub(crate) spill_noted: bool,
     /// Command numbers that were answered as not supported, so that each is worth one warning.
     unknown_commands: HashSet<u32>,
     /// Copies refused so far, as only the first few are worth a warning.
@@ -274,6 +276,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             rings_not_before: HashMap::new(),
             queues_made: 0,
             statistics_refused: false,
+            spill_noted: false,
             unknown_commands: HashSet::new(),
             copies_refused: 0,
             work_started: 0,

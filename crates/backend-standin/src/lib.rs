@@ -56,6 +56,11 @@ pub struct StandIn {
     spaces: HashMap<SpaceId, Space>,
     /// Set to make the next video memory allocation fail.
     pub fail_next_allocation: bool,
+    /// Memory made in system memory for allocations the card had no room for, when it may be.
+    pub spill_allowed: bool,
+    pub spilled: Vec<MemoryId>,
+    /// What the card says it has free, if it says.
+    pub card_free: Option<u64>,
     /// Set to make the next mapping fail.
     pub fail_next_map: bool,
     /// Whether submissions go to the pretend GPU. If not, they finish at once.
@@ -176,6 +181,9 @@ impl StandIn {
             live_memory: HashSet::new(),
             spaces: HashMap::new(),
             fail_next_allocation: false,
+            spill_allowed: false,
+            spilled: Vec::new(),
+            card_free: None,
             fail_next_map: false,
             run_work: false,
             run_work_at_once: false,
@@ -353,6 +361,23 @@ impl Backend for StandIn {
             return Err(BackendError::new("the stand-in was told to fail"));
         }
         Ok((self.new_memory(), size))
+    }
+
+    fn allocate_spill_memory(
+        &mut self,
+        size: u64,
+        _kind: MemoryKind,
+    ) -> Result<(MemoryId, u64), BackendError> {
+        if !self.spill_allowed {
+            return Err(BackendError::new("the stand-in has no spill"));
+        }
+        let memory = self.new_memory();
+        self.spilled.push(memory);
+        Ok((memory, size))
+    }
+
+    fn card_memory_free(&self) -> Option<u64> {
+        self.card_free
     }
 
     fn adopt_host_pages(&mut self, _host_address: u64, _size: u64) -> Result<MemoryId, BackendError> {

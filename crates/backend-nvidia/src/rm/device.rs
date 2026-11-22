@@ -213,6 +213,24 @@ impl<R: Rm> Device<R> {
         Ok((handle, u64::from_le_bytes(given)))
     }
 
+    /// Makes system memory the GPU reaches, laid out as `kind` says, for video memory the card has
+    /// no room for. Returns it, and the size the RM gave it.
+    pub fn alloc_spill_memory(&mut self, size: u64, kind: MemoryKind) -> Result<(Handle, u64), RmError> {
+        let mut params = vec![0; self.sizes.memory_params];
+        put_u32(&mut params, MEMORY_PARAM_OWNER, MEMORY_OWNER);
+        put_u32(&mut params, MEMORY_PARAM_FLAGS, MEMORY_FLAG_HANDLE_PROVIDED);
+        put_u64(&mut params, MEMORY_PARAM_SIZE, size);
+        let mut attributes = MEMORY_ATTR_LOCATION_PCI;
+        if kind != MemoryKind::PLAIN {
+            put_u32(&mut params, MEMORY_PARAM_TYPE, MEMORY_TYPE_DEPTH);
+            attributes |= kind.0;
+        }
+        put_u32(&mut params, MEMORY_PARAM_ATTRIBUTES, attributes);
+        let handle = self.alloc(self.device, MEMORY_SYSTEM, &mut params)?;
+        let given = params[MEMORY_PARAM_SIZE..MEMORY_PARAM_SIZE + 8].try_into().expect("eight bytes");
+        Ok((handle, u64::from_le_bytes(given)))
+    }
+
     /// Makes system memory the RM owns, which the kernel can map to the CPU. A semaphore
     /// surface's slots must live in memory of exactly this kind.
     pub fn alloc_sysmem(&mut self, size: u64) -> Result<Handle, RmError> {

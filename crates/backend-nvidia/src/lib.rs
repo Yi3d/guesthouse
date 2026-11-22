@@ -404,6 +404,22 @@ impl<R: Rm + OpenRm> Backend for NvidiaBackend<R> {
         Ok((memory, given))
     }
 
+    fn allocate_spill_memory(
+        &mut self,
+        size: u64,
+        kind: MemoryKind,
+    ) -> Result<(MemoryId, u64), BackendError> {
+        let (handle, given) = self.device.alloc_spill_memory(size, kind).map_err(memory_error)?;
+        let memory = MemoryId(u64::from(handle));
+        self.last_memory = Some(memory);
+        Ok((memory, given))
+    }
+
+    fn card_memory_free(&self) -> Option<u64> {
+        let live = self.sensors.as_ref()?.latest()?;
+        Some(live.memory_total_bytes?.saturating_sub(live.memory_used_bytes?))
+    }
+
     fn adopt_host_pages(&mut self, host_address: u64, size: u64) -> Result<MemoryId, BackendError> {
         let handle = self.device.alloc_host_pages(host_address, size).map_err(memory_error)?;
         let memory = MemoryId(u64::from(handle));
