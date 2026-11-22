@@ -66,12 +66,23 @@ Questions and chat are on [Discord](https://discord.gg/rN3VARayZV). Bugs go in t
 
 ## Working on it
 
-You need Rust 1.88 or newer, and no GPU.
+The same code builds on Linux and on Windows, and each builds the host for the system it's on. A Linux build is the daemon and the GTK app, and a Windows build is the service and the Windows app. The other system's crates build empty, so `cargo test` works on both, but the GTK app only builds on Linux. Neither needs a GPU.
+
+On Linux, with Rust 1.88 or newer:
 
 ```sh
 cargo test                     # everything but the app
 cargo run -p guesthouse-app    # needs GTK 4.16 and libadwaita 1.5 development files
 ```
+
+On Windows 11, with Rust 1.95 or newer and Visual Studio's C++ build tools:
+
+```powershell
+cargo test                               # everything but the app
+cargo run -p guesthouse-app-windows      # the window, which asks the service for everything
+```
+
+Cargo doesn't build everything a VM needs. On Linux that's the QEMU patch in `qemu/`, and on Windows the window needs the service running.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the rest, and [ARCHITECTURE.md](ARCHITECTURE.md) explains how it fits together.
 

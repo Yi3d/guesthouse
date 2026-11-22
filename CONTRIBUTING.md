@@ -2,7 +2,11 @@
 
 ## Getting going
 
-You need Rust 1.88 or newer. `cargo clippy` needs 1.92 and the app's development files below. No GPU and no VM are needed for any of this:
+The workspace builds on Linux and on Windows. Each builds the host for the system it's on, and the other system's crates build empty, so `cargo test` works on both. The GTK app is the exception, and only builds on Linux. No GPU and no VM are needed for any of this.
+
+### On Linux
+
+You need Rust 1.88 or newer. `cargo clippy` needs 1.92 and the app's development files below.
 
 ```sh
 cargo test
@@ -16,6 +20,22 @@ cargo bench -p guesthouse-core
 The desktop app in `crates/app` also needs GTK 4 and libadwaita's development files, so `cargo test` leaves it out. Build it with `cargo build -p guesthouse-app`. That needs GTK 4.16 for HDR. On GTK 4.14 and libadwaita 1.5, as Ubuntu 24.04 has, use `--no-default-features`, and the viewer shows SDR only. `crates/app/page-shots.sh` walks its pages on GTK's Broadway backend and saves a picture of each, with no desktop and no GPU.
 
 To try the sockets by hand, `cargo run -p guesthouse-daemon --features stand-in` answers messages with a pretend GPU behind them. It's for poking at, and it won't run a guest.
+
+A real VM also needs QEMU with the patch in `qemu/`, which `qemu/README.md` says how to build.
+
+### On Windows
+
+You need Windows 11, Rust 1.95 or newer, as windows-reactor asks for it, and Visual Studio's C++ build tools.
+
+```powershell
+cargo test
+cargo build --release -p guesthouse-service -p guesthouse-host-windows
+cargo build --release -p guesthouse-app-windows
+```
+
+`cargo test` leaves the app out here too. The app's first build downloads the Windows App Runtime from NuGet. The app does nothing to a machine itself and only asks the service, so to make or start one, turn on Virtual Machine Platform and run `.\target\release\guesthouse-service.exe run` in an elevated prompt. A build with `--features preview` shows the window with made-up machines and no service. `scripts\windows-setup.ps1` packs it all into the installer. [docs/windows-host.md](docs/windows-host.md) has the details.
+
+The checks on pull requests run on Linux only, so build a Windows change on Windows before you send it.
 
 ## Legal rules
 
