@@ -382,7 +382,10 @@ impl<R: Rm> NvidiaBackend<R> {
         }
     }
 
-    /// Copies what the GPU wrote into an allocation over to its new memory.
+    /// Copies what the GPU wrote into an allocation over to its new memory. The two windows hold
+    /// `COPY_WINDOW` bytes each, so a larger allocation goes over in pieces of that size, each
+    /// mapped at an offset into both memories. Dropping the rest would hand the guest zeroes where
+    /// its data was; a game's 128 MiB buffer lost that way took its device down as it started.
     pub(crate) fn move_contents(
         &mut self,
         host: &mut dyn HostServices,
@@ -391,15 +394,34 @@ impl<R: Rm> NvidiaBackend<R> {
         to: Handle,
         size: u64,
     ) -> Result<(), BackendError> {
-        if size > COPY_WINDOW {
-            log::warn!("{size:#x} bytes is too big to keep");
-            return Ok(());
+        let mut offset = 0;
+        while offset < size {
+            let piece = (size - offset).min(COPY_WINDOW);
+            if !self.move_piece(host, own_space, from, to, offset, piece)? {
+                log::warn!("a copy of {piece:#x} bytes at {offset:#x} of {size:#x} never finished");
+                break;
+            }
+            offset += piece;
         }
+        Ok(())
+    }
+
+    /// One piece of a move, of at most `COPY_WINDOW` bytes from `offset` in both memories. Says
+    /// whether the copy finished.
+    fn move_piece(
+        &mut self,
+        host: &mut dyn HostServices,
+        own_space: SpaceId,
+        from: Handle,
+        to: Handle,
+        offset: u64,
+        size: u64,
+    ) -> Result<bool, BackendError> {
         let area = self.copier(host, own_space)?.area;
         let (window, source) = (area + AREA_SIZE as u64, area + AREA_SIZE as u64 + COPY_WINDOW);
         let length = size.next_multiple_of(SMALL_PAGE);
         let space = self.spaces.get(&own_space).ok_or_else(|| BackendError::new("no address space"))?.clone();
-        let map = Mapping { length, small_pages: true, ..Mapping::default() };
+        let map = Mapping { offset, length, small_pages: true, ..Mapping::default() };
         self.device.map(&space, &Mapping { memory: to, address: window, ..map }).map_err(memory_error)?;
         if let Err(error) = self.device.map(&space, &Mapping { memory: from, address: source, ..map }) {
             // The window is one place, so a mapping left in it would stop every later move.
@@ -409,11 +431,10 @@ impl<R: Rm> NvidiaBackend<R> {
         let copier = self.copier.as_mut().expect("made above");
         let words = copier.channel.bytes(source, window, size as u32);
         copier.channel.start(&mut self.device, words);
-        if !copier.channel.wait() {
-            log::warn!("a copy of {size:#x} bytes never finished");
-        }
+        let finished = copier.channel.wait();
         self.device.unmap(&space, from, source, length).map_err(memory_error)?;
-        self.device.unmap(&space, to, window, length).map_err(memory_error)
+        self.device.unmap(&space, to, window, length).map_err(memory_error)?;
+        Ok(finished)
     }
 }
 
@@ -755,6 +776,41 @@ mod tests {
         let moved = backend.preserve_contents(&mut AreaOnly(AREA), space, from, to, 0x1000);
         assert!(moved.is_err());
         assert_eq!(backend.device().rm.memory_at(window), None);
+    }
+
+    #[test]
+    fn a_move_over_one_window_goes_in_pieces_and_keeps_all_of_it() {
+        use guesthouse_backend::{Backend, GpuRange};
+        let mut rm = FakeRm::new();
+        rm.engine.running = true;
+        let mut backend = crate::fake_guest::fake_backend(rm);
+        let range = GpuRange { start: 0x400_0000, end: 0x1_0000_0000 };
+        let space = backend.create_address_space(&[range]).unwrap();
+        // Marathon's was 0x8000000; this one also leaves a short last piece.
+        let size = 2 * COPY_WINDOW + 0x2000;
+        let kind = guesthouse_backend::MemoryKind::PLAIN;
+        let (from, _) = backend.allocate_video_memory(size, kind).unwrap();
+        let (to, _) = backend.allocate_video_memory(size, kind).unwrap();
+        backend.preserve_contents(&mut AreaOnly(AREA), space, from, to, size).unwrap();
+        let rm = &backend.device().rm;
+        let widths: Vec<u64> = rm.engine.copies.iter().map(|copy| u64::from(copy.width)).collect();
+        assert_eq!(widths, [COPY_WINDOW, COPY_WINDOW, 0x2000]);
+        assert!(rm.engine.faults.is_empty(), "{:?}", rm.engine.faults);
+        let offsets = |memory: crate::rm::Handle| -> Vec<u64> {
+            rm.calls
+                .iter()
+                .filter_map(|call| match call {
+                    crate::rm::fake::Call::MapDma(map) if map.memory == memory => Some(map.offset),
+                    _ => None,
+                })
+                .collect()
+        };
+        let pieces = [0, COPY_WINDOW, 2 * COPY_WINDOW];
+        assert_eq!(offsets(crate::handle_of(from)), pieces);
+        assert_eq!(offsets(crate::handle_of(to)), pieces);
+        let window = AREA + AREA_SIZE as u64;
+        assert_eq!(rm.memory_at(window), None);
+        assert_eq!(rm.memory_at(window + COPY_WINDOW), None);
     }
 
     #[test]
