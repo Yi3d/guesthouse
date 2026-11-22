@@ -86,7 +86,7 @@ use sdma_copy::{EngineForm, LinearCopy, TiledCopy};
 use space_vm::{GuestFence, Origin, Ran, SpaceVm};
 use std::collections::{BTreeMap, HashMap};
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 /// How this backend names the host driver's branch. There is no Windows-style branch here: the host
@@ -131,6 +131,10 @@ pub struct AmdBackend {
     prepared_video: HashMap<u64, PreparedVideo>,
     /// The guest processes' contexts on the video node.
     video_contexts: video::Contexts,
+    /// An eventfd every video run's sync object posts to when the run retires, made when the guest
+    /// is offered video. The daemon sleeps on it, so a video run's fence is written as soon as the
+    /// run has retired, rather than at the next poll.
+    video_wake: Option<OwnedFd>,
     /// When the runs on the card were last looked at.
     looked_at_runs: Option<Instant>,
     /// Makes dma-bufs of guest memory, where this user may.
@@ -243,6 +247,7 @@ impl AmdBackend {
             video_commands: video_ib::Copied::default(),
             prepared_video: HashMap::new(),
             video_contexts: video::Contexts::default(),
+            video_wake: None,
             video: None,
             video_close: None,
         })
@@ -276,6 +281,9 @@ impl AmdBackend {
         self.facts.node_count = self.device.info().engines.count();
         self.facts.engines.video = true;
         self.video = Some(video::Sessions::new(most));
+        self.video_wake = make_wake()
+            .inspect_err(|error| log::debug!("no eventfd for video runs ({error}), so they are polled"))
+            .ok();
         log::warn!(
             "{VIDEO_VARIABLE} is on, which is an experiment: the guest is offered the card's video engine. \
              Video work of the guest's that the engine doesn't take can have amdgpu reset it, and a reset \
@@ -510,7 +518,8 @@ impl AmdBackend {
         let Some(space) = self.spaces.get_mut(&run.space) else {
             return Err(BackendError::new("the run's address space has closed"));
         };
-        let sent = space.vm.send_video(run.slot, &run.runs, queue, Some(run.fence), now);
+        let wake = self.video_wake.as_ref().map(AsRawFd::as_raw_fd);
+        let sent = space.vm.send_video(run.slot, &run.runs, queue, Some(run.fence), wake, now);
         let named = traffic::VideoRun { queue, fence_value: Some(run.fence.value), space: run.space };
         match sent {
             Ok(()) => {
@@ -592,7 +601,8 @@ impl AmdBackend {
         };
         let now = Instant::now();
         let runs = copied.runs_in(slot);
-        let sent = space.vm.send_video(slot, &runs, queue, None, now);
+        let wake = self.video_wake.as_ref().map(AsRawFd::as_raw_fd);
+        let sent = space.vm.send_video(slot, &runs, queue, None, wake, now);
         log::info!(
             "amd video close queue={queue:#x} session={:#x} task={} {}",
             session.address(),
@@ -790,6 +800,24 @@ impl AmdBackend {
         self.next_id += 1;
         id
     }
+}
+
+/// A fresh eventfd that doesn't block, for sync objects to post to.
+fn make_wake() -> io::Result<OwnedFd> {
+    // SAFETY: eventfd returns a fresh descriptor or -1.
+    let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor is fresh and owned here.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+/// Empties an eventfd that doesn't block, so it sleeps again until something new is posted.
+fn drain_wake(event: &OwnedFd) {
+    let mut count = [0u8; 8];
+    // SAFETY: the buffer is eight bytes, as an eventfd's read wants. One read empties it.
+    unsafe { libc::read(event.as_raw_fd(), count.as_mut_ptr().cast(), count.len()) };
 }
 
 /// Writes the fence of each retired video run that has one, unless the fence is already past it, as
@@ -1052,6 +1080,20 @@ impl Backend for AmdBackend {
         let mut backend = Self::open_card(address.as_deref())?;
         backend.facts.guest_driver_version = setup.guest_driver_version.packed();
         Ok(backend)
+    }
+
+    /// The eventfd video runs post to when they retire, when the guest is offered video.
+    fn wake_descriptor(&self) -> Option<std::os::fd::RawFd> {
+        self.video_wake.as_ref().map(AsRawFd::as_raw_fd)
+    }
+
+    /// A video run has retired: its fence is written now. The eventfd is emptied first, so a run
+    /// that retires after the look below posts again and wakes the daemon.
+    fn woke(&mut self, host: &mut dyn HostServices, now: Instant) {
+        if let Some(event) = &self.video_wake {
+            drain_wake(event);
+        }
+        self.write_video_fences(host, now);
     }
 
     fn facts(&self) -> &AdapterFacts {
@@ -1645,6 +1687,31 @@ mod tests {
         assert_eq!(host.0[&FIRST], 3);
         assert_eq!(host.0[&PAST], 9);
         assert_eq!(host.0.len(), 2, "nothing else was written");
+    }
+
+    #[test]
+    fn the_video_wake_is_emptied_by_one_drain_and_wakes_again_for_the_next_post() {
+        let readable = |event: &OwnedFd| {
+            let mut poll = libc::pollfd { fd: event.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: one pollfd, valid for the call, and no wait.
+            unsafe { libc::poll(&mut poll, 1, 0) == 1 }
+        };
+        let post = |event: &OwnedFd| {
+            let one = 1u64.to_ne_bytes();
+            // SAFETY: eight bytes, as an eventfd's write wants.
+            assert_eq!(unsafe { libc::write(event.as_raw_fd(), one.as_ptr().cast(), 8) }, 8);
+        };
+        let event = make_wake().unwrap();
+        assert!(!readable(&event));
+        drain_wake(&event);
+        // Several runs that retire before the daemon looks are one wake.
+        post(&event);
+        post(&event);
+        assert!(readable(&event));
+        drain_wake(&event);
+        assert!(!readable(&event), "the daemon sleeps again");
+        post(&event);
+        assert!(readable(&event));
     }
 
     #[test]

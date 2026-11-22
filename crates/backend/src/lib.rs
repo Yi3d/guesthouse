@@ -286,6 +286,11 @@ pub trait Backend: Sized {
     /// writing the fence: it stands in at the fence then, as the work will never get there.
     fn poll_work(&mut self, _host: &mut dyn HostServices, _now: Instant) {}
 
+    /// The descriptor from [`Backend::wake_descriptor`] has something to say. A backend that posts
+    /// its own events there takes them here, and does what they ask, as writing a fence the GPU
+    /// doesn't write itself. Called before the core looks at what is waiting.
+    fn woke(&mut self, _host: &mut dyn HostServices, _now: Instant) {}
+
     /// A hardware queue has gone, so whatever backs it can go too.
     fn close_queue(&mut self, queue: u32);
 

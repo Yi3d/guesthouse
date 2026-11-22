@@ -21,6 +21,7 @@ use crate::video_runs::{Retired, VideoRuns};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io;
+use std::os::fd::RawFd;
 use std::time::Instant;
 
 /// Which buffers a space has taken in, and its mappings of them. Kept apart from the files so the
@@ -157,6 +158,8 @@ pub struct SpaceVm {
     video_retired: Vec<Retired>,
     /// When a video run here was last seen to retire.
     video_last_retired: Option<Instant>,
+    /// Whether amdgpu refused to post a run's end to the daemon's eventfd, which is said once.
+    video_wake_failed: bool,
 }
 
 /// Where a run's fence is in guest memory, by guest physical address, and the value it ends with.
@@ -204,6 +207,7 @@ impl SpaceVm {
             retired: Vec::new(),
             video_retired: Vec::new(),
             video_last_retired: None,
+            video_wake_failed: false,
         })
     }
 
@@ -288,6 +292,7 @@ impl SpaceVm {
         runs: &[Ib],
         queue: u32,
         fence: Option<GuestFence>,
+        wake: Option<RawFd>,
         now: Instant,
     ) -> io::Result<()> {
         only_copies_for_the_video_ring(HW_IP_VCN_ENC, runs)?;
@@ -310,6 +315,15 @@ impl SpaceVm {
         });
         match submitted {
             Ok(()) => {
+                // Without it the run is still seen to retire at the next poll.
+                if let Some(wake) = wake
+                    && let Err(error) = retired.post_to(&self.file, wake)
+                    && !std::mem::replace(&mut self.video_wake_failed, true)
+                {
+                    log::debug!(
+                        "amdgpu won't post a video run's end to an eventfd ({error}), so it is polled"
+                    );
+                }
                 self.video_runs.sent(slot, retired, queue, fence, now);
                 Ok(())
             }
@@ -620,6 +634,7 @@ mod tests {
             retired: Vec::new(),
             video_retired: Vec::new(),
             video_last_retired: None,
+            video_wake_failed: false,
         }
     }
 
@@ -652,7 +667,7 @@ mod tests {
         let fence = GuestFence { queue: 1, address: 0x1000, value: 1 };
         let sent = space.send(HW_IP_VCN_ENC, &[GUESTS, COPY], 0, fence);
         assert_eq!(sent.unwrap_err().to_string(), NOT_A_COPY);
-        let sent = space.send_video(0, &[COPY, GUESTS], 1, Some(fence), Instant::now());
+        let sent = space.send_video(0, &[COPY, GUESTS], 1, Some(fence), None, Instant::now());
         assert_eq!(sent.unwrap_err().to_string(), NOT_A_COPY);
         // Refused before the kernel was asked anything, so nothing is on the card.
         assert!(!space.video_on_card());
@@ -665,7 +680,7 @@ mod tests {
         let mut space = space_without_a_card();
         let failed = space.place_video(0x1000, &copied).unwrap_err().to_string();
         assert!(failed.starts_with("making the buffer for video commands: "), "{failed}");
-        let sent = space.send_video(0, &copied.runs_in(0), 1, None, Instant::now());
+        let sent = space.send_video(0, &copied.runs_in(0), 1, None, None, Instant::now());
         assert_eq!(sent.unwrap_err().to_string(), "no buffer for video commands was made here");
         assert!(!space.video_on_card());
         assert!(space.take_retired_video(Instant::now()).is_empty());

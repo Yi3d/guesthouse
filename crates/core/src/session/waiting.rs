@@ -553,6 +553,11 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
         self.replies.push(HeldReply { ticket, bytes });
     }
 
+    /// The backend's wake descriptor has something to say. See [`guesthouse_backend::Backend::woke`].
+    pub fn woke(&mut self, now: Instant) {
+        self.backend.woke(&mut services!(self), now);
+    }
+
     /// Checks everything that is waiting, and says how soon to look again. `now` decides deadlines,
     /// and tests pass their own.
     pub fn poll(&mut self, now: Instant) -> Waiting {

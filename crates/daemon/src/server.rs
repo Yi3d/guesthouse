@@ -239,6 +239,9 @@ impl<B: Backend, M: GuestMemory> Server<B, M> {
             descriptors[VIEWER_SOCKET].events |= libc::POLLOUT;
         }
         wait(&mut descriptors, timeout)?;
+        if self.wake.is_some() && descriptors[GPU_WAKE].revents != 0 {
+            self.router.session_mut().woke(Instant::now());
+        }
         for (index, pair) in descriptors[..CHANNEL_PLACES].as_chunks::<2>().0.iter().enumerate() {
             if pair[1].revents != 0 {
                 self.read_channel(index);
