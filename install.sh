@@ -6,7 +6,7 @@
 # will do and every command that needs root, and waits for you to say yes.
 #
 # It never installs or changes a GPU driver, kernel arguments or services, and it never needs root for
-# anything but packages and QEMU's bridge helper. --dry-run shows the plan and stops. Everything it puts on this PC is listed in
+# anything but packages, QEMU's bridge helper and one AppArmor rule for swtpm. --dry-run shows the plan and stops. Everything it puts on this PC is listed in
 # ~/.local/lib/guesthouse/manifest, and uninstall.sh removes that and nothing else.
 #
 # The checksums below only prove that the download is the release this file names. They can't protect
@@ -33,6 +33,14 @@ QEMU_PROGRAM=qemu/build/qemu-system-x86_64
 BRIDGE_HELPER_SOURCE=qemu/build/qemu-bridge-helper
 BRIDGE_HELPER_FOLDER=/usr/local/libexec/guesthouse
 BRIDGE_HELPER=$BRIDGE_HELPER_FOLDER/qemu-bridge-helper
+# Ubuntu's swtpm runs under an AppArmor profile that lets it write in your home folder and /tmp, but not
+# in /run/user, where a machine's run folder is, so a Windows machine's virtual TPM couldn't start. Root
+# adds this one rule to the profile's local file, which is there for additions like it.
+SWTPM_PROFILE=/etc/apparmor.d/usr.bin.swtpm
+SWTPM_LOCAL=/etc/apparmor.d/local/usr.bin.swtpm
+SWTPM_RULE='owner /run/user/[0-9]*/guesthouse/** rwk,'
+SWTPM_COMMENT='# Guesthouse: the virtual TPM keeps its log and socket in the run folder.'
+SECURITY_MODULES=/sys/kernel/security/lsm
 # The first GTK the app with HDR loads on.
 HDR_GTK=4.16
 FIRMWARE_DESCRIPTORS=/usr/share/qemu/firmware
@@ -65,6 +73,7 @@ LINK_FLIPPED=no
 MANIFEST_BEFORE=""
 PACKAGES_ADDED=""
 HELPER_PLACED=no
+SWTPM_RULE_ADDED=no
 
 say() {
     printf '%s\n' "$*"
@@ -623,6 +632,21 @@ helper_command() {
         "$BRIDGE_HELPER_FOLDER" "${BRIDGE_HELPER##*/}" "$source" "$(hash_of "$source")" "${BRIDGE_HELPER##*/}"
 }
 
+# With AppArmor on: swtpm's profile is there without the rule, or swtpm is about to be installed and its
+# profile with it. Root looks for the profile again, as it only comes with the package.
+swtpm_rule_needed() {
+    grep -qw apparmor "$SECURITY_MODULES" 2>/dev/null || return 1
+    case " ${PACKAGES:-} " in
+        *" swtpm "*) [ "$IMMUTABLE" = yes ] || return 0 ;;
+    esac
+    [ -f "$SWTPM_PROFILE" ] && ! grep -qxF "$SWTPM_RULE" "$SWTPM_LOCAL" 2>/dev/null
+}
+
+swtpm_rule_command() {
+    printf '{ [ ! -f "%s" ] || grep -qxF "%s" "%s" 2>/dev/null || { printf "%%s\\n" "%s" "%s" >>"%s" && apparmor_parser -r "%s"; }; }' \
+        "$SWTPM_PROFILE" "$SWTPM_RULE" "$SWTPM_LOCAL" "$SWTPM_COMMENT" "$SWTPM_RULE" "$SWTPM_LOCAL" "$SWTPM_PROFILE"
+}
+
 # What root does, as one string, so what's shown is exactly what runs. An immutable system gets no
 # packages, but its /usr/local takes the helper all the same.
 plan_root_work() {
@@ -638,6 +662,10 @@ plan_root_work() {
     if helper_needs_work "$TREE/$BRIDGE_HELPER_SOURCE"; then
         HELPER_PLACED=yes
         ROOT_COMMAND="${ROOT_COMMAND:+$ROOT_COMMAND && }$(helper_command)"
+    fi
+    if swtpm_rule_needed; then
+        SWTPM_RULE_ADDED=yes
+        ROOT_COMMAND="${ROOT_COMMAND:+$ROOT_COMMAND && }$(swtpm_rule_command)"
     fi
 }
 
@@ -751,6 +779,8 @@ print_root_plan() {
     fi
     [ "$HELPER_PLACED" = no ] ||
         say "That puts QEMU's bridge helper in $BRIDGE_HELPER_FOLDER, setuid root, for bridged networking."
+    [ "$SWTPM_RULE_ADDED" = no ] ||
+        say "It lets swtpm, the virtual TPM a Windows machine needs, write in your run folder under /run/user. Its AppArmor profile doesn't."
     [ -z "$ROOT_COMMAND" ] || [ "$ADD_TO_KVM" = no ] ||
         say "You'd join the kvm group to open /dev/kvm, and that takes a new login."
 }
@@ -869,6 +899,7 @@ list_root_work() {
     done
     [ "$ADD_TO_KVM" = no ] || manifest_line group - kvm
     [ "$HELPER_PLACED" = no ] || manifest_line root-file "$(hash_of "$TREE/$BRIDGE_HELPER_SOURCE")" "$BRIDGE_HELPER"
+    [ "$SWTPM_RULE_ADDED" = no ] || manifest_line apparmor-rule - "$SWTPM_LOCAL"
 }
 
 write_manifest_header() {
@@ -1116,7 +1147,7 @@ choose_release() {
 
 stop_if_nothing_changes() {
     if [ "$(manifest_value version)" = "$RELEASE_VERSION" ] && [ "$(manifest_value mode)" = "$MODE" ] &&
-        ! helper_needs_work "$TREE/$BRIDGE_HELPER_SOURCE"; then
+        ! helper_needs_work "$TREE/$BRIDGE_HELPER_SOURCE" && ! swtpm_rule_needed; then
         say "Guesthouse $RELEASE_VERSION is the latest release, and it's installed the way this PC can run it."
         exit 0
     fi
