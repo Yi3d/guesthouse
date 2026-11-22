@@ -436,6 +436,11 @@ impl AmdBackend {
                  {:#x}), so it sends the card no more",
                 fault.address, fault.status
             )),
+            Ok(Ran::Stopped(fault)) => Err(format!(
+                "the daemon's own work on the card reached {:#x} earlier, where nothing is mapped (fault \
+                 status {:#x}), so it sends the card no more",
+                fault.address, fault.status
+            )),
             Err(error) => Err(error.to_string()),
         }
     }
@@ -655,6 +660,18 @@ impl AmdBackend {
                 );
                 WorkStart::QueueFailed
             }
+            // amdgpu still holds the space's last fault, which is an earlier run's: this work was
+            // never sent, and logging it as a new fault would put that address on it.
+            Ok(Ran::Stopped(fault)) => {
+                log::warn!(
+                    "work on engine family {ip_type} not run: work in space {:?} reached {:#x} earlier \
+                     (fault status {:#x}), so nothing more from it is sent",
+                    work.space,
+                    fault.address,
+                    fault.status
+                );
+                WorkStart::QueueFailed
+            }
             Err(error) => {
                 log::warn!("work on engine family {ip_type} not run: {error}");
                 WorkStart::QueueFailed
@@ -667,7 +684,7 @@ impl AmdBackend {
         match ran {
             Ok(Ran::Retired) => self.patience = Patience::RUN,
             Ok(Ran::Hung) => self.patience = Patience::AFTER_A_HANG,
-            Ok(Ran::Refused | Ran::Faulted(_)) | Err(_) => {}
+            Ok(Ran::Refused | Ran::Faulted(_) | Ran::Stopped(_)) | Err(_) => {}
         }
     }
 

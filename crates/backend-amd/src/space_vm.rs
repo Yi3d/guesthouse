@@ -188,9 +188,12 @@ pub enum Ran {
     Refused,
     /// The kernel neither finished nor reset it in time.
     Hung,
-    /// Work here reached an address with nothing mapped, in this run or an earlier one. Nothing
-    /// more is run here.
+    /// This run reached an address with nothing mapped, or amdgpu recorded such a fault for the
+    /// space while it ran. Nothing more is run here.
     Faulted(Fault),
+    /// Nothing was sent, as work here had already faulted in an earlier run. amdgpu keeps a space's
+    /// last fault, so the fault is that earlier run's, not this one's.
+    Stopped(Fault),
 }
 
 impl SpaceVm {
@@ -251,7 +254,7 @@ impl SpaceVm {
     ) -> io::Result<Ran> {
         only_copies_for_the_video_ring(ip_type, ibs)?;
         if let Some(fault) = self.faults.look(&self.file) {
-            return Ok(Ran::Faulted(fault));
+            return Ok(Ran::Stopped(fault));
         }
         let ran = self.submit_and_wait(ip_type, queue, ibs, patience);
         match (ran, self.faults.look(&self.file)) {
@@ -296,16 +299,18 @@ impl SpaceVm {
         now: Instant,
     ) -> io::Result<()> {
         only_copies_for_the_video_ring(HW_IP_VCN_ENC, runs)?;
-        let Some(own) = self.video_ib.as_ref().map(VideoIb::handle) else {
-            return Err(io::Error::other("no buffer for video commands was made here"));
-        };
-        // As in `run`: nothing more is sent to a space whose work has faulted.
+        // As in `run`: nothing more is sent to a space whose work has faulted. amdgpu keeps the
+        // space's last fault, so it is an earlier run's, and this run is not sent rather than faulted.
         if let Some(fault) = self.faults.look(&self.file) {
             return Err(io::Error::other(format!(
-                "work here reached {:#x}, where nothing is mapped (fault status {:#x}), so nothing more is sent",
+                "work here reached {:#x} earlier, where nothing is mapped (fault status {:#x}), so nothing \
+                 more is sent",
                 fault.address, fault.status
             )));
         }
+        let Some(own) = self.video_ib.as_ref().map(VideoIb::handle) else {
+            return Err(io::Error::other("no buffer for video commands was made here"));
+        };
         let retired = Syncobj::create(&self.file).map_err(|error| step("making a sync object", error))?;
         // The guest doesn't say which buffers the work uses, so it may use any mapped here.
         let mut buffers = self.books.handles();
@@ -443,7 +448,8 @@ impl SpaceVm {
         // As in `run`: nothing more is sent to a space whose work has faulted.
         if let Some(fault) = self.faults.look(&self.file) {
             return Err(io::Error::other(format!(
-                "work here reached {:#x}, where nothing is mapped (fault status {:#x}), so nothing more is sent",
+                "work here reached {:#x} earlier, where nothing is mapped (fault status {:#x}), so nothing \
+                 more is sent",
                 fault.address, fault.status
             )));
         }
@@ -670,6 +676,25 @@ mod tests {
         let sent = space.send_video(0, &[COPY, GUESTS], 1, Some(fence), None, Instant::now());
         assert_eq!(sent.unwrap_err().to_string(), NOT_A_COPY);
         // Refused before the kernel was asked anything, so nothing is on the card.
+        assert!(!space.video_on_card());
+    }
+
+    #[test]
+    fn a_space_that_faulted_before_sends_nothing_and_says_the_fault_was_earlier() {
+        use crate::info::HW_IP_DMA;
+        let earlier = Fault { address: 0x1000, status: 0xf4_3a51 };
+        let mut space = space_without_a_card();
+        space.faults = fault::Watch::having_found(earlier);
+        // The file has no card behind it, so a run that got as far as the kernel would fail.
+        let ran = space.run(HW_IP_DMA, Some(1), &[GUESTS], Patience::RUN).unwrap();
+        assert_eq!(ran, Ran::Stopped(earlier));
+        // Video runs aren't waited for: one is refused as not sent, with the earlier fault.
+        let sent = space.send_video(0, &[COPY], 1, None, None, Instant::now());
+        assert_eq!(
+            sent.unwrap_err().to_string(),
+            "work here reached 0x1000 earlier, where nothing is mapped (fault status 0xf43a51), so nothing \
+             more is sent"
+        );
         assert!(!space.video_on_card());
     }
 
