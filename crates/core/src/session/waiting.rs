@@ -336,7 +336,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                     self.leave_wait(id, &signals, can_go);
                 }
                 GateStep::Ring { doorbell, fence, value } => {
-                    if !self.ring(queue, doorbell, fence, value) {
+                    let early = self.rings_not_before.get(&queue).is_some_and(|&not_before| now < not_before);
+                    if early || !self.ring(queue, doorbell, fence, value) {
                         let held = GateStep::Ring { doorbell, fence, value };
                         self.gates.get_mut(&queue).expect("just read").push_front(held);
                         return false;
@@ -401,6 +402,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
     /// Rings a doorbell. False if the backend refused it for now, and it must be rung again.
     fn ring(&mut self, queue: u32, doorbell: u64, fence: u64, value: u64) -> bool {
         self.space_written(queue);
+        self.rings_not_before.remove(&queue);
         match self.backend.ring_doorbell(queue, doorbell) {
             Ok(Doorbell::Rung) => {
                 self.timings.mark(Stage::Rung);
@@ -419,6 +421,10 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                 }
             }
             Ok(Doorbell::NotYet) => return false,
+            Ok(Doorbell::NotBefore(not_before)) => {
+                self.rings_not_before.insert(queue, not_before);
+                return false;
+            }
             Err(error) => {
                 log::warn!("queue {queue:#x} couldn't start its work: {error}");
                 if let Some(record) = self.queues.get_mut(&queue) {
@@ -576,7 +582,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     fn how_soon(&self) -> Waiting {
         let copies_or_frames = !self.copies.is_empty() || self.frames.is_urgent();
-        let waiting = Waiting::of(self.pending.iter(), copies_or_frames);
+        // A gate held only until a doorbell's time comes needs no hurry.
+        let resting = |queue: u32| self.rings_not_before.contains_key(&queue);
+        let waiting = Waiting::of(self.pending.iter(), copies_or_frames, resting);
         if waiting == Waiting::Nothing && self.frames.wants_a_look() { Waiting::Background } else { waiting }
     }
 

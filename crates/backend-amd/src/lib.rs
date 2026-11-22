@@ -481,8 +481,9 @@ impl AmdBackend {
     }
 
     /// Sends a prepared video run, unless the engine is to rest before it: see [`video_close`].
-    /// Resting, the doorbell is refused for now, and the core rings it again, holding back only the
-    /// queue's later work.
+    /// Resting, the doorbell is refused until the rest is over, and the core rings it again then,
+    /// holding back only the queue's later work. The rest is worked out again at that ring, as the
+    /// engine may have had work meanwhile.
     fn ring_video(&mut self, doorbell: u64, mut run: PreparedVideo) -> Result<Doorbell, BackendError> {
         let now = Instant::now();
         let queue = run.fence.queue;
@@ -503,7 +504,7 @@ impl AmdBackend {
                     log::info!("amd video: resting {rest:?} before the session of queue {queue:#x}");
                 }
                 self.prepared_video.insert(doorbell, run);
-                return Ok(Doorbell::NotYet);
+                return Ok(Doorbell::NotBefore(now + rest));
             }
         }
         let Some(space) = self.spaces.get_mut(&run.space) else {

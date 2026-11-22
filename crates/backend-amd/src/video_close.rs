@@ -27,7 +27,7 @@
 //! open. amdgpu powers the engine down after a second without work, so a session begun after a
 //! longer rest meets firmware that has started afresh. The engine's last work is when a video run
 //! was last seen to retire, or now while one is on the card. Only that session's first work waits:
-//! its doorbell is refused for now until the rest is over, so its queue's later work waits behind
+//! its doorbell is refused until the rest is over, so its queue's later work waits behind
 //! it, and the guest's other queues, its other video sessions and everything else go on.
 //!
 //! The close alone was not enough in the runs so far, and the close with a rest of 1500 ms was.

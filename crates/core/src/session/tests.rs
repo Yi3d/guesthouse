@@ -2079,6 +2079,48 @@ mod queues {
     }
 
     #[test]
+    fn a_doorbell_refused_until_a_time_is_rung_then_without_hurry_and_other_queues_go_on() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let start = Instant::now();
+        let not_before = start + Duration::from_millis(1500);
+        session.backend_mut().ring_not_before = Some(not_before);
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        let (other, _, _) = create_queue(&mut session, context);
+        submit(&mut session, queue, 1);
+        submit(&mut session, queue, 2);
+        assert!(session.backend().doorbells.is_empty());
+        // Nothing is urgent while the queue waits for its time: the daemon polls at its own pace.
+        assert_eq!(session.poll(start), Waiting::Background);
+        // Another queue's work goes on at once.
+        submit(&mut session, other, 1);
+        assert_eq!(session.backend().doorbells, [(other, 1)]);
+        // The doorbell isn't rung again before its time, which the stand-in would take.
+        assert_eq!(session.poll(not_before - Duration::from_millis(1)), Waiting::Background);
+        assert_eq!(session.backend().doorbells, [(other, 1)]);
+        let _ = session.poll(not_before);
+        assert_eq!(session.backend().doorbells, [(other, 1), (queue, 1), (queue, 2)]);
+        assert!(session.gates.is_empty() && session.rings_not_before.is_empty());
+    }
+
+    #[test]
+    fn a_queue_that_goes_while_it_waits_for_its_time_leaves_nothing_behind() {
+        let mut session = session();
+        session.backend_mut().run_work = true;
+        let start = Instant::now();
+        session.backend_mut().ring_not_before = Some(start + Duration::from_secs(1));
+        let context = create_context(&mut session, 0);
+        let (queue, _, _) = create_queue(&mut session, context);
+        submit(&mut session, queue, 1);
+        assert_eq!(session.rings_not_before.len(), 1);
+        session.close_queue(queue);
+        assert!(session.rings_not_before.is_empty());
+        assert_eq!(session.poll(start + Duration::from_secs(2)), Waiting::Nothing);
+        assert!(session.backend().doorbells.is_empty());
+    }
+
+    #[test]
     fn a_gate_holds_doorbells_until_its_fence_moves() {
         let mut session = session();
         session.backend_mut().run_work = true;

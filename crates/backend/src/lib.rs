@@ -277,7 +277,8 @@ pub trait Backend: Sized {
     /// submission is a call that can fail says so here: nothing then runs, the core stands in for the
     /// GPU at the queue's fence, and the queue stops as if [`WorkStart::QueueFailed`] had come back.
     /// A call that is only refused for now answers [`Doorbell::NotYet`], and the core rings again
-    /// soon, holding the queue's later work behind it.
+    /// soon, holding the queue's later work behind it. A backend that knows the work mustn't run
+    /// before some time answers [`Doorbell::NotBefore`], and the core rings again then.
     fn ring_doorbell(&mut self, queue: u32, doorbell: u64) -> Result<Doorbell, BackendError>;
 
     /// Looks at work the GPU was given, while the core waits for queues to reach their fences. For a
