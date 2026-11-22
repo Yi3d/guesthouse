@@ -31,6 +31,14 @@
 //! it, and the guest's other queues, its other video sessions and everything else go on.
 //!
 //! The close alone was not enough in the runs so far, and the close with a rest of 1500 ms was.
+//!
+//! `GUESTHOUSE_AMD_VIDEO_HOLD_FREED` is a time in milliseconds a range of GPU addresses the daemon
+//! chose rests, once its mapping is gone, before it is handed out again. Without it a range comes
+//! back at once, and every fault seen so far was a new session whose context buffer had the address
+//! the session before it had freed a moment earlier. With it, that address isn't handed out again
+//! within the hold, so a run tells whether the reused address matters. It holds every range in
+//! every space, as the daemon doesn't know which buffers the video engine will be given. What it
+//! costs is addresses, not memory.
 
 use crate::protocol::escape;
 use crate::video_ib::Copied;
@@ -42,6 +50,9 @@ use std::time::{Duration, Instant};
 pub const CLOSE_VARIABLE: &str = "GUESTHOUSE_AMD_VIDEO_CLOSE";
 /// The daemon's switch for resting the engine before a new session, with the rest in milliseconds.
 pub const REST_VARIABLE: &str = "GUESTHOUSE_AMD_VIDEO_REST";
+/// The daemon's switch for resting freed GPU addresses before they are handed out again, in
+/// milliseconds.
+pub const HOLD_VARIABLE: &str = "GUESTHOUSE_AMD_VIDEO_HOLD_FREED";
 
 /// How much of a session's buffer must still be mapped for the session to be closed: what Mesa
 /// makes one of.
@@ -78,10 +89,19 @@ pub fn says_a_session_is_over(data: &[u8]) -> bool {
 /// The rest the switch's value asks for. Zero and an empty value are no rest, and so is a value
 /// that is no number of milliseconds, which is said in a warning.
 pub fn rest_from(value: Option<&str>) -> Option<Duration> {
+    millis_from(REST_VARIABLE, value)
+}
+
+/// The hold [`HOLD_VARIABLE`]'s value asks for, read as the rest is.
+pub fn hold_from(value: Option<&str>) -> Option<Duration> {
+    millis_from(HOLD_VARIABLE, value)
+}
+
+fn millis_from(variable: &str, value: Option<&str>) -> Option<Duration> {
     let text = value?.trim();
     let millis = text.parse::<u64>().ok();
     if millis.is_none() && !text.is_empty() {
-        log::warn!("{REST_VARIABLE} is {text}, which isn't a number of milliseconds");
+        log::warn!("{variable} is {text}, which isn't a number of milliseconds");
     }
     millis.filter(|&millis| millis > 0).map(Duration::from_millis)
 }
@@ -412,6 +432,18 @@ mod tests {
         assert_eq!(
             crate::watch::lines::at(log::Level::Warn, &lines),
             ["GUESTHOUSE_AMD_VIDEO_REST is 1.5s, which isn't a number of milliseconds"]
+        );
+    }
+
+    #[test]
+    fn the_hold_is_read_as_the_rest_is() {
+        assert_eq!(hold_from(None), None);
+        assert_eq!(hold_from(Some("2000")), Some(Duration::from_secs(2)));
+        assert_eq!(hold_from(Some("0")), None);
+        let lines = crate::watch::lines::logged(|| assert_eq!(hold_from(Some("2s")), None));
+        assert_eq!(
+            crate::watch::lines::at(log::Level::Warn, &lines),
+            ["GUESTHOUSE_AMD_VIDEO_HOLD_FREED is 2s, which isn't a number of milliseconds"]
         );
     }
 

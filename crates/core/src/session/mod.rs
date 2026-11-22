@@ -232,7 +232,8 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
 
     pub fn new(backend: B, memory: M, config: Config) -> Self {
         let gpu_addresses = GpuAddresses::keeping_clear(backend.kept_gpu_ranges())
-            .with_guest_only(backend.guest_placed_gpu_ranges());
+            .with_guest_only(backend.guest_placed_gpu_ranges())
+            .holding_freed(backend.hold_freed_gpu_addresses());
         Self {
             backend,
             memory,

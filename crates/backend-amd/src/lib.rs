@@ -61,7 +61,10 @@ pub use memory::{
 pub use submit::{Context, Ib, Syncobj, sdma_write_ib, submit, submit_all, wait_eventfd};
 pub use udmabuf::Udmabuf;
 pub use video::{VARIABLE as VIDEO_VARIABLE, switch_is_on as video_switch_is_on};
-pub use video_close::{CLOSE_VARIABLE as VIDEO_CLOSE_VARIABLE, REST_VARIABLE as VIDEO_REST_VARIABLE};
+pub use video_close::{
+    CLOSE_VARIABLE as VIDEO_CLOSE_VARIABLE, HOLD_VARIABLE as VIDEO_HOLD_FREED_VARIABLE,
+    REST_VARIABLE as VIDEO_REST_VARIABLE,
+};
 
 // The buffer calls under harness-facing names, so a proof binary can drive the card without the
 // trait. They are the same functions the trait methods use.
@@ -148,6 +151,9 @@ pub struct AmdBackend {
     /// What is kept of the firmware's encode sessions, when the daemon was asked to close them or
     /// to rest the engine between them. See [`video_close`].
     video_close: Option<video_close::Watch>,
+    /// How long freed GPU addresses rest before they are handed out again, if that was asked for.
+    /// See [`video_close`].
+    hold_freed: Option<Duration>,
 }
 
 /// A run ready to send: its command buffers, the fence writer in `slot` last.
@@ -250,6 +256,7 @@ impl AmdBackend {
             video_wake: None,
             video: None,
             video_close: None,
+            hold_freed: None,
         })
     }
 
@@ -327,6 +334,26 @@ impl AmdBackend {
     fn is_video_node(&self, node: u32) -> bool {
         let nodes = nodes(&self.device.info().engines);
         nodes.get(node as usize).is_some_and(|node| node.ip_type == info::HW_IP_VCN_ENC)
+    }
+
+    /// Has freed GPU addresses rest for the milliseconds `hold` says before they are handed out
+    /// again: see [`video_close`]. The daemon calls this after [`Self::offer_video`] with the value
+    /// of [`VIDEO_HOLD_FREED_VARIABLE`], before the session starts. It does nothing for a guest that
+    /// isn't offered video.
+    pub fn hold_freed_addresses(&mut self, hold: Option<&str>) {
+        if self.video.is_none() {
+            if hold.is_some() {
+                log::warn!("{VIDEO_HOLD_FREED_VARIABLE} does nothing for a guest that isn't offered video");
+            }
+            return;
+        }
+        self.hold_freed = video_close::hold_from(hold);
+        if let Some(hold) = self.hold_freed {
+            log::warn!(
+                "{VIDEO_HOLD_FREED_VARIABLE} is set, which is an experiment: a GPU address range the daemon \
+                 chose rests {hold:?} after its mapping goes before it is handed out again"
+            );
+        }
     }
 
     /// Copies a run's command buffers, if that was asked for.
@@ -1071,6 +1098,10 @@ fn facts_from(info: &DeviceInfo) -> AdapterFacts {
 impl Backend for AmdBackend {
     fn supports(card: &PciCard) -> bool {
         card.vendor == AMD_VENDOR
+    }
+
+    fn hold_freed_gpu_addresses(&self) -> Option<Duration> {
+        self.hold_freed
     }
 
     fn survey(setup: &Setup) -> Result<DriverSurvey, Refusal> {

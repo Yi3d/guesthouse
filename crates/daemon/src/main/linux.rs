@@ -132,6 +132,8 @@ fn serve_amd(
         }
         let rest = env::var(guesthouse_backend_amd::VIDEO_REST_VARIABLE).ok();
         backend.close_and_rest_video(on(guesthouse_backend_amd::VIDEO_CLOSE_VARIABLE), rest.as_deref());
+        let hold = env::var(guesthouse_backend_amd::VIDEO_HOLD_FREED_VARIABLE).ok();
+        backend.hold_freed_addresses(hold.as_deref());
     })
 }
 

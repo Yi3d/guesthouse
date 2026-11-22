@@ -196,6 +196,13 @@ pub trait Backend: Sized {
         &[]
     }
 
+    /// How long a range of GPU addresses the host chose rests, once its mapping is gone, before it
+    /// is handed out again. `None`, the default, hands it out again at once. An experiment's switch:
+    /// a vendor's firmware may hold on to an address after the memory there went.
+    fn hold_freed_gpu_addresses(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// The guest has restarted, with its bus reset. Most of what a backend holds goes with its
     /// messages, so this is only for what has to follow the guest's own start.
     fn guest_restarted(&mut self) {}
