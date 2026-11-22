@@ -1259,7 +1259,7 @@ mod mappings {
         assert_eq!(second - first, crate::ALLOCATION_ALIGN);
     }
 
-    fn operation(kind: u32, address: u64, size: u64, third: u64, offset: u64) -> Vec<u8> {
+    pub(super) fn operation(kind: u32, address: u64, size: u64, third: u64, offset: u64) -> Vec<u8> {
         let mut bytes = vec![0; 64];
         set_u32(&mut bytes, 0, kind);
         set_u64(&mut bytes, 8, address);
@@ -1273,7 +1273,7 @@ mod mappings {
         update_with_flags(session, fence, value, 0, operations)
     }
 
-    fn update_with_flags(
+    pub(super) fn update_with_flags(
         session: &mut TestSession,
         fence: u32,
         value: u64,
@@ -2538,6 +2538,32 @@ mod held_replies {
         let context = create_context(&mut session, 0);
         let (queue, _, fence) = create_queue(&mut session, context);
         (session, queue, fence)
+    }
+
+    #[test]
+    fn an_update_maps_over_a_free_still_waiting_for_the_gpu() {
+        // Marathon on an RTX 3070: a freed allocation's unmap waited behind busy queues, its range
+        // came back to the guest, and an update mapping something else there was refused by the
+        // driver, as the old pages were still in place. The device failed straight after.
+        let (mut session, queue, _) = busy_queue(1000);
+        let (sync, _, _) = create_fence(&mut session, 0);
+        let (first_resource, first) = allocate(&mut session, private(0x2000));
+        let (_, second) = allocate(&mut session, private(0x2000));
+        let at = 0x5000_0000;
+        let map_first = [super::mappings::operation(0, at, 0x2000, u64::from(first), 0)];
+        assert_eq!(
+            status_of(&super::mappings::update_with_flags(&mut session, sync, 1, 1, &map_first)),
+            SUCCESS
+        );
+        let _ = send_with_ticket(&mut session, &submission(queue, 1));
+        destroy(&mut session, first_resource, &[first]);
+        assert!(!session.deferred.is_empty(), "the free should wait for the queue");
+        let map_second = [super::mappings::operation(0, at, 0x2000, u64::from(second), 0)];
+        assert_eq!(
+            status_of(&super::mappings::update_with_flags(&mut session, sync, 2, 1, &map_second)),
+            SUCCESS
+        );
+        assert_eq!(session.allocations[&second].mappings.len(), 1);
     }
 
     #[test]

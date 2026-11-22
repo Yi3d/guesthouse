@@ -359,7 +359,7 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
             // Each piece would be something more to copy, and clearing the way first loses the source.
             return Err(OVERLAPPING_COPY);
         }
-        self.unmap_gpu_addresses(destination, size, space)?;
+        self.clear_gpu_addresses(destination, size, space)?;
         let mut done = 0;
         while done < size {
             let Some((handle, found)) = self.mapping_at(source + done, space) else {
@@ -395,7 +395,9 @@ impl<B: Backend, M: GuestMemory> Session<B, M> {
                     // Already there, and the pages wouldn't be mapped any differently.
                     return Ok(());
                 }
-                self.unmap_gpu_addresses(address, size, space)?;
+                // A free still waiting for the GPU can hold pages here that the guest has already
+                // given up, and the driver refuses to map over them.
+                self.clear_gpu_addresses(address, size, space)?;
                 let piece = Mapping { address, first: offset, length: size, space, driver_protection };
                 self.map_piece(allocation, piece)
             }
