@@ -17,8 +17,12 @@
 //! It is a switch because of what a mistake costs. Video work the firmware doesn't take can hang
 //! the video ring, amdgpu then resets it, and that reaches every program on the host that is using
 //! the card's video engine, not only this guest. So it is for a person to turn on, on a host where
-//! that is acceptable. Each run is also waited for on the daemon's message thread, a few
-//! milliseconds a frame, which holds up the guest's other GPU work for that long.
+//! that is acceptable.
+//!
+//! A run isn't waited for. Its doorbell sends it, and the host writes the queue's fence when the
+//! kernel says it has retired, as the video ring writes none of its own: see [`crate::video_runs`].
+//! So the daemon's message thread goes on serving the guest's graphics and everything else while
+//! video work is on the card.
 //!
 //! The books are a list of the sessions that are open, each with what it has booked on an engine.
 //! The guest's driver is told the sum booked on an engine and the most the chip takes, and decides

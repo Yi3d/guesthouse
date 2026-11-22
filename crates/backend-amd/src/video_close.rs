@@ -11,11 +11,12 @@
 //! are what has kept a guest from that reset so far.
 //!
 //! `GUESTHOUSE_AMD_VIDEO_CLOSE=1` has the daemon close such a session itself. It keeps what each
-//! queue's encode commands say of their session, once their run has reached the engine, and runs
-//! the closing commands, shaped as Mesa's are, when the session is over: at the escape that ends a
-//! video session, for every session whose context buffer the guest has freed by then, as the escape
-//! comes after that and the daemon can't tell from it which session of the firmware's it is; and
-//! when the queue goes. A session whose commands never named its context buffer is closed only
+//! queue's encode commands say of their session, once their run has been sent to the engine, and
+//! sends the closing commands, shaped as Mesa's are, when the session is over: at the escape that
+//! ends a video session, for every session whose context buffer the guest has freed by then, as the
+//! escape comes after that and the daemon can't tell from it which session of the firmware's it
+//! is; and when the queue goes. The closing commands are sent like the guest's own video
+//! work and not waited for. A session whose commands never named its context buffer is closed only
 //! when its queue goes, as the end of another's session would otherwise close it while it runs.
 //! The firmware reads the session's buffer to close it, so a session whose buffer is no longer
 //! mapped is left alone.
@@ -23,8 +24,10 @@
 //! `GUESTHOUSE_AMD_VIDEO_REST` is a time in milliseconds the video engine is left idle before a
 //! new session's first work, counted from the engine's last work, when no other queue has a session
 //! open. amdgpu powers the engine down after a second without work, so a session begun after a
-//! longer rest meets firmware that has started afresh. The rest is a sleep on the daemon's message
-//! thread: nothing else of the guest's is served meanwhile.
+//! longer rest meets firmware that has started afresh. The engine's last work is when a video run
+//! was last seen to retire, or now while one is on the card. Only that session's first work waits:
+//! its doorbell is refused for now until the rest is over, so its queue's later work waits behind
+//! it, and the guest's other queues, its other video sessions and everything else go on.
 //!
 //! The close alone was not enough in the runs so far, and the close with a rest of 1500 ms was.
 
@@ -160,12 +163,25 @@ pub fn close_commands(session: &Session) -> [u32; CLOSE_WORDS] {
 }
 
 /// What one submission's commands say of their queue's session, read before the run and kept once
-/// the run has reached the engine.
+/// the run has been sent to the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Seen {
     queue: u32,
     space: SpaceId,
     session: Session,
+}
+
+impl Seen {
+    /// Reads what a queue's commands, about to be run, say of its session, if they name one.
+    pub fn of(queue: u32, space: SpaceId, copied: &Copied) -> Option<Self> {
+        let session = copied.buffers().filter_map(session_in).last()?;
+        Some(Self { queue, space, session })
+    }
+
+    /// Whether these commands start a session, which is what a rest comes before.
+    pub fn starts(&self) -> bool {
+        self.session.starts && !self.session.closed
+    }
 }
 
 /// What the daemon keeps of the firmware's encode sessions, for the two switches.
@@ -190,39 +206,34 @@ impl Watch {
         self.closes
     }
 
-    /// Reads what a queue's commands, about to be run, say of its session, and how long the engine
-    /// is to rest before them: only ahead of commands that start a session, with no other queue's
-    /// session open, as that one's work would end the rest anyway. Nothing is kept yet, as the
-    /// firmware knows of none of it until the run has reached it: see [`Self::reached`].
-    pub fn before(
-        &self,
-        queue: u32,
-        space: SpaceId,
-        copied: &Copied,
-        now: Instant,
-    ) -> (Option<Seen>, Duration) {
-        let Some(session) = copied.buffers().filter_map(session_in).last() else {
-            return (None, Duration::ZERO);
-        };
-        let starts = session.starts && !session.closed;
-        let rest = if starts { self.rest_before(queue, now) } else { Duration::ZERO };
-        (Some(Seen { queue, space, session }), rest)
-    }
-
-    /// What is left of the rest, counted from the engine's last work.
-    fn rest_before(&self, queue: u32, now: Instant) -> Duration {
-        let (Some(rest), Some(last)) = (self.rest, self.last_run) else {
+    /// How much is left of the engine's rest before commands that `seen` says of: only ahead of
+    /// commands that start a session, with no other queue's session open, as that one's work would
+    /// end the rest anyway. `busy` says a video run is on the card now, so the engine's last work is
+    /// now. Nothing is kept: the firmware knows of none of it until the run has been sent to it, see
+    /// [`Self::reached`].
+    pub fn rest_before(&self, seen: &Seen, now: Instant, busy: bool) -> Duration {
+        let Some(rest) = self.rest.filter(|_| seen.starts()) else {
             return Duration::ZERO;
         };
+        let queue = seen.queue;
         if self.open.keys().any(|&open| open != queue) {
             log::debug!("amd video: no rest before the session of queue {queue:#x}, as others are open");
             return Duration::ZERO;
         }
+        if busy {
+            return rest;
+        }
+        let Some(last) = self.last_run else { return Duration::ZERO };
         rest.saturating_sub(now.saturating_duration_since(last))
     }
 
-    /// Notes that a run has reached the video engine, which has had work now, and keeps what the
-    /// run's commands said of their session, if they named one. A run that never got there leaves
+    /// Notes that the video engine had work at `now`: a run of it was seen to retire.
+    pub fn worked(&mut self, now: Instant) {
+        self.last_run = Some(now);
+    }
+
+    /// Notes that a run has been sent to the video engine, which has work now, and keeps what the
+    /// run's commands said of their session, if they named one. A run that was never sent leaves
     /// the books as they were: the firmware has no session from it to close.
     pub fn reached(&mut self, seen: Option<Seen>, now: Instant) {
         self.last_run = Some(now);
@@ -312,10 +323,11 @@ mod tests {
         later
     }
 
-    /// A submission as the backend runs it, when its run reaches the engine as soon as any rest
-    /// is over. Returns the rest.
+    /// A submission as the backend runs it, with the engine idle, when its run is sent as soon as
+    /// any rest is over. Returns the rest.
     fn run(watch: &mut Watch, queue: u32, space: SpaceId, copied: &Copied, now: Instant) -> Duration {
-        let (seen, rest) = watch.before(queue, space, copied, now);
+        let seen = Seen::of(queue, space, copied);
+        let rest = seen.as_ref().map_or(Duration::ZERO, |seen| watch.rest_before(seen, now, false));
         watch.reached(seen, now + rest);
         rest
     }
@@ -446,9 +458,8 @@ mod tests {
         watch.reached(None, start);
         // amdgpu refused the run, say, or the commands couldn't be sent: nothing is noted of it.
         let later = start + Duration::from_millis(500);
-        let (seen, rest) = watch.before(QUEUE, SPACE, &copied(&[&work()]), later);
-        assert!(seen.is_some());
-        assert_eq!(rest, Duration::from_millis(1000));
+        let seen = Seen::of(QUEUE, SPACE, &copied(&[&work()])).unwrap();
+        assert_eq!(watch.rest_before(&seen, later, false), Duration::from_millis(1000));
         assert_eq!(watch.take(QUEUE), None, "the firmware has no session to close");
         assert!(watch.ended(|_, _| false).is_empty());
         // The rest is still counted from the work that did reach the engine.
@@ -535,6 +546,47 @@ mod tests {
         let mut closes_only = Watch::new(true, None).unwrap();
         closes_only.reached(None, now);
         assert_eq!(run(&mut closes_only, QUEUE, SPACE, &first, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_rest_is_counted_from_the_last_run_seen_to_retire_and_is_whole_while_one_is_on_the_card() {
+        let mut watch = Watch::new(false, Some(REST)).unwrap();
+        let start = Instant::now();
+        let first = Seen::of(QUEUE, SPACE, &copied(&[&work()])).unwrap();
+        assert!(first.starts());
+        // The engine has had no work, but a run of another queue's is on it: the whole rest.
+        assert_eq!(watch.rest_before(&first, start, false), Duration::ZERO);
+        assert_eq!(watch.rest_before(&first, start, true), REST);
+        // That run is seen to retire 2 ms later; 500 ms on, a third of the rest is over.
+        watch.worked(start + Duration::from_millis(2));
+        let later = start + Duration::from_millis(502);
+        assert_eq!(watch.rest_before(&first, later, false), Duration::from_millis(1000));
+        // The doorbell is rung again as the core polls, and the rest that is left shrinks with time.
+        assert_eq!(
+            watch.rest_before(&first, later + Duration::from_millis(999), false),
+            Duration::from_millis(1)
+        );
+        assert_eq!(watch.rest_before(&first, later + Duration::from_secs(1), false), Duration::ZERO);
+        // A later frame of a session never rests, busy or not.
+        let frame = Seen::of(QUEUE, SPACE, &copied(&[&later_work()])).unwrap();
+        assert!(!frame.starts());
+        assert_eq!(watch.rest_before(&frame, later, true), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_session_that_rests_does_not_stop_another_queues_session_from_running() {
+        let mut watch = Watch::new(true, Some(REST)).unwrap();
+        let now = Instant::now();
+        watch.worked(now);
+        let resting = Seen::of(QUEUE, SPACE, &copied(&[&work()])).unwrap();
+        assert_eq!(watch.rest_before(&resting, now, false), REST);
+        // Nothing is kept while it rests, so another queue's session can start meanwhile, and its
+        // later frames are sent without a rest though the engine is busy.
+        run(&mut watch, OTHER_QUEUE, SPACE, &copied(&[&work()]), now);
+        let frame = Seen::of(OTHER_QUEUE, SPACE, &copied(&[&later_work()])).unwrap();
+        assert_eq!(watch.rest_before(&frame, now, true), Duration::ZERO);
+        // And with that one open, the waiting session no longer rests.
+        assert_eq!(watch.rest_before(&resting, now, true), Duration::ZERO);
     }
 
     #[test]

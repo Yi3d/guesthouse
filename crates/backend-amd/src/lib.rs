@@ -44,6 +44,7 @@ mod udmabuf;
 mod video;
 mod video_close;
 mod video_ib;
+mod video_runs;
 mod watch;
 
 pub use device::{Device, Mapping};
@@ -126,6 +127,8 @@ pub struct AmdBackend {
     patience: Patience,
     /// Runs the core has had prepared and not yet let go, by the doorbell that sends each.
     prepared: HashMap<u64, PreparedRun>,
+    /// Video runs the core has had prepared and not yet let go, by the doorbell that sends each.
+    prepared_video: HashMap<u64, PreparedVideo>,
     /// When the runs on the card were last looked at.
     looked_at_runs: Option<Instant>,
     /// Makes dma-bufs of guest memory, where this user may.
@@ -149,6 +152,21 @@ struct PreparedRun {
     ibs: Vec<Ib>,
     slot: usize,
     fence: GuestFence,
+}
+
+/// A video run, copied into its place in its space's video buffer and waiting for its doorbell.
+/// The video ring writes no fence of the guest's, so the host writes `fence` when the kernel says
+/// the run has retired: see [`video_runs`].
+#[derive(Debug)]
+struct PreparedVideo {
+    space: SpaceId,
+    slot: usize,
+    runs: Vec<Ib>,
+    fence: GuestFence,
+    /// What its commands say of their session, when the daemon closes sessions or rests the engine.
+    seen: Option<video_close::Seen>,
+    /// Whether the log has said it rests, as it is rung again and again meanwhile.
+    rest_said: bool,
 }
 
 /// The bytes of a fence the card writes.
@@ -221,6 +239,7 @@ impl AmdBackend {
             udmabuf: Udmabuf::open(),
             ib_dump: None,
             video_commands: video_ib::Copied::default(),
+            prepared_video: HashMap::new(),
             video: None,
             video_close: None,
         })
@@ -404,42 +423,126 @@ impl AmdBackend {
         }
     }
 
-    /// Runs a guest's video work on the card's video ring and waits for it. The ring is never given
-    /// the guest's own command buffers, only a copy of them in a buffer of the daemon's: see
-    /// [`video_ib`] for why.
-    fn run_video(&mut self, work: &Work<'_>, ibs: &[Ib]) -> io::Result<Ran> {
+    /// Gets a guest's video work ready for the card's video ring, without waiting for anything: its
+    /// command buffers are copied into a free place of the space's video buffer, as the ring is
+    /// never given the guest's own (see [`video_ib`] for why), and its doorbell sends them. The
+    /// host writes the queue's fence once the kernel says the run has retired: see
+    /// [`Self::write_video_fences`].
+    fn start_video(&mut self, work: &Work<'_>, ibs: &[Ib]) -> WorkStart {
         let card = self.device.info();
         let (start_alignment, alignment) = (card.ib_alignment.video.start, card.va_alignment);
         let Some(space) = self.spaces.get_mut(&work.space) else {
-            return Err(io::Error::other("its space isn't here"));
+            log::warn!("video work for a space that isn't here");
+            return WorkStart::QueueFailed;
         };
         let copied = &mut self.video_commands;
         let read = |ib: &Ib, room: &mut [u32]| read_guest_commands(&self.memory, &space.vm, ib, room);
-        copy_video_commands(ibs, start_alignment, copied, read)?;
+        let run =
+            traffic::VideoRun { queue: work.queue, fence_value: Some(work.fence_value), space: work.space };
+        if let Err(error) = copy_video_commands(ibs, start_alignment, copied, read) {
+            log::warn!("video work on queue {:#x} not run: {error}", work.queue);
+            traffic::video_sent(run, &[], &Err(error));
+            return WorkStart::QueueFailed;
+        }
         traffic::video_commands(work, copied);
-        let mut seen = None;
-        if let Some(watch) = &self.video_close {
-            let rest;
-            (seen, rest) = watch.before(work.queue, work.space, copied, Instant::now());
+        let slot = match space.vm.place_video(alignment, copied) {
+            Ok(Some(slot)) => slot,
+            // Every place's run is still on the card, so the submission comes again shortly.
+            Ok(None) => return WorkStart::Busy,
+            Err(error) => {
+                log::warn!("video work on queue {:#x} not run: {error}", work.queue);
+                traffic::video_sent(run, &[], &Err(error));
+                return WorkStart::QueueFailed;
+            }
+        };
+        let seen =
+            self.video_close.as_ref().and_then(|_| video_close::Seen::of(work.queue, work.space, copied));
+        let fence = GuestFence { queue: work.queue, address: work.fence, value: work.fence_value };
+        let prepared = PreparedVideo {
+            space: work.space,
+            slot,
+            runs: copied.runs_in(slot),
+            fence,
+            seen,
+            rest_said: false,
+        };
+        let doorbell = self.new_id();
+        self.prepared_video.insert(doorbell, prepared);
+        WorkStart::Started { doorbell, work: 1 }
+    }
+
+    /// Sends a prepared video run, unless the engine is to rest before it: see [`video_close`].
+    /// Resting, the doorbell is refused for now, and the core rings it again, holding back only the
+    /// queue's later work.
+    fn ring_video(&mut self, doorbell: u64, mut run: PreparedVideo) -> Result<Doorbell, BackendError> {
+        let now = Instant::now();
+        let queue = run.fence.queue;
+        if let (Some(seen), Some(watch)) = (&run.seen, &mut self.video_close)
+            && seen.starts()
+        {
+            let mut busy = false;
+            for space in self.spaces.values_mut() {
+                let (on_card, last_retired) = space.vm.video_state(now);
+                busy |= on_card;
+                if let Some(at) = last_retired {
+                    watch.worked(at);
+                }
+            }
+            let rest = watch.rest_before(seen, now, busy);
             if !rest.is_zero() {
-                log::info!("amd video: resting {rest:?} before the session of queue {:#x}", work.queue);
-                std::thread::sleep(rest);
+                if !std::mem::replace(&mut run.rest_said, true) {
+                    log::info!("amd video: resting {rest:?} before the session of queue {queue:#x}");
+                }
+                self.prepared_video.insert(doorbell, run);
+                return Ok(Doorbell::NotYet);
             }
         }
-        let started = Instant::now();
-        let ran = space.vm.run_video(alignment, work.queue, copied, self.patience);
-        traffic::video_ran(work, copied, started.elapsed(), &ran);
-        if let Some(watch) = &mut self.video_close
-            && reached_the_engine(&ran)
-        {
-            watch.reached(seen, Instant::now());
+        let Some(space) = self.spaces.get_mut(&run.space) else {
+            return Err(BackendError::new("the run's address space has closed"));
+        };
+        let sent = space.vm.send_video(run.slot, &run.runs, queue, Some(run.fence), now);
+        let named = traffic::VideoRun { queue, fence_value: Some(run.fence.value), space: run.space };
+        match sent {
+            Ok(()) => {
+                traffic::video_sent(named, &run.runs, &Ok(()));
+                if let Some(watch) = &mut self.video_close {
+                    watch.reached(run.seen, now);
+                }
+                Ok(Doorbell::Rung)
+            }
+            // amdgpu refuses a submission while pages it lists are moving, and takes it later.
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                self.prepared_video.insert(doorbell, run);
+                Ok(Doorbell::NotYet)
+            }
+            Err(error) => {
+                space.vm.drop_video_slot(run.slot);
+                let why = format!("video: {error}");
+                traffic::video_sent(named, &run.runs, &Err(error));
+                Err(BackendError::new(why))
+            }
         }
-        ran
+    }
+
+    /// Writes the fence of each video run the kernel has retired, as the video ring writes none.
+    /// A fence already past the run's value, as when the core gave up waiting for it, is left.
+    fn write_video_fences(&mut self, host: &mut dyn HostServices, now: Instant) {
+        for space in self.spaces.values_mut() {
+            let retired = space.vm.take_retired_video(now);
+            if retired.is_empty() {
+                continue;
+            }
+            if let Some(watch) = &mut self.video_close {
+                watch.worked(now);
+            }
+            write_retired_video_fences(host, &retired);
+        }
     }
 
     /// Closes the encode session a queue has left open in the firmware, if the daemon was asked to:
     /// see [`video_close`]. The firmware reads the session's buffer to close it, so one that is no
-    /// longer mapped is left alone: a fault there would cost every program on the card a reset.
+    /// longer mapped is left alone: a fault there would cost every program on the card a reset. The
+    /// closing commands are sent and not waited for.
     fn close_video_session(&mut self, queue: u32) {
         let Some(watch) = &mut self.video_close else { return };
         let Some((space_id, session)) = watch.take(queue) else { return };
@@ -455,13 +558,6 @@ impl AmdBackend {
             );
             return;
         }
-        if space.vm.video_stopped() {
-            // The buffer the closing commands would go in may still be read by an earlier run.
-            log::debug!(
-                "amd video: the session of queue {queue:#x} isn't closed, as no video work is run there"
-            );
-            return;
-        }
         let card = self.device.info();
         let commands = video_close::close_commands(&session);
         let copied = &mut self.video_commands;
@@ -470,19 +566,36 @@ impl AmdBackend {
             return;
         };
         room.copy_from_slice(&commands);
-        let started = Instant::now();
-        let ran = space.vm.run_video(card.va_alignment, queue, copied, self.patience);
+        let slot = match space.vm.place_video(card.va_alignment, copied) {
+            Ok(Some(slot)) => slot,
+            Ok(None) => {
+                log::warn!(
+                    "amd video: the session of queue {queue:#x} isn't closed, as every place for video \
+                     commands in its space is still on the card"
+                );
+                return;
+            }
+            Err(error) => {
+                log::warn!("amd video: the session of queue {queue:#x} isn't closed: {error}");
+                return;
+            }
+        };
+        let now = Instant::now();
+        let runs = copied.runs_in(slot);
+        let sent = space.vm.send_video(slot, &runs, queue, None, now);
         log::info!(
-            "amd video close queue={queue:#x} session={:#x} task={} took_us={} {}",
+            "amd video close queue={queue:#x} session={:#x} task={} {}",
             session.address(),
             session.task.wrapping_add(1),
-            started.elapsed().as_micros(),
-            traffic::RanText(&ran)
+            match &sent {
+                Ok(()) => "sent".to_string(),
+                Err(error) => format!("not-sent why=\"{error}\""),
+            }
         );
-        if reached_the_engine(&ran) {
-            watch.reached(None, Instant::now());
+        match sent {
+            Ok(()) => watch.reached(None, now),
+            Err(_) => space.vm.drop_video_slot(slot),
         }
-        self.note_how_it_ran(&ran);
     }
 
     /// Takes as ended every session whose context buffer the guest has freed, and closes it if the
@@ -669,10 +782,19 @@ impl AmdBackend {
     }
 }
 
-/// Whether a video run got as far as the card's video engine, which then has had work, however it
-/// ended there.
-fn reached_the_engine(ran: &io::Result<Ran>) -> bool {
-    matches!(ran, Ok(Ran::Retired | Ran::Hung | Ran::Faulted(_)))
+/// Writes the fence of each retired video run that has one, unless the fence is already past it, as
+/// when the core gave up waiting for the run and wrote it itself.
+fn write_retired_video_fences(host: &mut dyn HostServices, retired: &[video_runs::Retired]) {
+    for run in retired {
+        traffic::video_retired(run.queue, run.fence.map(|fence| fence.value), run.took);
+        let Some(fence) = run.fence else { continue };
+        if host.fence_value(fence.address).is_ok_and(|reached| reached >= fence.value) {
+            continue;
+        }
+        if let Err(error) = host.write_u64(fence.address, fence.value) {
+            log::warn!("writing the fence of queue {:#x} for a video run: {error}", fence.queue);
+        }
+    }
 }
 
 /// Whether every range lies inside the card's usable addresses, `start..end`.
@@ -1055,6 +1177,7 @@ impl Backend for AmdBackend {
         // Closing the space's open takes its VM, and all that was mapped in it, with it.
         self.spaces.remove(&space);
         self.prepared.retain(|_, run| run.space != space);
+        self.prepared_video.retain(|_, run| run.space != space);
         if let Some(watch) = &mut self.video_close {
             watch.space_gone(space);
         }
@@ -1242,19 +1365,7 @@ impl Backend for AmdBackend {
         }
         if node.ip_type == info::HW_IP_VCN_ENC {
             // Before anything below can send the guest's own command buffers: see `video_ib`.
-            if space.vm.video_stopped() {
-                if space.vm.first_video_refusal() {
-                    log::warn!(
-                        "no more video work is run in space {:?}: an earlier video run there was sent and \
-                         never seen to end, and the buffer its commands are in can't be written again \
-                         while the card may still read it",
-                        work.space
-                    );
-                }
-                return WorkStart::QueueFailed;
-            }
-            let ran = self.run_video(work, &ibs);
-            return self.waited_for(work, node.ip_type, ran);
+            return self.start_video(work, &ibs);
         }
         let card = self.device.info();
         let writer = fence_ib::writer_for(node.ip_type, card.details.gfx_version.0)
@@ -1292,6 +1403,9 @@ impl Backend for AmdBackend {
 
     /// amdgpu's CS call is the doorbell, and it can fail.
     fn ring_doorbell(&mut self, _queue: u32, doorbell: u64) -> Result<Doorbell, BackendError> {
+        if let Some(run) = self.prepared_video.remove(&doorbell) {
+            return self.ring_video(doorbell, run);
+        }
         let Some(run) = self.prepared.remove(&doorbell) else {
             return Err(BackendError::new("no run was prepared for this doorbell"));
         };
@@ -1335,9 +1449,26 @@ impl Backend for AmdBackend {
                 space.vm.drop_fence_writer(run.slot);
             }
         }
+        let unsent: Vec<u64> = self
+            .prepared_video
+            .iter()
+            .filter(|(_, run)| run.fence.queue == queue)
+            .map(|(&doorbell, _)| doorbell)
+            .collect();
+        for doorbell in unsent {
+            if let Some(run) = self.prepared_video.remove(&doorbell)
+                && let Some(space) = self.spaces.get_mut(&run.space)
+            {
+                space.vm.drop_video_slot(run.slot);
+            }
+        }
     }
 
+    /// Video runs are looked at every time, as their fences are the host's to write and a guest
+    /// waits on them frame by frame. Runs on the other engines write their own fences, and are
+    /// looked at now and then for ones the kernel ended early.
     fn poll_work(&mut self, host: &mut dyn HostServices, now: Instant) {
+        self.write_video_fences(host, now);
         if self.looked_at_runs.is_some_and(|last| now.saturating_duration_since(last) < LOOK_AT_RUNS_EVERY) {
             return;
         }
@@ -1459,6 +1590,28 @@ mod tests {
     }
 
     #[test]
+    fn the_host_writes_the_fence_of_each_retired_video_run_and_leaves_one_already_past() {
+        use video_runs::Retired;
+        const FIRST: u64 = 0x1000;
+        const PAST: u64 = 0x2000;
+        let mut host = Fences::default();
+        host.0.insert(FIRST, 2);
+        host.0.insert(PAST, 9);
+        let took = Duration::from_micros(1900);
+        let retired = [
+            Retired { queue: 1, fence: Some(GuestFence { queue: 1, address: FIRST, value: 3 }), took },
+            // The core gave up on this one and wrote a later value.
+            Retired { queue: 2, fence: Some(GuestFence { queue: 2, address: PAST, value: 8 }), took },
+            // The daemon's own closing, which has no fence.
+            Retired { queue: 1, fence: None, took },
+        ];
+        write_retired_video_fences(&mut host, &retired);
+        assert_eq!(host.0[&FIRST], 3);
+        assert_eq!(host.0[&PAST], 9);
+        assert_eq!(host.0.len(), 2, "nothing else was written");
+    }
+
+    #[test]
     fn a_fence_already_past_a_lost_run_is_left_alone() {
         const FENCE: u64 = 0x1000;
         let mut host = Fences::default();
@@ -1543,17 +1696,6 @@ mod tests {
             failed(&[Ib { address: 0x1000, bytes: long }], &mut copied),
             "its commands at 0x1000 for 0x10004 bytes are more than the daemon's buffer holds"
         );
-    }
-
-    #[test]
-    fn only_a_video_run_that_was_sent_counts_as_work_the_engine_had() {
-        let fault = fault::Fault { address: 0x3000, status: 1 };
-        for sent in [Ok(Ran::Retired), Ok(Ran::Hung), Ok(Ran::Faulted(fault))] {
-            assert!(reached_the_engine(&sent), "{sent:?}");
-        }
-        // amdgpu kept saying try again, or the commands couldn't be copied or submitted.
-        assert!(!reached_the_engine(&Ok(Ran::Refused)));
-        assert!(!reached_the_engine(&Err(io::Error::other("submitting"))));
     }
 
     #[test]
