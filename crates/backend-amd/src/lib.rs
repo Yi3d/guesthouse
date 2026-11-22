@@ -129,6 +129,8 @@ pub struct AmdBackend {
     prepared: HashMap<u64, PreparedRun>,
     /// Video runs the core has had prepared and not yet let go, by the doorbell that sends each.
     prepared_video: HashMap<u64, PreparedVideo>,
+    /// The guest processes' contexts on the video node.
+    video_contexts: video::Contexts,
     /// When the runs on the card were last looked at.
     looked_at_runs: Option<Instant>,
     /// Makes dma-bufs of guest memory, where this user may.
@@ -240,6 +242,7 @@ impl AmdBackend {
             ib_dump: None,
             video_commands: video_ib::Copied::default(),
             prepared_video: HashMap::new(),
+            video_contexts: video::Contexts::default(),
             video: None,
             video_close: None,
         })
@@ -310,6 +313,12 @@ impl AmdBackend {
             );
         }
         self.video_close = video_close::Watch::new(closes, rest);
+    }
+
+    /// Whether the guest's node `node` is the one with the card's video ring behind it.
+    fn is_video_node(&self, node: u32) -> bool {
+        let nodes = nodes(&self.device.info().engines);
+        nodes.get(node as usize).is_some_and(|node| node.ip_type == info::HW_IP_VCN_ENC)
     }
 
     /// Copies a run's command buffers, if that was asked for.
@@ -1313,13 +1322,39 @@ impl Backend for AmdBackend {
         context_taken(process, node, private)
     }
 
+    /// A process that ends sends no escape for the video sessions it had open, so they end here as
+    /// that escape would end them: in the books, and in the firmware for the sessions whose context
+    /// buffer is gone, if the daemon closes sessions. Its queues' sessions are closed as its queues
+    /// go.
     fn process_gone(&mut self, process: u32) {
+        self.video_contexts.process_gone(process);
         if let Some(video) = &mut self.video {
             video.process_gone(process);
         }
+        self.end_video_sessions_without_context();
+    }
+
+    fn context_made(&mut self, process: u32, node: u32) {
+        if self.is_video_node(node) {
+            self.video_contexts.made(process);
+        }
+    }
+
+    /// A process whose last context on the video node goes can't run any video work, so its video
+    /// sessions are over, and end as at [`Self::process_gone`]. A guest's driver sends no escape for
+    /// them when a program drops its device without ending them.
+    fn context_gone(&mut self, process: u32, node: u32) {
+        if !self.is_video_node(node) || !self.video_contexts.gone(process) {
+            return;
+        }
+        if let Some(video) = &mut self.video {
+            video.process_gone(process);
+        }
+        self.end_video_sessions_without_context();
     }
 
     fn all_processes_gone(&mut self) {
+        self.video_contexts.clear();
         if let Some(video) = &mut self.video {
             video.all_gone();
         }

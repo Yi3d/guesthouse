@@ -15,7 +15,8 @@
 //! sends the closing commands, shaped as Mesa's are, when the session is over: at the escape that
 //! ends a video session, for every session whose context buffer the guest has freed by then, as the
 //! escape comes after that and the daemon can't tell from it which session of the firmware's it
-//! is; and when the queue goes. The closing commands are sent like the guest's own video
+//! is; the same when a guest process ends or a context on the video node goes, as neither sends
+//! that escape; and when the queue goes. The closing commands are sent like the guest's own video
 //! work and not waited for. A session whose commands never named its context buffer is closed only
 //! when its queue goes, as the end of another's session would otherwise close it while it runs.
 //! The firmware reads the session's buffer to close it, so a session whose buffer is no longer
