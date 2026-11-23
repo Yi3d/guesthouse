@@ -55,7 +55,8 @@ impl Census {
     }
 }
 
-/// Sorts each space's buffers, by their handles on the first open, into kinds. `origins` is what
+/// Sorts each space's buffers, by their handles on the first open, into kinds. `lists` holds every
+/// space, as a buffer an idle space holds is still shared. `origins` is what
 /// the backend made or adopted; `daemon_reads` is what the daemon reads itself.
 pub fn sort(
     lists: &BTreeMap<SpaceId, Vec<GemHandle>>,
@@ -92,11 +93,19 @@ pub fn sort(
     sorted.collect()
 }
 
-/// Writes the line for each space.
+/// Writes the line for each space that ran.
 pub fn log(runs: &BTreeMap<SpaceId, u64>, sorted: &BTreeMap<SpaceId, Kinds>) {
+    for line in lines(runs, sorted) {
+        log::info!("{line}");
+    }
+}
+
+/// The line for each space that ran.
+fn lines(runs: &BTreeMap<SpaceId, u64>, sorted: &BTreeMap<SpaceId, Kinds>) -> Vec<String> {
+    let mut lines = Vec::new();
     for (space, kinds) in sorted {
         let Some(runs) = runs.get(space) else { continue };
-        log::info!(
+        lines.push(format!(
             "amd list space={} runs={runs} named={} made_here={} made_shared={} daemon_reads={} \
              guest_pages={} adopted={} own={}",
             space.0,
@@ -107,8 +116,9 @@ pub fn log(runs: &BTreeMap<SpaceId, u64>, sorted: &BTreeMap<SpaceId, Kinds>) {
             kinds.guest_pages,
             kinds.adopted,
             kinds.own
-        );
+        ));
     }
+    lines
 }
 
 #[cfg(test)]
@@ -158,5 +168,17 @@ mod tests {
             sorted[&SpaceId(2)],
             Kinds { named: 1, made_shared: 1, daemon_reads: 1, ..Kinds::default() }
         );
+    }
+
+    #[test]
+    fn a_space_that_ran_nothing_still_makes_a_buffer_shared_but_gets_no_line() {
+        let buffer = GemHandle(7);
+        let origins = HashMap::from([(buffer, Origin::Made)]);
+        let lists = BTreeMap::from([(SpaceId(1), vec![buffer]), (SpaceId(9), vec![buffer])]);
+        let sorted = sort(&lists, &origins, &HashSet::new());
+        assert_eq!(sorted[&SpaceId(1)].made_shared, 1);
+        assert_eq!(sorted[&SpaceId(1)].made_here, 0);
+        let runs = BTreeMap::from([(SpaceId(1), 3)]);
+        assert_eq!(lines(&runs, &sorted).len(), 1);
     }
 }

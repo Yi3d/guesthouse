@@ -369,8 +369,9 @@ impl AmdBackend {
 
     /// See [`list_census`].
     fn log_list_census(&self, runs: &std::collections::BTreeMap<SpaceId, u64>) {
-        let lists =
-            runs.keys().filter_map(|&space| Some((space, self.spaces.get(&space)?.vm.buffers()))).collect();
+        // Every space, idle ones and the daemon's own too, so a buffer any of them holds counts as
+        // shared. Only the spaces that ran get a line.
+        let lists = self.spaces.iter().map(|(&space, held)| (space, held.vm.buffers())).collect();
         let origins = self.memory.values().map(|bo| (bo.handle, bo.origin)).collect();
         let daemon_reads = self.cpu_views.keys().copied().collect();
         list_census::log(runs, &list_census::sort(&lists, &origins, &daemon_reads));
