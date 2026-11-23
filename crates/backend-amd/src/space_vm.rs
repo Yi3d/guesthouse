@@ -81,6 +81,11 @@ impl Books {
         self.taken_in.values().map(|&(handle, _)| handle).collect()
     }
 
+    /// Every buffer taken in, by its handle on the first open.
+    pub fn buffers(&self) -> Vec<GemHandle> {
+        self.taken_in.keys().copied().collect()
+    }
+
     /// Every mapping of `buffer` here.
     pub fn addresses_of(&self, buffer: GemHandle) -> Vec<u64> {
         let of_buffer = self.mappings.iter().filter(|(_, placed)| placed.buffer == buffer);
@@ -257,6 +262,11 @@ impl SpaceVm {
 
     /// The first command buffer not wholly mapped here. The card would fault reading it, and a fault
     /// costs every program on the card a reset.
+    /// Every buffer taken in here, by its handle on the first open.
+    pub fn buffers(&self) -> Vec<GemHandle> {
+        self.books.buffers()
+    }
+
     pub fn first_unmapped<'a>(&self, ibs: &'a [Ib]) -> Option<&'a Ib> {
         ibs.iter().find(|ib| !self.books.holds(ib.address, u64::from(ib.bytes)))
     }

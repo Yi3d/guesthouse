@@ -29,6 +29,7 @@ mod guest_dma;
 mod ib_dump;
 mod info;
 mod ioctl;
+mod list_census;
 mod memory;
 mod moves;
 mod nodes;
@@ -148,6 +149,8 @@ pub struct AmdBackend {
     udmabuf: Udmabuf,
     /// Copies of the last command buffers, when the daemon was asked for them.
     ib_dump: Option<ib_dump::Keeper>,
+    /// The runs each space sent, for the line on what their buffer lists hold.
+    list_census: list_census::Census,
     /// The copy of the video commands being run, kept for its room. See [`video_ib`].
     video_commands: video_ib::Copied,
     /// The books of the guest's video sessions, when it is offered the card's video engine.
@@ -256,6 +259,7 @@ impl AmdBackend {
             looked_at_runs: None,
             udmabuf: Udmabuf::open(),
             ib_dump: None,
+            list_census: list_census::Census::default(),
             video_commands: video_ib::Copied::default(),
             prepared_video: HashMap::new(),
             video_contexts: video::Contexts::default(),
@@ -363,8 +367,20 @@ impl AmdBackend {
         }
     }
 
-    /// Copies a run's command buffers, if that was asked for.
+    /// See [`list_census`].
+    fn log_list_census(&self, runs: &std::collections::BTreeMap<SpaceId, u64>) {
+        let lists =
+            runs.keys().filter_map(|&space| Some((space, self.spaces.get(&space)?.vm.buffers()))).collect();
+        let origins = self.memory.values().map(|bo| (bo.handle, bo.origin)).collect();
+        let daemon_reads = self.cpu_views.keys().copied().collect();
+        list_census::log(runs, &list_census::sort(&lists, &origins, &daemon_reads));
+    }
+
+    /// Counts the run for [`list_census`], and copies its command buffers if that was asked for.
     fn note_run(&mut self, work: &Work<'_>, engine: u32, listed: &[Ib]) {
+        if let Some(runs) = self.list_census.note(work.space, Instant::now()) {
+            self.log_list_census(&runs);
+        }
         if self.ib_dump.is_none() || !matches!(engine, HW_IP_GFX | info::HW_IP_COMPUTE) {
             return;
         }
