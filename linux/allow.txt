@@ -82,6 +82,7 @@ ctrl 0x301 NV0000_CTRL_CMD_GSYNC_GET_ATTACHED_IDS
 class 0xc661 HOPPER_USERMODE_A doorbell page
 class 0xc761 BLACKWELL_USERMODE_A doorbell page
 class 0xc461 TURING_USERMODE_A doorbell page, on the 20, 30 and 40 series. It takes no parameters
+class 0xc361 VOLTA_USERMODE_A usermode page. Vulkan asks for it on a 4060 Ti. It takes no parameters
 class 0x9096 GF100_ZBC_CLEAR
 memclass 0x40 NV01_MEMORY_LOCAL_USER
 memclass 0x3e NV01_MEMORY_SYSTEM
