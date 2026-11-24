@@ -27,6 +27,7 @@ Testers have run it on these too:
 | RX 6700 XT, RDNA2 | works |
 | RX 6700, RDNA2 | works |
 | RX 6600 XT, RDNA2 | works: OpenGL games and Edge on the GPU |
+| RX 5700 XT, RNDA1 | works |
 
 On an RX 9070 XT, Superposition at 720p Low went from 21,920 to 36,903 with the speed work in 0.5.2, and 4K Optimized reaches 72% of the same card on the host. [#118](https://github.com/ruxnhq/guesthouse/issues/118) has the rest.
 
@@ -42,7 +43,7 @@ A machine made for AMD stays on AMD. It can move to another AMD card while it's 
 
 ## Other AMD cards
 
-Other RX 6000, RX 7000 and RX 9000 cards should work like the ones above. RX 5000 cards use the same driver package as the RX 6000s, but nobody has tried one. Older cards like Polaris aren't handled.
+Other RX 5000, RX 6000, RX 7000 and RX 9000 cards should work like the ones above. Older cards like Polaris aren't handled.
 
 If you have an AMD card, open an issue to say how it went.
 
